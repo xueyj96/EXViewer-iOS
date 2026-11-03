@@ -2,8 +2,45 @@ import SwiftUI
 import UIKit
 
 enum FloatingChrome {
-    static let background = Color(uiColor: .systemBackground).opacity(0.70)
+    static let background = Color(uiColor: .systemBackground).opacity(0.64)
     static let controlFill = Color.primary.opacity(0.10)
+}
+
+struct AppControlSurface: ViewModifier {
+    var selected = false
+    var verticalInset: CGFloat = 0
+    @Environment(\.colorScheme) private var scheme
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        content
+            .background {
+                ZStack {
+                    shape.fill(FloatingChrome.background)
+                    if selected { shape.fill(Color.accentColor.opacity(0.08)) }
+                }.padding(.vertical, verticalInset)
+            }
+            .overlay {
+                shape.strokeBorder(selected ? Color.accentColor.opacity(0.30) : Color.primary.opacity(scheme == .dark ? 0.16 : 0.10), lineWidth: 0.5)
+                    .padding(.vertical, verticalInset)
+            }
+    }
+}
+
+extension View {
+    func appControlSurface(selected: Bool = false, verticalInset: CGFloat = 0) -> some View {
+        modifier(AppControlSurface(selected: selected, verticalInset: verticalInset))
+    }
+}
+
+struct TagChipButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.subheadline)
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .appControlSurface()
+            .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
+    }
 }
 
 /// Flat controls follow the same compact surface and hit area as CivitViewer.
@@ -28,7 +65,8 @@ struct AppActionButtonStyle: ButtonStyle {
             .foregroundStyle(ink)
             .padding(.horizontal, 12)
             .frame(minHeight: 32)
-            .background(fill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(ink.opacity(scheme == .dark ? 0.16 : 0.08), lineWidth: 0.5))
             .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())

@@ -25,7 +25,89 @@ final class LibraryFavoritesV37UITests: XCTestCase {
     private func scope(_ title: String, index: Int, app: XCUIApplication) {
         if app.buttons["library.scope.menu"].exists {
             app.buttons["library.scope.menu"].tap(); app.buttons["library.scope.\(index)"].tap()
-        } else { app.segmentedControls["library.scope"].buttons[title].tap() }
+        } else if app.buttons["library.scope.\(index)"].exists { app.buttons["library.scope.\(index)"].tap() }
+        else { app.segmentedControls["library.scope"].buttons[title].tap() }
+    }
+    private func openGroupFilter(_ extra: [String] = []) -> XCUIApplication {
+        let app = launch(["--qa-tags-offline"] + extra)
+        app.buttons["main.tab.library"].tap()
+        scope("站点收藏", index: 1, app: app)
+        XCTAssertTrue(app.buttons["favorites.group-filter"].waitForExistence(timeout: 8))
+        return app
+    }
+    private func chooseGroup(_ name: String, app: XCUIApplication) {
+        let filter = app.buttons["favorites.group-filter"]
+        filter.tap()
+        let choice = app.buttons[name].firstMatch
+        XCTAssertTrue(choice.waitForExistence(timeout: 4)); choice.tap()
+        expectation(for: NSPredicate(format: "value == %@", name), evaluatedWith: filter)
+        waitForExpectations(timeout: 4)
+    }
+    private func assertGroupFilterBounds(_ app: XCUIApplication) {
+        let filter = app.buttons["favorites.group-filter"]
+        XCTAssertTrue(filter.exists && filter.isHittable)
+        XCTAssertGreaterThanOrEqual(filter.frame.height + 0.000_001, 44)
+        XCTAssertGreaterThanOrEqual(filter.frame.width + 0.000_001, 44)
+        XCTAssertGreaterThanOrEqual(filter.frame.minX, app.frame.minX + 8)
+        XCTAssertLessThanOrEqual(filter.frame.maxX, app.frame.maxX - 8)
+        XCTAssertEqual(filter.label, "收藏分组")
+    }
+    private func rotateGroupLayout(_ orientation: UIDeviceOrientation, app: XCUIApplication) {
+        XCUIDevice.shared.orientation = orientation
+        var previous = CGRect.null
+        var stableSince = ProcessInfo.processInfo.systemUptime
+        expectation(for: NSPredicate { _, _ in
+            let frame = app.buttons["favorites.group-filter"].frame
+            let isLandscape = app.frame.width > app.frame.height
+            guard isLandscape == orientation.isLandscape, frame != .zero else { return false }
+            let now = ProcessInfo.processInfo.systemUptime
+            if frame != previous { previous = frame; stableSince = now; return false }
+            return now - stableSince >= 0.7
+        }, evaluatedWith: app)
+        waitForExpectations(timeout: 6)
+    }
+    func testGroupFilterOffersAllGroupsAndKeepsCompactLightLayoutInBothOrientations() {
+        let app = openGroupFilter()
+        let filter = app.buttons["favorites.group-filter"]
+        XCTAssertEqual(filter.value as? String, "全部分组")
+        filter.tap()
+        for name in ["全部分组", "常用", "稍后阅读"] + (3...10).map({ "分组 \($0)" }) {
+            XCTAssertTrue(app.buttons[name].firstMatch.exists, name)
+        }
+        app.buttons["常用"].firstMatch.tap()
+        XCTAssertEqual(filter.value as? String, "常用")
+        for name in ["稍后阅读", "分组 10", "全部分组"] { chooseGroup(name, app: app) }
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            rotateGroupLayout(orientation, app: app)
+            assertGroupFilterBounds(app)
+            XCTAssertLessThan(filter.frame.width, app.frame.width * 0.6)
+            capture(app, orientation == .portrait ? "favorite-group41.light-portrait" : "favorite-group41.light-landscape")
+        }
+    }
+    func testLongGroupNameRetainsFullAccessibilityValueInDarkLargeTypeAndBothOrientations() {
+        let name = "特别长的收藏分组名称用于核对截断后的完整辅助功能内容（第二册）"
+        let app = openGroupFilter(["--qa-favorite-sync-list", "--qa-favorite-group=" + name, "--qa-dark", "--qa-large-type"])
+        chooseGroup(name, app: app)
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            rotateGroupLayout(orientation, app: app)
+            assertGroupFilterBounds(app)
+            XCTAssertEqual(app.buttons["favorites.group-filter"].value as? String, name)
+            capture(app, orientation == .portrait ? "favorite-group41.dark-large-portrait" : "favorite-group41.dark-large-landscape")
+        }
+        chooseGroup("全部分组", app: app)
+    }
+    func testGroupFilterSelectionSurvivesEnteringAndExitingMultiSelection() {
+        let app = openGroupFilter()
+        chooseGroup("稍后阅读", app: app)
+        let card = app.buttons["favorites.gallery.1"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5)); card.press(forDuration: 0.8)
+        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["favorites.group-filter"].exists)
+        app.buttons["favorites.edit"].tap()
+        let filter = app.buttons["favorites.group-filter"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 5))
+        XCTAssertEqual(filter.value as? String, "稍后阅读")
+        assertGroupFilterBounds(app)
     }
     func testLoadingGroupIsCenteredInPortraitAndLandscapeWithoutChangingFormRowAlignment() {
         let app = launch(["--qa-favorite-loading"]); detail(app); app.buttons["detail.site-favorite"].tap()

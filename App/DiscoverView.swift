@@ -10,14 +10,13 @@ struct DiscoverView: View {
 
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
+    @Environment(\.dynamicTypeSize) private var typeSize
     @StateObject private var navigation: DiscoveryNavigation
     @State private var started = false
     @State private var composing = false
     @State private var composerStart: SearchComposerStart = .main
     @State private var historyShowing = false
-    @State private var saving = false
     @State private var error: String?
-    @State private var pendingEdit: SavedSearch?
     @State private var web: WebDestination?
 
     init(query: Binding<SearchQuery>, site: Binding<GallerySite>, editingSaved: Binding<UUID?>, runRevision: UUID? = nil,
@@ -29,6 +28,10 @@ struct DiscoverView: View {
 
     private var entry: DiscoveryEntry { navigation.current }
     private var hasActiveConditions: Bool { entry.query.hasSettings }
+    private var currentSaved: SavedSearch? {
+        library.snapshot.saved.first { $0.id == entry.savedID && $0.query == entry.query && $0.site == entry.site }
+    }
+    private var headerDetails: String { SearchPresentation.headerDetails(entry.query) }
 
     var body: some View {
         FloatingFeedLayout { headerHeight in
@@ -99,30 +102,13 @@ struct DiscoverView: View {
 
     private var discoverFloatingHeader: some View {
         FloatingHeaderPanel {
-            VStack(spacing: 6) {
+            VStack(spacing: 0) {
                 if let error { StatusMessage(title: error) }
                 searchEntryRow
-                if !library.snapshot.saved.isEmpty { savedSearchShortcuts }
-                if !entry.query.rules.isEmpty { ruleChips }
-                if !entry.query.hasSettings {
-                    Picker("浏览范围", selection: laneBinding) { Text("最新").tag(0); Text("热门").tag(1) }
-                        .pickerStyle(.segmented)
-                } else {
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("已执行：\(searchSummary(entry.query, site: entry.site))")
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Text("排序：\(entry.query.sortOrder.summary)")
-                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                .accessibilityIdentifier("discover.sort-status")
-                        }
-                        Spacer(minLength: 4)
-                        Button(action: prepareToSave) { Image(systemName: "bookmark").frame(minWidth: 44, minHeight: 44) }
-                            .accessibilityLabel("保存搜索组合")
-                            .accessibilityIdentifier("discover.save")
-                            .sheet(isPresented: $saving) { savedSearchSheet }
-                        Button("清除条件") { clearConditions() }.font(.caption).frame(minHeight: 44)
-                    }
+                HStack(spacing: 8) {
+                    if hasActiveConditions { conditionSummary }
+                    else { lanePicker }
+                    commonSearchControl
                 }
             }
         }
@@ -146,80 +132,67 @@ struct DiscoverView: View {
                     if navigation.canGoForward { Button("前进", systemImage: "chevron.right", action: goForward) }
                 }
             }
-            Button { pendingEdit = nil; composerStart = .main; composing = true } label: {
+            Button { composerStart = .main; composing = true } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "magnifyingglass").font(.body).foregroundStyle(.secondary)
-                    Text(hasActiveConditions ? searchSummary(entry.query, site: entry.site) : "关键词、标签与条件")
+                    Text(SearchPresentation.headerTitle(entry.query, savedName: currentSaved?.name))
                         .font(.subheadline).lineLimit(1).foregroundStyle(hasActiveConditions ? .primary : .secondary)
                     Spacer(minLength: 0)
                 }.padding(.leading, 12).padding(.trailing, 8).frame(minHeight: 44).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(hasActiveConditions ? "编辑搜索条件" : "搜索关键词、标签与条件")
+            .accessibilityValue(hasActiveConditions ? SearchPresentation.conditions(entry.query) : "")
             .accessibilityIdentifier("discover.search-entry")
             Divider().frame(height: 18)
-            Button { pendingEdit = nil; composerStart = .filters; composing = true } label: {
+            Button { composerStart = .filters; composing = true } label: {
                 Image(systemName: "slider.horizontal.3").font(.body)
                     .frame(width: 44, height: 44).contentShape(Rectangle())
                     .overlay(alignment: .topTrailing) {
                         if entry.query.count > 0 {
                             Text(String(entry.query.count)).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
-                                .padding(3).background(Color.accentColor, in: Circle()).offset(x: -2, y: 1)
+                                .padding(2).background(Color.accentColor, in: Circle()).offset(x: -3, y: 5)
                         }
                     }
             }.buttonStyle(.plain)
             .accessibilityLabel("搜索筛选条件")
+            .accessibilityValue("\(entry.query.count) 项条件")
             .accessibilityIdentifier("discover.filters")
             Button { historyShowing = true } label: {
                 Image(systemName: "clock").font(.body).frame(width: 44, height: 44).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel("阅读历史").accessibilityIdentifier("discover.history")
         }
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        .padding(.vertical, 2)
+        .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 5)
         .sheet(isPresented: $composing) { composerSheet }
     }
 
-    private var savedSearchShortcuts: some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(library.snapshot.saved) { saved in
-                        Button { edit(saved) } label: {
-                            Text(saved.name).font(.caption.weight(entry.savedID == saved.id ? .semibold : .regular))
-                                .lineLimit(1).padding(.horizontal, 11).padding(.vertical, 7)
-                                .background(entry.savedID == saved.id ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.035), in: Capsule())
-                                .frame(minHeight: 44)
-                        }
-                        .buttonStyle(.plain).accessibilityLabel("载入组合编辑：\(saved.name)")
-                            .accessibilityIdentifier("discover.preset.\(saved.id)")
-                    }
-                }
-            }
-            .accessibilityIdentifier("discover.saved-shortcuts")
-            Button { pendingEdit = nil; composerStart = .favorites; composing = true } label: { Text("全部").frame(minHeight: 44) }
-                .font(.caption.weight(.medium)).accessibilityIdentifier("discover.saved-menu")
+    private var commonSearchControl: some View {
+        Button { composerStart = .favorites; composing = true } label: {
+            Label("常用", systemImage: "bookmark").labelStyle(.titleAndIcon)
         }
-        .padding(.bottom, 2)
+        .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+        .accessibilityLabel("常用组合").accessibilityIdentifier("discover.saved-menu")
     }
 
-    private var ruleChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
-                ForEach(entry.query.rules) { rule in
-                    Button {
-                        var updated = entry.query
-                        updated.rules.removeAll { $0.id == rule.id }
-                        submit(updated, site: entry.site, lane: entry.lane, savedID: nil)
-                    } label: {
-                        Text("\(rule.match.name) · \(rule.tag.label)  ×")
-                            .font(.caption).padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(Color.accentColor.opacity(0.09), in: Capsule())
-                            .frame(minHeight: 44)
-                    }.buttonStyle(.plain)
-                }
-            }.padding(.bottom, 2)
+    private var conditionSummary: some View {
+        Button { composerStart = .filters; composing = true } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "line.3.horizontal.decrease").font(.subheadline).accessibilityHidden(true)
+                Text(headerDetails).font(.subheadline.weight(.medium)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).accessibilityHidden(true)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+            .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 6)
         }
-        .accessibilityIdentifier("discover.rule-chips")
+        .buttonStyle(.plain).foregroundStyle(.primary)
+        .accessibilityLabel("当前筛选条件").accessibilityValue(SearchPresentation.conditions(entry.query))
+        .accessibilityIdentifier("discover.condition-summary")
+    }
+
+    private var lanePicker: some View {
+        FeedScopePicker(selection: laneBinding, options: [.init(id: 0, title: "最新", symbol: "clock"), .init(id: 1, title: "热门", symbol: "flame")], identifier: "discover.lane")
     }
 
     private var laneBinding: Binding<Int> {
@@ -227,30 +200,16 @@ struct DiscoverView: View {
     }
 
     private var composerSheet: some View {
-        let saved = pendingEdit ?? entry.savedID.flatMap { id in library.snapshot.saved.first { $0.id == id } }
-        let initialQuery = saved?.query ?? entry.query
-        let initialSite = saved?.site ?? entry.site
-        let initialSavedID = saved?.id ?? entry.savedID
-        return DiscoveryComposerView(query: initialQuery, site: initialSite, savedID: initialSavedID,
-                                     startAt: composerStart, loadedPreset: saved) { query, site, savedID in
+        return DiscoveryComposerView(query: entry.query, site: entry.site, savedID: currentSaved?.id,
+                                     startAt: composerStart, loadedPreset: currentSaved) { query, site, savedID in
             _ = try navigation.submit(query: query, site: site, lane: entry.lane, savedID: savedID, session: session, qa: AppMode.qa)
             started = true
             publish(navigation.current)
             library.recordSearch(query: navigation.current.query, site: navigation.current.site)
             error = nil
-            pendingEdit = nil
         }
         .environmentObject(library)
-    }
-
-    private var savedSearchSheet: some View {
-        SaveSearchSheet(query: entry.query, site: entry.site, replacing: entry.savedID,
-                        initialName: entry.savedID.flatMap { id in library.snapshot.saved.first { $0.id == id }?.name } ?? "") { id in
-            do {
-                _ = try navigation.submit(query: entry.query, site: entry.site, lane: entry.lane, savedID: id, session: session, qa: AppMode.qa)
-                publish(navigation.current); error = nil
-            } catch { self.error = message(for: error) }
-        }
+        .dynamicTypeSize(typeSize)
     }
 
     private func startCurrent() {
@@ -270,10 +229,6 @@ struct DiscoverView: View {
         } catch { self.error = message(for: error) }
     }
 
-    private func edit(_ saved: SavedSearch) {
-        pendingEdit = saved; composerStart = .main; composing = true
-    }
-
     private func goBack() {
         guard navigation.back() else { return }
         resumeHistoryEntry()
@@ -290,10 +245,6 @@ struct DiscoverView: View {
         if entry.pager.interrupted { entry.pager.retry(session: session) }
     }
 
-    private func clearConditions() {
-        submit(SearchQuery(), site: entry.site, lane: entry.lane, savedID: nil)
-    }
-
     private func publish(_ value: DiscoveryEntry) {
         query = value.query; site = value.site; editingSaved = value.savedID
     }
@@ -302,20 +253,10 @@ struct DiscoverView: View {
         entry.pager.reset(url: entry.requestURL, session: session, qa: AppMode.qa)
     }
 
-    private func prepareToSave() {
-        guard hasActiveConditions else { return }
-        saving = true
-    }
-
     private func message(for error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? (error as? ViewerError)?.localizedDescription ?? "搜索条件无效"
     }
 
-    private func searchSummary(_ query: SearchQuery, site: GallerySite) -> String {
-        var filters = query
-        filters.sortOrder = .siteDefault
-        return SearchPresentation.summary(filters, site: site)
-    }
 }
 
 private struct DiscoveryHistoryGesture: ViewModifier {
@@ -365,10 +306,6 @@ private struct DiscoveryHistoryGesture: ViewModifier {
 }
 
 private struct DiscoveryFeedView: View {
-    private struct RestorationID: Equatable {
-        let topInset: CGFloat
-        let sortedOrderRevision: Int
-    }
     @ObservedObject var entry: DiscoveryEntry
     var topInset: CGFloat
     var onRefresh: () -> Void
@@ -391,7 +328,7 @@ private struct DiscoveryFeedView: View {
                 if pager.interrupted {
                     StatusMessage(title: "已暂停之前的加载，可重试继续。") { pager.retry(session: session) }
                 }
-                GalleryRows(galleries: entry.displayedItems, layout: .grid, sourceIdentity: entry.id.uuidString,
+                GalleryRows(galleries: pager.items, layout: .grid, sourceIdentity: entry.id.uuidString,
                             onNearEnd: { if !restoring && isCurrent() && pager.failure == nil && !pager.interrupted { pager.more(session: session, prefetch: true) } },
                             viewport: .init(space: entry.id.uuidString, height: viewport.size.height, topOcclusion: topInset),
                             onVisibleAnchor: { if !restoring && isCurrent() { entry.updateVisibleAnchor($0) } })
@@ -407,12 +344,12 @@ private struct DiscoveryFeedView: View {
         .accessibilityIdentifier("discover.feed")
         .refreshable(action: onRefresh)
         .contentMargins(.top, topInset, for: .scrollIndicators)
-        .task(id: RestorationID(topInset: topInset, sortedOrderRevision: entry.sortedOrderRevision)) {
+        .task(id: topInset) {
             restoring = true
             // A new feed must finish its initial placement before viewport
-            // callbacks can save anchors or request another batch. A locally
-            // sorted append restores the visible card as earlier results move.
-            let anchor = entry.scrollAnchor ?? entry.displayedItems.first?.id
+            // callbacks can save anchors or request another batch. Appends keep
+            // the server's existing order and do not restart this restoration.
+            let anchor = entry.scrollAnchor ?? pager.items.first?.id
             await Task.yield()
             guard !Task.isCancelled, isCurrent() else { return }
             if let anchor {

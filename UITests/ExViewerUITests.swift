@@ -258,22 +258,81 @@ final class ExViewerUITests: XCTestCase {
         capture(app, "Landscape and portrait covers retain natural aspect ratios")
     }
     func testComposerCancellationAndCompactCategoryGrid() {
-        let app = launch()
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--qa", "--qa-search-sort", "--qa-tags-offline"]
+        app.launch()
         XCTAssertFalse(app.staticTexts["保存的组合会显示在这里"].exists)
         let input = openComposer(app); input.tap(); input.typeText("Cancelled draft")
+        app.buttons["compose.filters"].tap()
         let first = app.buttons["compose.category.2"], second = app.buttons["compose.category.4"]
-        for _ in 0..<5 { if first.isHittable && second.isHittable { break }; app.swipeUp() }
+        let all = app.buttons["compose.categories.select-all"], invert = app.buttons["compose.categories.invert"]
+        let count = app.staticTexts["compose.categories.count"]
+        for _ in 0..<5 { if first.isHittable && invert.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(first.isHittable); XCTAssertTrue(second.isHittable)
         XCTAssertLessThan(abs(first.frame.minY - second.frame.minY), 4)
         XCTAssertGreaterThan(abs(first.frame.minX - second.frame.minX), 30)
-        first.tap(); capture(app, "Compact category chips in real search composer")
+        XCTAssertEqual(first.frame.width, second.frame.width, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(first.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(all.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(invert.frame.height, 44)
+        XCTAssertEqual(count.label, "已选 10/10"); XCTAssertFalse(all.isEnabled)
+        first.tap(); second.tap()
+        XCTAssertEqual(count.label, "已选 8/10")
+        invert.tap()
+        XCTAssertEqual(count.label, "已选 2/10")
+        XCTAssertEqual(first.value as? String, "已选择"); XCTAssertEqual(second.value as? String, "已选择")
+        XCTAssertEqual(app.buttons["compose.category.8"].value as? String, "未选择")
+        if first.frame.minY > app.frame.height * 0.5 { app.swipeUp() }
+        capture(app, "Category filters aligned with select all and invert")
+        invert.tap()
+        XCTAssertEqual(count.label, "已选 8/10")
+        all.tap()
+        XCTAssertEqual(count.label, "已选 10/10")
+        invert.tap()
+        XCTAssertEqual(count.label, "已选 0/10")
+        XCTAssertTrue(app.staticTexts["compose.categories.empty"].exists)
+        XCTAssertFalse(app.buttons["compose.apply"].isEnabled)
+        invert.tap()
+        XCTAssertEqual(count.label, "已选 10/10")
+        XCTAssertTrue(app.buttons["compose.apply"].isEnabled)
+        first.tap()
+        app.buttons["BackButton"].tap()
         app.buttons["compose.cancel"].tap()
         XCTAssertFalse(app.buttons["discover.back"].exists)
         let reopened = openComposer(app)
         XCTAssertFalse((reopened.value as? String ?? "").contains("Cancelled draft"))
+        app.buttons["compose.filters"].tap()
         for _ in 0..<5 { if first.isHittable { break }; app.swipeUp() }
         XCTAssertEqual(first.value as? String, "已选择")
-        app.buttons["compose.cancel"].tap()
+        first.tap(); second.tap(); invert.tap()
+        app.buttons["compose.apply"].tap()
+        XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 5))
+        _ = openComposer(app); app.buttons["compose.filters"].tap()
+        for _ in 0..<5 { if first.isHittable { break }; app.swipeUp() }
+        XCTAssertEqual(count.label, "已选 2/10")
+        XCTAssertEqual(first.value as? String, "已选择"); XCTAssertEqual(second.value as? String, "已选择")
+        XCTAssertEqual(app.buttons["compose.category.8"].value as? String, "未选择")
+    }
+    func testCategoryControlsAndLabelsAdaptToDarkLargeType() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--qa", "--qa-search-sort", "--qa-tags-offline", "--qa-dark", "--qa-large-type"]
+        app.launch()
+        _ = openComposer(app); app.buttons["compose.filters"].tap()
+        let first = app.buttons["compose.category.2"], second = app.buttons["compose.category.4"]
+        let invert = app.buttons["compose.categories.invert"], all = app.buttons["compose.categories.select-all"]
+        for _ in 0..<8 { if first.isHittable && invert.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(first.isHittable); XCTAssertTrue(invert.isHittable); XCTAssertTrue(all.exists)
+        XCTAssertEqual(first.frame.minX, second.frame.minX, accuracy: 1)
+        XCTAssertGreaterThan(second.frame.minY, first.frame.minY)
+        XCTAssertGreaterThanOrEqual(first.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(invert.frame.height, 44)
+        XCTAssertEqual(first.label, "Doujinshi"); XCTAssertEqual(second.label, "Manga")
+        first.tap(); invert.tap()
+        XCTAssertEqual(app.staticTexts["compose.categories.count"].label, "已选 1/10")
+        XCTAssertEqual(first.value as? String, "已选择"); XCTAssertEqual(second.value as? String, "未选择")
+        capture(app, "Category filters in dark mode with accessibility text size")
     }
     func testMultipleSearchesReturnToPagedBrowsingAndScrollAnchor() {
         let app = XCUIApplication(); app.launchArguments = ["--qa", "--qa-feed-paging", "--qa-reset-reader-preferences"]; app.launch()

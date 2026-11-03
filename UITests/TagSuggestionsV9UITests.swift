@@ -15,6 +15,7 @@ final class TagSuggestionsV9UITests: XCTestCase {
     private func openTagEntry(_ app: XCUIApplication) -> XCUIElement {
         app.buttons["discover.search-entry"].tap()
         XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        app.buttons["compose.filters"].tap()
         let addTag = app.buttons["compose.add-tag"]
         for _ in 0..<5 { if addTag.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(addTag.isHittable)
@@ -52,15 +53,18 @@ final class TagSuggestionsV9UITests: XCTestCase {
         expectation(for: NSPredicate { _, _ in (candidate.value as? String ?? "").contains("QA 样例") }, evaluatedWith: candidate)
         waitForExpectations(timeout: 8)
         candidate.tap()
-        let pendingStatus = app.staticTexts["tag.pending.status.language:english"]
-        XCTAssertTrue(pendingStatus.waitForExistence(timeout: 5))
-        XCTAssertTrue(pendingStatus.label.contains("QA 样例，非真实站点匹配"))
+        let pendingRow = app.descendants(matching: .any)["tag.pending.row.language:english"].firstMatch
+        XCTAssertTrue(pendingRow.waitForExistence(timeout: 5))
+        XCTAssertTrue((pendingRow.value as? String)?.contains("QA 样例，非真实站点匹配") == true)
+        XCTAssertFalse(app.staticTexts["tag.pending.status.language:english"].exists)
         XCTAssertEqual(app.buttons["tag.confirm"].label, "完成，1 个标签")
         app.buttons["tag.confirm"].tap()
 
         XCTAssertTrue(app.staticTexts["language:english"].waitForExistence(timeout: 5))
         app.buttons["compose.apply"].tap()
-        XCTAssertTrue(app.buttons["包含 · language:english  ×"].waitForExistence(timeout: 8))
+        let summary = app.buttons["discover.condition-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 8))
+        XCTAssertTrue((summary.value as? String)?.contains("language:english") == true)
     }
 
     func testUnknownFreeTextRequiresExplicitUnverifiedAction() {
@@ -111,9 +115,13 @@ final class TagSuggestionsV9UITests: XCTestCase {
         XCTAssertTrue(candidate.isHittable)
         XCTAssertGreaterThanOrEqual(candidate.frame.height, 44)
         XCTAssertTrue(candidate.label.contains("身为男高中生") || candidate.label.contains("男高中生兼当红"))
+        let selectedID = String(candidate.identifier.dropFirst("tag.suggestion.".count))
         candidate.tap()
-        let pendingStatus = app.staticTexts["tag.pending.status.parody:danshi koukousei de urekko light novel"]
-        XCTAssertTrue(pendingStatus.waitForExistence(timeout: 5))
-        XCTAssertTrue(pendingStatus.label.contains("词库匹配，站点未验证"))
+        let pendingRow = app.descendants(matching: .any)["tag.pending.row.\(selectedID)"].firstMatch
+        for _ in 0..<8 { if pendingRow.exists && pendingRow.isHittable { break }; app.swipeDown() }
+        XCTAssertTrue(pendingRow.exists && pendingRow.isHittable)
+        XCTAssertTrue((pendingRow.value as? String)?.contains("本地词库") == true)
+        XCTAssertTrue((pendingRow.value as? String)?.contains("站点未验证") == true)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "tags47.editor.accessibility"; shot.lifetime = .keepAlways; add(shot)
     }
 }

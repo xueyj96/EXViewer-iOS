@@ -43,9 +43,7 @@ struct RecentSearchRecord: Codable, Identifiable {
         canonical.rules.sort {
             $0.id == $1.id ? $0.match.rawValue < $1.match.rawValue : $0.id < $1.id
         }
-        let url = try canonical.url(site: site).absoluteString
-        // Keep the site's URL/cache identity independent of local presentation.
-        return canonical.sortOrder == .siteDefault ? url : url + "|sort=" + canonical.sortOrder.rawValue
+        return try canonical.url(site: site).absoluteString
     }
 }
 
@@ -122,7 +120,8 @@ private struct RecentSearchFile: Codable {
             guard file.version == 1, file.entries.count <= Self.searchHistoryLimit,
                   Set(file.entries.map(\.id)).count == file.entries.count else { throw ViewerError.storage }
             for entry in file.entries {
-                guard entry.query.hasSettings else { throw ViewerError.storage }
+                // A legacy record may have contained only the retired local
+                // sort setting. It still opens the unfiltered gallery feed.
                 _ = try entry.query.url(site: entry.site)
             }
             recentSearches = file.entries
@@ -170,7 +169,8 @@ private struct RecentSearchFile: Codable {
             return true
         } catch { self.error = "保存失败，当前资料保留。请检查本机空间。"; return false }
     }
-    @discardableResult func saveSearch(name: String, site: GallerySite, query: SearchQuery, replacing: UUID? = nil) -> UUID? {
+    @discardableResult func saveSearch(name: String, site: GallerySite, query: SearchQuery, replacing: UUID? = nil, expectedOwner: String? = nil) -> UUID? {
+        guard expectedOwner == nil || expectedOwner == owner else { return nil }
         let name = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         guard !name.isEmpty, replacing != nil || snapshot.saved.count < 200 else { return nil }
         if let replacing, !snapshot.saved.contains(where: { $0.id == replacing }) { return nil }
@@ -181,6 +181,17 @@ private struct RecentSearchFile: Codable {
             else { value.saved.append(record) }
         }
         return success ? record.id : nil
+    }
+    @discardableResult func moveSavedSearches(from offsets: IndexSet, to destination: Int, expectedOwner: String) -> Bool {
+        guard expectedOwner == owner, destination >= 0, destination <= snapshot.saved.count,
+              offsets.allSatisfy({ snapshot.saved.indices.contains($0) }) else { return false }
+        guard !offsets.isEmpty else { return true }
+        let moving = offsets.map { snapshot.saved[$0] }
+        var reordered = snapshot.saved.enumerated().filter { !offsets.contains($0.offset) }.map(\.element)
+        let insertion = destination - offsets.filter { $0 < destination }.count
+        reordered.insert(contentsOf: moving, at: insertion)
+        guard reordered.map(\.id) != snapshot.saved.map(\.id) else { return true }
+        return commit { $0.saved = reordered }
     }
     func deleteSearch(_ id: UUID) { commit { $0.saved.removeAll { $0.id == id } } }
     func pin(_ tag: GalleryTag) { commit { value in if !value.favoriteTags.contains(where: { $0.id == tag.id }) { value.favoriteTags.append(tag) } } }
@@ -233,6 +244,38 @@ private struct RecentSearchFile: Codable {
 
 
 enum SearchPresentation {
+    private static let headerCatalog = TagTranslationCatalog.load()
+
+    static func headerTitle(_ query: SearchQuery, savedName: String?) -> String {
+        if !query.hasSettings { return "关键词、标签与条件" }
+        if !query.text.isEmpty { return query.text }
+        if let savedName { return savedName }
+        if !query.artist.isEmpty { return "作者 \(query.artist)" }
+        return "筛选结果"
+    }
+
+    static func headerDetails(_ query: SearchQuery) -> String {
+        var values: [String] = []
+        if !query.text.isEmpty && query.titleOnly { values.append("仅标题") }
+        if !query.text.isEmpty && query.matchPhrase { values.append("完整短语") }
+        if !query.artist.isEmpty { values.append("作者 \(query.artist)") }
+        for rule in query.rules {
+            let translated = headerCatalog?.translation(for: rule.tag)
+            let name = translated.flatMap { $0.isEmpty ? nil : $0 } ?? rule.tag.label
+            values.append(rule.match == .all ? name : "\(rule.match.name) \(name)")
+        }
+        if !query.excludedCategories.isEmpty { values.append("\(GalleryCategory.all.count - query.excludedCategories.count) 类画廊") }
+        if let rating = query.minRating { values.append("\(rating) 星起") }
+        if query.minPages != nil || query.maxPages != nil {
+            values.append("\(query.minPages.map(String.init) ?? "0") 至 \(query.maxPages.map(String.init) ?? "不限") 页")
+        }
+        if !query.uploader.isEmpty { values.append("上传者 \(query.uploader)") }
+        if query.requireTorrent { values.append("含 torrent") }
+        guard !values.isEmpty else { return query.text.isEmpty ? "全部画廊" : "关键词搜索" }
+        let summary = values.prefix(2).joined(separator: " · ")
+        return values.count > 2 ? "\(summary) +\(values.count - 2)" : summary
+    }
+
     static func summary(_ query: SearchQuery, site: GallerySite) -> String {
         let scope = site == .ex ? "EX" : "EH"
         let detail = conditions(query)
@@ -262,7 +305,6 @@ enum SearchPresentation {
         if query.minPages != nil || query.maxPages != nil { values.append("\(query.minPages.map { String($0) } ?? "0")–\(query.maxPages.map { String($0) } ?? "不限")页") }
         if !query.uploader.isEmpty { values.append("上传者 \(query.uploader)") }
         if query.requireTorrent { values.append("torrent") }
-        if query.sortOrder != .siteDefault { values.append(query.sortOrder.summary) }
         return values.joined(separator: " · ")
     }
 }

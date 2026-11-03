@@ -18,7 +18,8 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(fields["f_cats"], "33")
         XCTAssertEqual(fields["f_srdd"], "4")
         XCTAssertEqual(fields["f_spf"], "20")
-        XCTAssertEqual(fields["f_storr"], "on")
+        XCTAssertEqual(fields["f_sto"], "on")
+        XCTAssertNil(fields["f_storr"])
     }
     func testQueryRejectsServerLimitsAndInjection() throws {
         var query = SearchQuery()

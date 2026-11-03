@@ -10,9 +10,6 @@ import ExViewerCore
     let savedID: UUID?
     let requestURL: URL
     let pager: GalleryPager
-    @Published private(set) var displayedItems: [Gallery] = []
-    private(set) var sortedOrderRevision = 0
-    private var itemsObservation: AnyCancellable?
     @Published var scrollAnchor: String?
     private(set) var didStart = false
 
@@ -24,15 +21,6 @@ import ExViewerCore
         self.requestURL = requestURL
         self.scrollAnchor = scrollAnchor
         self.pager = pager ?? GalleryPager()
-        // Sort only when a loaded batch changes, not on scrolling or cover updates.
-        itemsObservation = self.pager.$items.sink { [weak self] items in
-            guard let self else { return }
-            let ordered = query.sortOrder.ordered(items)
-            if query.sortOrder != .siteDefault, ordered.map(\.id) != displayedItems.map(\.id) {
-                sortedOrderRevision += 1
-            }
-            displayedItems = ordered
-        }
     }
 
     func markStarted() { didStart = true }
@@ -77,7 +65,7 @@ import ExViewerCore
             }
             let old = current
             let replacement = DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url,
-                                             scrollAnchor: query.sortOrder == old.query.sortOrder ? old.scrollAnchor : nil,
+                                             scrollAnchor: old.scrollAnchor,
                                              pager: old.pager)
             if old.didStart { replacement.markStarted() }
             current = replacement

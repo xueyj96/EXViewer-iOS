@@ -51,11 +51,61 @@ struct FloatingHeaderPanel<Content: View>: View {
 
     var body: some View {
         content
-            .padding(12)
-            .background(FloatingChrome.background, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
-            .padding(.horizontal, 12)
-            .padding(.top, 6)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 4)
+    }
+}
+
+struct FeedHeaderButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.subheadline)
+            .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+            .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
+            .padding(.horizontal, 8)
+            .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 6)
+    }
+}
+
+struct FeedScopeOption: Identifiable {
+    let id: Int
+    let title: String
+    let symbol: String
+}
+
+struct FeedScopePicker: View {
+    @Binding var selection: Int
+    let options: [FeedScopeOption]
+    let identifier: String
+    @Environment(\.dynamicTypeSize) private var typeSize
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options) { option in
+                Button { selection = option.id } label: {
+                    Label(option.title, systemImage: option.symbol).labelStyle(.titleAndIcon)
+                        .font(.footnote.weight(selection == option.id ? .semibold : .regular))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 5)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(selection == option.id ? Color.accentColor.opacity(0.12) : Color.clear)
+                                .padding(.vertical, typeSize.isAccessibilitySize ? 4 : 8)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(selection == option.id ? Color.accentColor : Color.primary)
+                .accessibilityLabel(option.title)
+                .accessibilityAddTraits(selection == option.id ? .isSelected : [])
+                .accessibilityIdentifier("\(identifier).\(option.id)")
+            }
+        }
+        .padding(.horizontal, 3).appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 6)
+        .accessibilityElement(children: .contain).accessibilityIdentifier(identifier)
     }
 }
 
@@ -93,10 +143,10 @@ struct CompactMainTabs<Content: View>: View {
         HStack(spacing: 0) {
             ForEach(destinations, id: \.id) { destination in
                 Button { selection = destination.id } label: {
-                    VStack(spacing: 3) {
+                    VStack(spacing: 2) {
                         Image(systemName: destination.symbol)
-                            .font(.system(size: 19, weight: .medium))
-                            .frame(height: 20)
+                            .font(.system(size: 17, weight: .medium))
+                            .frame(height: 18)
                         Text(destination.title)
                             .font(.caption2.weight(selection == destination.id ? .semibold : .regular))
                             .lineLimit(1)
@@ -116,10 +166,10 @@ struct CompactMainTabs<Content: View>: View {
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 2)
-        .background(FloatingChrome.background, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
-        .padding(.horizontal, 12)
+        .background(FloatingChrome.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .padding(.horizontal, 20)
+        .padding(.bottom, 4)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isTabBar)
         .accessibilityIdentifier("main.tabs.compact")

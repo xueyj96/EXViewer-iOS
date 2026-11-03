@@ -1212,7 +1212,9 @@ struct GalleryDetailView: View {
                                 Text(namespace.uppercased()).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
                                 TagWrapLayout(spacing: 7) {
                                     ForEach(current.tags.filter { $0.namespace == namespace }) { tag in
-                                        Button { onSearchTag(tag, current.ref.site) } label: { Text(tag.name).font(.subheadline).padding(.horizontal, 11).padding(.vertical, 8).background(Color(uiColor: .secondarySystemFill), in: Capsule()) }
+                                        Button { onSearchTag(tag, current.ref.site) } label: { Text(tag.name) }
+                                            .buttonStyle(TagChipButtonStyle())
+                                            .accessibilityLabel(tag.name).accessibilityIdentifier("detail.tag.\(tag.id)")
                                             .disabled(!allowsTagSearch)
                                             .contextMenu { Button("加入常用标签") { library.pin(tag) }; Button("屏蔽标签") { library.block(tag); lastBlocked = tag }; if library.blockedIDs.contains(tag.id) { Button("解除屏蔽") { library.unblock(tag) } } }
                                     }

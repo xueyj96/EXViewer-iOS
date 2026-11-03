@@ -52,8 +52,10 @@ enum FeedCacheQA {
         guard search else { throw URLError(.unsupportedURL) }
         let favorites = url.path == "/favorites.php"
         let lane = favorites ? "Favorites" : "Discover"
-        let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
-            .first(where: { $0.name == "qa-feed-page" })?.value == "2" ? 2 : 1
+        let pageValue = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { $0.name == "qa-feed-page" })?.value
+        let page = Int(pageValue ?? "1") ?? 1
+        let pageCount = arguments.contains("--qa-feed-sort-regression") ? 3 : 2
         let firstGID: Int64 = favorites ? 910_001 : 900_001
         let start = firstGID + Int64((page - 1) * 24)
         let rows = (0..<24).map { offset -> String in
@@ -65,11 +67,11 @@ enum FeedCacheQA {
         }.joined()
 
         let next: String
-        if page == 1 {
+        if page < pageCount {
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
             var items = components.queryItems ?? []
             items.removeAll { $0.name == "qa-feed-page" }
-            items.append(URLQueryItem(name: "qa-feed-page", value: "2"))
+            items.append(URLQueryItem(name: "qa-feed-page", value: String(page + 1)))
             components.queryItems = items
             next = "<a id=\"dnext\" href=\"\(components.url!.absoluteString)\">Next &gt;</a>"
         } else { next = "" }
@@ -86,8 +88,11 @@ enum FeedCacheQA {
             let lane = gid >= 910_000 ? "Favorites" : "Discover"
             let firstGID: Int64 = lane == "Favorites" ? 910_001 : 900_001
             let index = Int(gid - firstGID + 1)
-            return ["gid": gid, "title": "QA Feed \(lane) \(String(format: "%02d", index))",
-                    "category": "Manga", "filecount": "4", "rating": "4.5",
+            let sorting = arguments.contains("--qa-feed-sort-regression")
+            let page = (index - 1) / 24
+            return ["gid": gid, "title": "\(sorting ? ["Z", "M", "A"][min(page, 2)] : "QA") Feed \(lane) \(String(format: "%02d", index))",
+                    "category": "Manga", "filecount": sorting ? String(200 - index) : "4",
+                    "rating": sorting ? String(3.0 + Double(min(page, 2)) * 0.8 + Double(index % 3) * 0.05) : "4.5",
                     "tags": ["other:neutralonlytag"]]
         }
         guard let data = try? JSONSerialization.data(withJSONObject: ["gmetadata": entries]),

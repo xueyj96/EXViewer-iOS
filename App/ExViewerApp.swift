@@ -53,6 +53,11 @@ private enum BrowserPreferenceDefaults {
         }
         let session = SiteSession(qa: AppMode.qa), library = LibraryStore(qa: AppMode.qa)
         library.load(owner: session.owner)
+        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-saved-search-management") {
+            for saved in QASamples.savedSearches {
+                library.saveSearch(name: saved.name, site: saved.site, query: saved.query)
+            }
+        }
         if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-stored-bookmark-covers") {
             for gallery in QASamples.galleries.prefix(3) { library.bookmark(gallery) }
             library.remember(QASamples.galleries[0], page: 2)

@@ -2,8 +2,7 @@ import SwiftUI
 import ExViewerCore
 
 struct ReadingHistoryView: View {
-    var embedded = false
-    var topInset: CGFloat = 0
+    var libraryScope: Binding<Int>? = nil
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -17,12 +16,40 @@ struct ReadingHistoryView: View {
         }, order: order)
     }
     var body: some View {
+        FloatingFeedLayout { headerHeight in
+            historyList(topInset: headerHeight)
+        } header: {
+            if let libraryScope {
+                LibraryFloatingHeader(selection: libraryScope) { historyControls }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("reading-history.header.floating")
+            } else {
+                FloatingHeaderPanel { historyControls }
+            }
+        }
+        .navigationTitle("阅读历史").navigationBarTitleDisplayMode(.inline).appNavigationChrome()
+        .toolbar(libraryScope == nil ? .visible : .hidden, for: .navigationBar)
+        .toolbar {
+            if libraryScope == nil { AppToolbarItem(placement: .cancellationAction) {
+                Button("完成") { dismiss() }.accessibilityIdentifier("reading-history.close")
+            } }
+        }
+        .onAppear { order = preferences.order(for: .history) }
+        .onChange(of: library.owner) { _, _ in order = preferences.order(for: .history) }
+    }
+
+    private var historyControls: some View {
+        Group {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 0) { countLabel; sortMenu }
+            } else {
+                HStack(spacing: 12) { countLabel; Spacer(minLength: 8); sortMenu }
+            }
+        }
+    }
+
+    private func historyList(topInset: CGFloat) -> some View {
         List {
-            HStack {
-                Text("\(records.count) 条记录").font(.subheadline).foregroundStyle(.secondary)
-                Spacer()
-                sortMenu
-            }.listRowSeparator(.hidden)
             if let error = library.error { Text(error).font(.subheadline).foregroundStyle(.secondary) }
             if records.isEmpty {
                 ContentUnavailableView("暂无阅读记录", systemImage: "clock", description: Text(library.snapshot.history.isEmpty
@@ -55,16 +82,12 @@ struct ReadingHistoryView: View {
         }
         .listStyle(.plain)
         .contentMargins(.top, topInset, for: .scrollContent)
-        .navigationTitle("阅读历史").navigationBarTitleDisplayMode(.inline).appNavigationChrome()
-        .toolbar(embedded ? .hidden : .visible, for: .navigationBar)
         .accessibilityIdentifier("reading-history")
-        .toolbar {
-            if !embedded { AppToolbarItem(placement: .cancellationAction) {
-                Button("完成") { dismiss() }.accessibilityIdentifier("reading-history.close")
-            } }
-        }
-        .onAppear { order = preferences.order(for: .history) }
-        .onChange(of: library.owner) { _, _ in order = preferences.order(for: .history) }
+    }
+
+    private var countLabel: some View {
+        LibraryHeaderCount(title: "\(records.count) 条记录", symbol: "clock")
+            .accessibilityIdentifier("reading-history.count")
     }
 
     private var sortMenu: some View {
@@ -75,10 +98,9 @@ struct ReadingHistoryView: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) { Text(order.title); Image(systemName: "arrow.up.arrow.down") }
-                .font(.subheadline).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            LibrarySortMenuLabel(title: order.title)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FeedHeaderButtonStyle())
         .accessibilityLabel("阅读历史排序").accessibilityValue(order.title).accessibilityIdentifier("reading-history.sort")
     }
 }

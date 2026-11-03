@@ -5,8 +5,13 @@ final class LibrarySortingV28UITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--qa"] + (seed ? ["--qa-library-sort"] : []) + (reset ? ["--qa-reset-library-sort"] : []) + extra
         app.launch(); XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 12)); app.buttons["main.tab.library"].tap()
-        let picker = app.segmentedControls["library.scope"]; XCTAssertTrue(picker.waitForExistence(timeout: 5)); picker.buttons["本机内容"].tap()
+        scope(app, 3)
         XCTAssertTrue(app.descendants(matching: .any)["library.sort.downloads"].firstMatch.waitForExistence(timeout: 5)); return app
+    }
+    private func scope(_ app: XCUIApplication, _ index: Int) {
+        if app.buttons["library.scope.menu"].exists { app.buttons["library.scope.menu"].tap() }
+        let option = app.buttons["library.scope.\(index)"]
+        XCTAssertTrue(option.waitForExistence(timeout: 5)); option.tap()
     }
     private func openHistory(_ app: XCUIApplication) {
         app.buttons["main.tab.discover"].tap()
@@ -14,6 +19,7 @@ final class LibrarySortingV28UITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["阅读历史"].waitForExistence(timeout: 5))
     }
     private func choose(_ app: XCUIApplication, section: String, title: String, up: Bool = true) {
+        if section != "history" { scope(app, section == "downloads" ? 3 : 0) }
         let menu = app.descendants(matching: .any)[section == "history" ? "reading-history.sort" : "library.sort.\(section)"].firstMatch
         for _ in 0..<12 { if menu.exists && menu.isHittable { break }; if up { app.swipeUp() } else { app.swipeDown() } }
         XCTAssertTrue(menu.exists && menu.isHittable); menu.tap()
@@ -64,16 +70,30 @@ final class LibrarySortingV28UITests: XCTestCase {
     func testEmptyLocalLibraryAndLargeTypeMenusKeepClearLabelsAndHitAreas() {
         let empty = openLibrary(seed: false)
         choose(empty, section: "downloads", title: "最近阅读")
+        let scopeY = empty.buttons["library.scope.0"].frame.minY
+        let actionsY = empty.buttons["library.sort.downloads"].frame.minY
+        var shot: XCTAttachment
+        for (index, action, name) in [(0, "library.sort.bookmarks", "read-later"), (1, "favorites.group-filter", "favorites"), (2, "reading-history.sort", "history"), (3, "library.sort.downloads", "downloads")] {
+            scope(empty, index)
+            let control = empty.buttons[action]
+            XCTAssertTrue(control.waitForExistence(timeout: 5))
+            XCTAssertEqual(empty.buttons["library.scope.0"].frame.minY, scopeY, accuracy: 1)
+            XCTAssertEqual(control.frame.minY, actionsY, accuracy: 1)
+            shot = XCTAttachment(screenshot: empty.screenshot()); shot.name = "library47.\(name).light"; shot.lifetime = .keepAlways; add(shot)
+        }
         choose(empty, section: "bookmarks", title: "标题")
         openHistory(empty)
         XCTAssertTrue(empty.staticTexts["暂无阅读记录"].waitForExistence(timeout: 5))
         choose(empty, section: "history", title: "标题")
         empty.terminate()
-        let large = openLibrary(extra: ["--qa-dark", "--qa-large-type"]); openHistory(large)
+        let large = openLibrary(extra: ["--qa-dark", "--qa-large-type"])
+        choose(large, section: "downloads", title: "最近阅读")
+        shot = XCTAttachment(screenshot: large.screenshot()); shot.name = "library47.downloads.dark-large"; shot.lifetime = .keepAlways; add(shot)
+        openHistory(large)
         let menu = large.descendants(matching: .any)["reading-history.sort"].firstMatch
         XCTAssertGreaterThanOrEqual(menu.frame.width, 44); XCTAssertGreaterThanOrEqual(menu.frame.height, 44)
         choose(large, section: "history", title: "最早阅读")
-        let shot = XCTAttachment(screenshot: large.screenshot()); shot.name = "history.dark-large"; shot.lifetime = .keepAlways; add(shot)
+        shot = XCTAttachment(screenshot: large.screenshot()); shot.name = "library47.history.dark-large"; shot.lifetime = .keepAlways; add(shot)
     }
     func testFavoriteSelectionHasExplicitExitAndPlainTapKeepsBrowsing() {
         continueAfterFailure = false

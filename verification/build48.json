@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "48",
+  "checked_at_utc": "2026-11-03T10:33:46.616364+00:00",
+  "runtime_source_sha256": "0d489dd3202ef9fc72d76c4868c05b2354d27627feb6863ae247d684c2bfeafa",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "core": {
+      "passed": 63,
+      "failed": 0,
+      "scope": "Full ExViewerCore package suite, rerun before publication"
+    },
+    "native": {
+      "passed": 24,
+      "failed": 0,
+      "scope": "SearchRequestContractTests, GalleryPagerTests and DiscoveryNavigationTests, rerun in a temporary iOS27.0 simulator"
+    },
+    "UI": {
+      "latest_unique_passed": 3,
+      "unresolved_failures": 0,
+      "scope": "Four library scope positions and outer frame, Add/Common tag behavior, detail-tag search actions; latest applicable result per case",
+      "prior_failed_selector": "Resolved by querying the actual Button accessibility label; application runtime unchanged"
+    }
+  },
+  "phone_install": {
+    "version": "0.1.0",
+    "build": "48",
+    "installation_and_independent_version_query": "VERIFIED",
+    "UI_acceptance": "NOT_EXERCISED_BY_AUTOMATION"
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "UI tests use isolated neutral fixtures; real account playback, network performance and financial actions are not accepted by these tests.",
+    "Historical UI tests can describe superseded interactions; use selectors appropriate to the current behavior.",
+    "Live global rating ordering is not implemented; online results keep site order."
+  ]
+}
