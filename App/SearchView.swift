@@ -369,6 +369,7 @@ struct DiscoveryComposerView: View {
     @State private var failure: String?
     @State private var favorite: FavoriteSearchDraft?
     @State private var loadedSource: LoadedSearchSource?
+    @State private var detailTagSource: DetailTagSearchDraft?
     @State private var clearedDraft = false
     @State private var savedFeedback = false
     @State private var path: [SearchComposerPage] = []
@@ -378,27 +379,29 @@ struct DiscoveryComposerView: View {
     @FocusState private var inputFocused: Bool
 
     init(query: SearchQuery, site: GallerySite, savedID: UUID?, startAt: SearchComposerStart = .main, loadedPreset: SavedSearch? = nil,
+         detailTagSource: DetailTagSearchDraft? = nil,
          onApply: @escaping (SearchQuery, GallerySite, UUID?) throws -> Void) {
-        self.init(query: query, site: site, savedID: savedID, startAt: startAt, loadedPreset: loadedPreset, purpose: .search(onApply))
+        self.init(query: query, site: site, savedID: savedID, startAt: startAt, loadedPreset: loadedPreset, detailTagSource: detailTagSource, purpose: .search(onApply))
     }
 
     init(editing saved: SavedSearch) {
-        self.init(query: saved.query, site: saved.site, savedID: saved.id, startAt: .main, loadedPreset: nil, purpose: .editSaved(saved))
+        self.init(query: saved.query, site: saved.site, savedID: saved.id, startAt: .main, loadedPreset: nil, detailTagSource: nil, purpose: .editSaved(saved))
     }
 
-    private init(query: SearchQuery, site: GallerySite, savedID: UUID?, startAt: SearchComposerStart, loadedPreset: SavedSearch?, purpose: SearchComposerPurpose) {
+    private init(query: SearchQuery, site: GallerySite, savedID: UUID?, startAt: SearchComposerStart, loadedPreset: SavedSearch?, detailTagSource: DetailTagSearchDraft?, purpose: SearchComposerPurpose) {
         self.purpose = purpose
         if case let .editSaved(saved) = purpose { _savedName = State(initialValue: saved.name) }
         else { _savedName = State(initialValue: "") }
         _draftQuery = State(initialValue: query)
         _draftSite = State(initialValue: site)
         _draftSavedID = State(initialValue: savedID)
-        _inputText = State(initialValue: query.text)
+        _inputText = State(initialValue: Self.singleLineText(query.text))
         _minimumPagesText = State(initialValue: query.minPages.map(String.init) ?? "")
         _maximumPagesText = State(initialValue: query.maxPages.map(String.init) ?? "")
         _path = State(initialValue: startAt == .filters ? [.filters] : startAt == .favorites ? [.records] : [])
         _recordsTab = State(initialValue: startAt == .favorites ? .favorite : .recent)
         _loadedSource = State(initialValue: loadedPreset.map { LoadedSearchSource($0) })
+        _detailTagSource = State(initialValue: detailTagSource)
     }
 
     var body: some View {
@@ -436,6 +439,7 @@ struct DiscoveryComposerView: View {
                 draftSavedID = id
                 if let saved = library.snapshot.saved.first(where: { $0.id == id }) {
                     loadedSource = LoadedSearchSource(saved); savedFeedback = true
+                    detailTagSource = nil
                 }
             }
         }
@@ -449,8 +453,9 @@ struct DiscoveryComposerView: View {
                 }
             }
             Section {
-                TextField("关键词或标题", text: $inputText, axis: .vertical)
-                    .lineLimit(1...3).autocorrectionDisabled().textInputAutocapitalization(.never)
+                TextField("关键词或标题", text: singleLineInput)
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    .submitLabel(.done).onSubmit { inputFocused = false }
                     .focused($inputFocused).accessibilityIdentifier("compose.text")
                     .accessibilityHint("也支持 title:、namespace:tag、~任一、-排除和 uploader: 条件。")
             } footer: {
@@ -458,6 +463,21 @@ struct DiscoveryComposerView: View {
                     Label(isSavedEditor ? "条件已清空，保存后更新此组合" : "已清空本次条件，点击“搜索”后生效", systemImage: "checkmark.circle")
                         .font(.caption).foregroundStyle(Color.accentColor)
                         .accessibilityIdentifier("compose.cleared-state")
+                } else if let source = detailTagSource {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(source.statusTitle, systemImage: source.origin == .newSearch ? "magnifyingglass" : "plus.magnifyingglass")
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityIdentifier("compose.tag-source")
+                        Text(source.origin == .newSearch ? "\(source.selectedCount) 个所选标签，尚未搜索" : "新增 \(source.addedCount) 个标签，原条件已保留，尚未搜索")
+                        if let summary = source.sourceSummary {
+                            Text("原搜索：\(summary)").lineLimit(2)
+                                .accessibilityIdentifier("compose.tag-original")
+                        }
+                        if !tagSearchExclusions.isEmpty {
+                            Text("原搜索已排除：\(tagSearchExclusions.map(\.label).joined(separator: "、"))。可在筛选条件中调整。")
+                                .lineLimit(2).accessibilityIdentifier("compose.tag-exclusions")
+                        }
+                    }.font(.caption).foregroundStyle(.secondary)
                 } else if let source = loadedSource {
                     Label(loadedStatus, systemImage: sourceModified ? "pencil.circle" : "checkmark.circle")
                         .labelStyle(.titleAndIcon).font(.caption).foregroundStyle(Color.accentColor)
@@ -505,7 +525,7 @@ struct DiscoveryComposerView: View {
             }
             if let failure { Section { Text(failure).foregroundStyle(.red).accessibilityIdentifier("compose.error") } }
         }
-        .navigationTitle(isSavedEditor ? "编辑常用组合" : "组合搜索").navigationBarTitleDisplayMode(.inline).appNavigationChrome()
+        .navigationTitle(isSavedEditor ? "编辑常用组合" : detailTagSource?.navigationTitle ?? "组合搜索").navigationBarTitleDisplayMode(.inline).appNavigationChrome()
         .toolbar {
             if path.isEmpty { AppToolbarItem(placement: .cancellationAction) {
                 Button("取消") { dismiss() }.accessibilityIdentifier(isSavedEditor ? "saved-editor.cancel" : "compose.cancel")
@@ -739,6 +759,12 @@ struct DiscoveryComposerView: View {
         return currentKey != baselineKey
     }
 
+    private var tagSearchExclusions: [GalleryTag] {
+        guard let source = detailTagSource else { return [] }
+        let query = (try? proposedQuery()) ?? draftQuery
+        return query.rules.filter { source.originalExclusions.contains($0.id) && $0.match == .exclude }.map(\.tag)
+    }
+
     private var isSavedEditor: Bool {
         if case .editSaved = purpose { return true }; return false
     }
@@ -747,14 +773,23 @@ struct DiscoveryComposerView: View {
         selectedCategoryCount == 0 || (isSavedEditor && (savedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editorOwner != library.owner))
     }
 
+    private static func singleLineText(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline).joined(separator: " ")
+    }
+
+    private var singleLineInput: Binding<String> {
+        Binding(get: { inputText }, set: { inputText = Self.singleLineText($0) })
+    }
+
     private func load(_ source: LoadedSearchSource) {
         inputFocused = false
         draftQuery = source.query; draftSite = source.site
         draftSavedID = source.kind == .favorite ? source.id : nil
-        inputText = source.query.text
+        inputText = Self.singleLineText(source.query.text)
         minimumPagesText = source.query.minPages.map(String.init) ?? ""
         maximumPagesText = source.query.maxPages.map(String.init) ?? ""
         loadedSource = source
+        detailTagSource = nil
         failure = nil; clearedDraft = false; savedFeedback = false
         UISelectionFeedbackGenerator().selectionChanged()
     }
@@ -811,6 +846,7 @@ struct DiscoveryComposerView: View {
     private func clearDraft() {
         inputFocused = false; draftQuery = SearchQuery(); inputText = ""
         minimumPagesText = ""; maximumPagesText = ""; draftSavedID = nil
+        detailTagSource = nil
         failure = nil; clearedDraft = true
         UISelectionFeedbackGenerator().selectionChanged()
     }

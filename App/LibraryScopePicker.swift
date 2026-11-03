@@ -17,13 +17,7 @@ struct LibraryFloatingHeader<Controls: View>: View {
                 LibraryScopePicker(selection: $selection).disabled(!scopeEnabled)
                 controls.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-                    .padding(.horizontal, -6)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+            .floatingHeaderSurface()
         }
     }
 }

@@ -5,7 +5,7 @@ struct DiscoverView: View {
     @Binding var query: SearchQuery
     @Binding var site: GallerySite
     @Binding var editingSaved: UUID?
-    var onSearchTag: (GalleryTag, GallerySite) -> Void
+    var onSearchQuery: (SearchQuery, GallerySite) -> Void
     var runRevision: UUID? = nil
 
     @EnvironmentObject private var session: SiteSession
@@ -20,9 +20,9 @@ struct DiscoverView: View {
     @State private var web: WebDestination?
 
     init(query: Binding<SearchQuery>, site: Binding<GallerySite>, editingSaved: Binding<UUID?>, runRevision: UUID? = nil,
-         onSearchTag: @escaping (GalleryTag, GallerySite) -> Void = { _, _ in }) {
+         onSearchQuery: @escaping (SearchQuery, GallerySite) -> Void = { _, _ in }) {
         _query = query; _site = site; _editingSaved = editingSaved; self.runRevision = runRevision
-        self.onSearchTag = onSearchTag
+        self.onSearchQuery = onSearchQuery
         _navigation = StateObject(wrappedValue: DiscoveryNavigation(query: query.wrappedValue, site: site.wrappedValue, lane: 0, savedID: editingSaved.wrappedValue))
     }
 
@@ -70,8 +70,8 @@ struct DiscoverView: View {
         .sheet(isPresented: $historyShowing) {
             NavigationStack {
                 ReadingHistoryView().navigationDestination(for: Gallery.self) { gallery in
-                    GalleryDetailView(gallery: gallery) { tag, site in
-                        historyShowing = false; onSearchTag(tag, site)
+                    GalleryDetailView(gallery: gallery, currentSearch: entry.query.hasSettings ? .init(query: entry.query, site: entry.site) : nil) { query, site in
+                        historyShowing = false; onSearchQuery(query, site)
                     }
                 }
             }
@@ -111,13 +111,7 @@ struct DiscoverView: View {
                     commonSearchControl
                 }
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-                    .padding(.horizontal, -6)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+            .floatingHeaderSurface()
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("discover.header.floating")

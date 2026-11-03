@@ -194,10 +194,27 @@ private struct RecentSearchFile: Codable {
         return commit { $0.saved = reordered }
     }
     func deleteSearch(_ id: UUID) { commit { $0.saved.removeAll { $0.id == id } } }
-    func pin(_ tag: GalleryTag) { commit { value in if !value.favoriteTags.contains(where: { $0.id == tag.id }) { value.favoriteTags.append(tag) } } }
+    func pin(_ tag: GalleryTag) { pin([tag]) }
+    @discardableResult func pin(_ tags: [GalleryTag]) -> Bool {
+        var seen = Set(snapshot.favoriteTags.map(\.id))
+        let additions = tags.filter { seen.insert($0.id).inserted }
+        guard !additions.isEmpty else { return true }
+        return commit { $0.favoriteTags.append(contentsOf: additions) }
+    }
     func unpin(_ tag: GalleryTag) { commit { $0.favoriteTags.removeAll { $0.id == tag.id } } }
-    func block(_ tag: GalleryTag) { commit { value in if !value.blockedTags.contains(where: { $0.id == tag.id }) { value.blockedTags.append(tag) } } }
-    func unblock(_ tag: GalleryTag) { commit { $0.blockedTags.removeAll { $0.id == tag.id } } }
+    func block(_ tag: GalleryTag) { block([tag]) }
+    @discardableResult func block(_ tags: [GalleryTag]) -> Bool {
+        var seen = blockedIDs
+        let additions = tags.filter { seen.insert($0.id).inserted }
+        guard !additions.isEmpty else { return true }
+        return commit { $0.blockedTags.append(contentsOf: additions) }
+    }
+    func unblock(_ tag: GalleryTag) { unblock([tag]) }
+    @discardableResult func unblock(_ tags: [GalleryTag]) -> Bool {
+        let ids = Set(tags.map(\.id))
+        guard !ids.isDisjoint(with: blockedIDs) else { return true }
+        return commit { $0.blockedTags.removeAll { ids.contains($0.id) } }
+    }
     func containsReadLater(_ gallery: Gallery) -> Bool { snapshot.readLater.contains { $0.id == gallery.id } }
     @discardableResult func toggleReadLater(_ gallery: Gallery) -> Bool {
         setReadLater(gallery, included: !containsReadLater(gallery))

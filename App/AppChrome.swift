@@ -3,7 +3,25 @@ import UIKit
 
 enum FloatingChrome {
     static let background = Color(uiColor: .systemBackground).opacity(0.64)
+    static let headerBackground = Color(uiColor: .secondarySystemGroupedBackground).opacity(0.64)
     static let controlFill = Color.primary.opacity(0.10)
+}
+
+private struct FloatingHeaderSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        content
+            .background {
+                shape.fill(FloatingChrome.headerBackground)
+                    .padding(.horizontal, -6)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+            .overlay {
+                shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                    .padding(.horizontal, -6)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+    }
 }
 
 struct AppControlSurface: ViewModifier {
@@ -27,17 +45,20 @@ struct AppControlSurface: ViewModifier {
 }
 
 extension View {
+    func floatingHeaderSurface() -> some View { modifier(FloatingHeaderSurface()) }
+
     func appControlSurface(selected: Bool = false, verticalInset: CGFloat = 0) -> some View {
         modifier(AppControlSurface(selected: selected, verticalInset: verticalInset))
     }
 }
 
 struct TagChipButtonStyle: ButtonStyle {
+    var selected = false
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.subheadline)
             .padding(.horizontal, 8).padding(.vertical, 5)
-            .appControlSurface()
+            .appControlSurface(selected: selected)
             .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
     }
@@ -96,13 +117,14 @@ struct AppToolbarItem<Content: View>: ToolbarContent {
 }
 
 extension View {
-    func appNavigationChrome(backButton: Bool = false) -> some View {
-        modifier(AppNavigationChromeModifier(backButton: backButton))
+    func appNavigationChrome(backButton: Bool = false, cancelSelection: (() -> Void)? = nil) -> some View {
+        modifier(AppNavigationChromeModifier(backButton: backButton, cancelSelection: cancelSelection))
     }
 }
 
 private struct AppNavigationChromeModifier: ViewModifier {
     let backButton: Bool
+    let cancelSelection: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     func body(content: Content) -> some View {
@@ -111,12 +133,18 @@ private struct AppNavigationChromeModifier: ViewModifier {
             .toolbar {
                 if backButton {
                     AppToolbarItem(placement: .topBarLeading) {
-                        Button { dismiss() } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 16, weight: .medium))
+                        if let cancelSelection {
+                            Button("取消", action: cancelSelection)
+                                .accessibilityLabel("取消标签选择")
+                                .accessibilityIdentifier("detail.tags.cancel")
+                        } else {
+                            Button { dismiss() } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 16, weight: .medium))
+                            }
+                            .accessibilityLabel("返回")
+                            .accessibilityIdentifier("BackButton")
                         }
-                        .accessibilityLabel("返回")
-                        .accessibilityIdentifier("BackButton")
                     }
                 }
             }

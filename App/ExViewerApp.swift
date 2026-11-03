@@ -101,6 +101,9 @@ struct RootView: View {
     private var browserSiteBinding: Binding<GallerySite> {
         Binding(get: { browserSite }, set: { browserSite = $0 })
     }
+    private var currentSearch: ExecutedGallerySearch? {
+        search.hasSettings ? .init(query: search, site: browserSite) : nil
+    }
     private var settingsSiteBinding: Binding<GallerySite> {
         Binding(get: { browserSite }, set: { newSite in
             guard newSite != browserSite else { return }
@@ -113,9 +116,9 @@ struct RootView: View {
             TabView(selection: $selection) {
                 NavigationStack(path: $discoveryPath) {
                     DiscoverView(query: $search, site: browserSiteBinding, editingSaved: $editingSaved, runRevision: searchRun,
-                                 onSearchTag: useTag)
+                                 onSearchQuery: useQuery)
                         .navigationDestination(for: Gallery.self) {
-                            GalleryDetailView(gallery: $0, onSearchTag: useTag)
+                            GalleryDetailView(gallery: $0, currentSearch: currentSearch, onSearchQuery: useQuery)
                                 .toolbar(.visible, for: .navigationBar)
                         }
                 }
@@ -124,7 +127,7 @@ struct RootView: View {
                 NavigationStack(path: $libraryPath) {
                     LibraryView(site: browserSiteBinding, isActive: selection == 1)
                         .navigationDestination(for: Gallery.self) {
-                            GalleryDetailView(gallery: $0, onSearchTag: useTag)
+                            GalleryDetailView(gallery: $0, currentSearch: currentSearch, onSearchQuery: useQuery)
                                 .toolbar(.visible, for: .navigationBar)
                         }
                 }
@@ -161,13 +164,17 @@ struct RootView: View {
         }
     }
     private func useTag(_ tag: GalleryTag, _ sourceSite: GallerySite) {
-        browserSite = sourceSite
+        var query = search
         if tag.namespace == "artist" {
-            search = SearchQuery()
-            search.replaceArtist(tag.name)
+            query = SearchQuery()
+            query.replaceArtist(tag.name)
         } else {
-            search.rules.removeAll { $0.id == tag.id }; search.rules.append(.init(tag: tag))
+            query.rules.removeAll { $0.id == tag.id }; query.rules.append(.init(tag: tag))
         }
+        useQuery(query, sourceSite)
+    }
+    private func useQuery(_ query: SearchQuery, _ sourceSite: GallerySite) {
+        browserSite = sourceSite; search = query
         editingSaved = nil
         discoveryPath = NavigationPath(); searchRun = UUID(); selection = 0
     }

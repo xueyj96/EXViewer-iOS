@@ -143,6 +143,12 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertTrue(tag.isHittable)
         capture(app, "controls43.detail-tags")
         tag.tap()
+        XCTAssertTrue(app.buttons["detail.tags.search-menu"].waitForExistence(timeout: 5))
+        XCTAssertEqual(tag.value as? String, "已选中")
+        app.buttons["detail.tags.search-menu"].tap()
+        app.buttons["detail.tags.new-search"].tap()
+        XCTAssertTrue(app.navigationBars["新建搜索"].waitForExistence(timeout: 5))
+        app.buttons["compose.apply"].tap()
         let summary = app.buttons["discover.condition-summary"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5))
         XCTAssertTrue((summary.value as? String)?.contains("language:chinese") == true)

@@ -8,6 +8,8 @@ enum QASamples {
         var first = SearchQuery(); first.text = "coast"; first.titleOnly = true
         first.rules = [.init(tag: .init(namespace: "language", name: "chinese"))]
         first.minRating = 3; first.excludedCategories = [1, 32]
+        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-detail-tag-conflict") { first.rules[0].match = .exclude }
+        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-multiline-search") { first.text = "coast\r\nfield\u{2028}notes" }
         var second = SearchQuery(); second.text = "notes"; second.maxPages = 40
         var third = SearchQuery(); third.artist = "preview studio"
         return [.init(name: "中文画集", site: .ex, query: first),

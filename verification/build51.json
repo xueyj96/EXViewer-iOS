@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "51",
+  "checked_at_utc": "2026-11-03T21:49:02.669529+00:00",
+  "runtime_source_sha256": "4bf9ddfbbba590c711188ceba408b7124c667ccc940f5f6f8ac80e8459b445bc",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "native": {
+      "passed": 21,
+      "failed": 0,
+      "scope": "DetailTagSearchTests (5), ExViewerStorageTests (9), SearchRequestContractTests (7)"
+    },
+    "UI": {
+      "passed": 7,
+      "failed": 0,
+      "scope": "DetailTagInteractionV51UITests (4) and three affected CompactHeadersV42UITests: select/new/merge/cancel/submit, saved-query retention, excluded tags, Library and Reader entries, single-line input, light and dark large-type headers"
+    },
+    "unchanged_core_baseline": {
+      "passed": 63,
+      "failed": 0,
+      "verification": "build49.json",
+      "current_core_source_hashes_match_build50": true,
+      "rerun_in_build51": false
+    }
+  },
+  "interaction": {
+    "tag_tap": "Toggle selection without executing or mutating the active search",
+    "new_search": "Selected tags only, presented as an editable draft",
+    "add_to_current_search": "Copy the executed query, retain existing conditions and de-duplicate tags; hidden when no active conditions",
+    "existing_exclusions": "Retained and explicitly identified in the composer",
+    "execution": "Explicit composer Search action only; modal dismissal completes before navigation",
+    "cancel": "Retain original results, selected tags and saved combinations",
+    "saved_combinations": "Updated only by an explicit save",
+    "bulk_tag_management": "One atomic local write per batch; newly blocked tags can be undone",
+    "bottom_navigation": "Retained during detail tag selection",
+    "single_line_search": "Return ends editing; loaded and pasted line breaks become spaces"
+  },
+  "appearance": {
+    "header_fill": "Adaptive translucent solid system color",
+    "header_fill_opacity": 0.64,
+    "outer_corner_radius_pt": 14,
+    "control_corner_radius_pt": 8,
+    "line_width_pt": 0.5,
+    "extra_header_layout_height_pt": 0,
+    "material_effect_added": false,
+    "visual_review": "Completed for normal light, dark large type, search menu, merge draft and floating header"
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "UI checks use isolated neutral fixtures; phone installation and real-device UI acceptance are separate stages.",
+    "The reported single-gallery authentication message has not been reproduced against its actual response; no authentication or network parser fix is claimed.",
+    "Real-site speed, Cloudflare verification and account or payment operations are not established by these checks."
+  ]
+}

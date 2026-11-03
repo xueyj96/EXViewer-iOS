@@ -142,7 +142,8 @@ private struct ReaderPageFrames: PreferenceKey {
 struct ReaderView: View {
     var gallery: Gallery
     var offline = false
-    var onSearchTag: ((GalleryTag, GallerySite) -> Void)? = nil
+    var currentSearch: ExecutedGallerySearch? = nil
+    var onSearchQuery: ((SearchQuery, GallerySite) -> Void)? = nil
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
@@ -174,7 +175,7 @@ struct ReaderView: View {
     @State private var settings = false
     @State private var detailsShowing = false
     @State private var immersive = false
-    @State private var pendingTagSearch: (tag: GalleryTag, site: GallerySite)?
+    @State private var pendingSearchQuery: (query: SearchQuery, site: GallerySite)?
     @State private var jump = false
     @State private var jumpText = ""
     @State private var findingPage = false
@@ -332,15 +333,15 @@ struct ReaderView: View {
                     if favoriteAfterSettings { favoriteAfterSettings = false; favoriteEditing = true }
                 }) { readerSettings }
                 .sheet(isPresented: $detailsShowing, onDismiss: {
-                    if let pending = pendingTagSearch {
-                        pendingTagSearch = nil
-                        onSearchTag?(pending.tag, pending.site)
+                    if let pending = pendingSearchQuery {
+                        pendingSearchQuery = nil
+                        onSearchQuery?(pending.query, pending.site)
                     }
                 }) {
                     NavigationStack {
                         GalleryDetailView(gallery: gallery, onResumeReading: { detailsShowing = false },
-                                          allowsTagSearch: onSearchTag != nil) { tag, site in
-                            pendingTagSearch = (tag, site); detailsShowing = false
+                                          allowsTagSearch: onSearchQuery != nil, currentSearch: currentSearch) { query, site in
+                            pendingSearchQuery = (query, site); detailsShowing = false
                         }
                     }
                     .statusBarHidden(false)
@@ -1108,17 +1109,25 @@ struct GalleryDetailView: View {
     var gallery: Gallery
     var onResumeReading: (() -> Void)? = nil
     var allowsTagSearch = true
-    var onSearchTag: (GalleryTag, GallerySite) -> Void
+    var currentSearch: ExecutedGallerySearch? = nil
+    var onSearchQuery: (SearchQuery, GallerySite) -> Void
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var downloads: DownloadManager
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var coverAspect = CoverAspectCache.shared
     @State private var detail: GalleryDetail?
     @State private var failure: String?
     @State private var loading = false
     @State private var reader = false
     @State private var web: WebDestination?
-    @State private var lastBlocked: GalleryTag?
+    @State private var lastBlockedTags: [GalleryTag] = []
+    @State private var selectedTagIDs = Set<String>()
+    @State private var tagSearchDraft: DetailTagSearchDraft?
+    @State private var pendingSearchSubmission: (query: SearchQuery, site: GallerySite)?
+    @State private var pendingReaderSearch: (query: SearchQuery, site: GallerySite)?
+    @State private var tagFeedback: String?
+    @State private var tagFailure: String?
     @State private var favoriteEditing = false
     @State private var favoriteRemoval = false
     @StateObject private var favoriteObservation = GalleryFavoriteObservation()
@@ -1134,6 +1143,7 @@ struct GalleryDetailView: View {
         return resolved
     }
     private var favoriteState: GalleryFavoriteState { favoriteObservation.state }
+    private var selectedTags: [GalleryTag] { current.tags.filter { selectedTagIDs.contains($0.id) } }
     private var favoriteTitle: String {
         switch favoriteState {
         case .unknown: return "站点收藏"
@@ -1171,18 +1181,6 @@ struct GalleryDetailView: View {
                         actionLabel(favoriteTitle, symbol: { if case .favorited = favoriteState { return "star.fill" }; return "star" }())
                     }.buttonStyle(AppActionButtonStyle()).accessibilityIdentifier("detail.site-favorite")
                         .accessibilityLabel(favoriteAccessibilityLabel)
-                    Menu {
-                        Button { library.toggleReadLater(current) } label: {
-                            Label(library.containsReadLater(current) ? "移出稍后再读" : "加入稍后再读", systemImage: "text.badge.plus")
-                        }.accessibilityIdentifier("detail.local-bookmark")
-                        if case .favorited = favoriteState {
-                            Button("取消站点收藏", role: .destructive) { favoriteRemoval = true; favoriteEditing = true }
-                                .accessibilityIdentifier("detail.remove-site-favorite")
-                        }
-                        Button { downloads.enqueue(current) } label: { Label("下载当前画质", systemImage: "arrow.down") }
-                            .disabled(detail == nil || AppMode.qa)
-                    } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(Rectangle()) }
-                        .buttonStyle(.plain).accessibilityLabel("更多操作").accessibilityIdentifier("detail.more")
                   }
                   if case let .favorited(group) = favoriteState {
                     HStack(spacing: 8) {
@@ -1200,23 +1198,37 @@ struct GalleryDetailView: View {
                 if loading { ProgressView() }
                 if let failure { StatusMessage(title: failure) { Task { await load() } } }
                 Divider()
-                if let lastBlocked { HStack { Text("已屏蔽 \(lastBlocked.name)").font(.caption); Spacer(); Button("撤销") { library.unblock(lastBlocked); self.lastBlocked = nil } }.font(.caption) }
+                if !lastBlockedTags.isEmpty {
+                    HStack {
+                        Text("已屏蔽 \(lastBlockedTags.count) 个标签")
+                        Spacer()
+                        Button("撤销") {
+                            if library.unblock(lastBlockedTags) { lastBlockedTags = []; tagFeedback = "已撤销屏蔽" }
+                            else { tagFailure = library.error ?? "标签未能保存，请重试。" }
+                        }
+                    }.font(.caption)
+                }
                 if !current.tags.isEmpty {
                     VStack(alignment: .leading, spacing: 15) {
                         Text("标签").font(.headline)
-                        if allowsTagSearch {
-                            Text("点按作者查看该作者作品，其他标签加入当前搜索；长按可加入常用或屏蔽。").font(.caption).foregroundStyle(.secondary)
-                        }
+                        Text(tagFeedback ?? "点按可多选，选好后在顶部选择搜索方式。")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("detail.tags.feedback")
                         ForEach(Array(Set(current.tags.map(\.namespace))).sorted(), id: \.self) { namespace in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(namespace.uppercased()).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
                                 TagWrapLayout(spacing: 7) {
                                     ForEach(current.tags.filter { $0.namespace == namespace }) { tag in
-                                        Button { onSearchTag(tag, current.ref.site) } label: { Text(tag.name) }
-                                            .buttonStyle(TagChipButtonStyle())
+                                        Button { toggleTagSelection(tag) } label: { Text(tag.name) }
+                                            .buttonStyle(TagChipButtonStyle(selected: selectedTagIDs.contains(tag.id)))
                                             .accessibilityLabel(tag.name).accessibilityIdentifier("detail.tag.\(tag.id)")
-                                            .disabled(!allowsTagSearch)
-                                            .contextMenu { Button("加入常用标签") { library.pin(tag) }; Button("屏蔽标签") { library.block(tag); lastBlocked = tag }; if library.blockedIDs.contains(tag.id) { Button("解除屏蔽") { library.unblock(tag) } } }
+                                            .accessibilityValue(selectedTagIDs.contains(tag.id) ? "已选中" : "未选中")
+                                            .accessibilityAddTraits(selectedTagIDs.contains(tag.id) ? .isSelected : [])
+                                            .contextMenu {
+                                                Button("加入常用标签") { pinTags([tag]) }
+                                                Button("屏蔽标签", role: .destructive) { blockTags([tag]) }
+                                                if library.blockedIDs.contains(tag.id) { Button("解除屏蔽") { library.unblock(tag) } }
+                                            }
                                     }
                                 }
                             }
@@ -1236,20 +1248,141 @@ struct GalleryDetailView: View {
                 }.background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 Text("当前画质下载会使用看图额度。归档价格和免费配额以站点当前账号页面为准。").font(.caption).foregroundStyle(.secondary)
             }.padding(22)
-        }.navigationTitle("画廊详情").navigationBarTitleDisplayMode(.inline).appNavigationChrome(backButton: true)
+        }
+            .accessibilityIdentifier("detail.scroll")
+            .navigationTitle(selectedTags.isEmpty ? "画廊详情" : "已选 \(selectedTags.count) 个")
+            .navigationBarTitleDisplayMode(.inline)
+            .appNavigationChrome(backButton: true, cancelSelection: selectedTags.isEmpty ? nil : clearTagSelection)
+            .toolbar {
+                AppToolbarItem(placement: .topBarTrailing) {
+                    if selectedTags.isEmpty { galleryMoreMenu }
+                    else { tagActionsMenu }
+                }
+                if !selectedTags.isEmpty {
+                    AppToolbarItem(placement: .topBarTrailing, tone: .accent) { tagSearchMenu }
+                }
+            }
             .task { await load() }
             .onDisappear { favoriteObservation.cancel() }
             .onAppear(perform: bindFavoriteState)
             .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in bindFavoriteState() }
             .onReceive(session.favoriteStateCache.$revision) { _ in favoriteObservation.syncFromCache() }
+            .onChange(of: gallery.id) { _, _ in clearTagSelection() }
+            .onChange(of: current.tags) { _, tags in selectedTagIDs.formIntersection(Set(tags.map(\.id))) }
             .accessibilityHidden(reader)
-            .fullScreenCover(isPresented: $reader) {
-                ReaderView(gallery: current, onSearchTag: { tag, site in reader = false; onSearchTag(tag, site) })
+            .fullScreenCover(isPresented: $reader, onDismiss: {
+                if let pending = pendingReaderSearch {
+                    pendingReaderSearch = nil
+                    onSearchQuery(pending.query, pending.site)
+                }
+            }) {
+                ReaderView(gallery: current, currentSearch: currentSearch, onSearchQuery: { query, site in
+                    pendingReaderSearch = (query, site); reader = false
+                })
             }
             .sheet(item: $web, onDismiss: { Task { await load() } }) { OfficialWebView(destination: $0) }
             .sheet(isPresented: $favoriteEditing) {
                 GalleryFavoriteEditorView(gallery: current, session: session, requestRemoval: favoriteRemoval, preparation: favoriteObservation.preparation(favoriteClient(for: current, session: session), reference: current.ref)) { favoriteObservation.accept($0, form: $1) }
             }
+            .sheet(item: $tagSearchDraft, onDismiss: {
+                if let pending = pendingSearchSubmission {
+                    pendingSearchSubmission = nil
+                    onSearchQuery(pending.query, pending.site)
+                }
+            }) { draft in
+                DiscoveryComposerView(query: draft.query, site: draft.site, savedID: nil, detailTagSource: draft) { query, site, _ in
+                    pendingSearchSubmission = (query, site)
+                }
+            }
+            .alert("标签操作未完成", isPresented: Binding(get: { tagFailure != nil }, set: { if !$0 { tagFailure = nil } })) {
+                Button("好") { tagFailure = nil }
+            } message: { Text(tagFailure ?? "") }
+    }
+
+    private var galleryMoreMenu: some View {
+        Menu {
+            Button { web = .init(title: "画廊原网页", url: current.ref.url) } label: { Label("站点原网页", systemImage: "safari") }
+                .accessibilityIdentifier("detail.more.site-page")
+            Button { downloads.enqueue(current) } label: { Label("下载当前画质", systemImage: "arrow.down") }
+                .disabled(detail == nil || AppMode.qa)
+            Button { library.toggleReadLater(current) } label: {
+                Label(library.containsReadLater(current) ? "移出稍后再读" : "加入稍后再读", systemImage: "text.badge.plus")
+            }.accessibilityIdentifier("detail.local-bookmark")
+            if case .favorited = favoriteState {
+                Button("取消站点收藏", role: .destructive) { favoriteRemoval = true; favoriteEditing = true }
+                    .accessibilityIdentifier("detail.remove-site-favorite")
+            }
+        } label: { detailMenuLabel }
+            .buttonStyle(.plain)
+            .accessibilityLabel("更多操作").accessibilityIdentifier("detail.more")
+    }
+
+    private var tagActionsMenu: some View {
+        Menu {
+            Button("加入常用标签") { pinTags(selectedTags) }
+                .accessibilityIdentifier("detail.tags.pin")
+            Button("屏蔽所选标签", role: .destructive) { blockTags(selectedTags) }
+                .accessibilityIdentifier("detail.tags.block")
+        } label: { detailMenuLabel }
+            .buttonStyle(.plain)
+            .accessibilityLabel("所选标签操作").accessibilityIdentifier("detail.tags.more")
+    }
+
+    private var tagSearchMenu: some View {
+        Menu {
+            Button { tagSearchDraft = .newSearch(tags: selectedTags, site: current.ref.site) } label: {
+                Label("新建搜索", systemImage: "plus.magnifyingglass")
+                Text("仅使用 \(selectedTags.count) 个所选标签")
+            }.accessibilityIdentifier("detail.tags.new-search")
+            if let currentSearch {
+                Button { tagSearchDraft = .adding(tags: selectedTags, to: currentSearch) } label: {
+                    Label("加入当前搜索", systemImage: "text.badge.plus")
+                    Text(currentSearch.summary)
+                }.accessibilityIdentifier("detail.tags.add-to-search")
+                    .accessibilityHint(currentSearch.summary)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                if typeSize.isAccessibilitySize { Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium)) }
+                else { Text("搜索") }
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 8).frame(minHeight: 44)
+            .appControlSurface(selected: true, verticalInset: 6)
+        }
+        .buttonStyle(.plain)
+        .disabled(!allowsTagSearch)
+        .accessibilityLabel("标签搜索方式").accessibilityIdentifier("detail.tags.search-menu")
+    }
+
+    private var detailMenuLabel: some View {
+        Image(systemName: "ellipsis").font(.system(size: 17, weight: .medium))
+            .foregroundStyle(.primary)
+            .frame(width: 44, height: 44)
+            .appControlSurface(verticalInset: 6)
+    }
+
+    private func toggleTagSelection(_ tag: GalleryTag) {
+        if selectedTagIDs.contains(tag.id) { selectedTagIDs.remove(tag.id) }
+        else { selectedTagIDs.insert(tag.id) }
+        tagFeedback = nil
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    private func clearTagSelection() { selectedTagIDs.removeAll(); tagFeedback = nil }
+
+    private func pinTags(_ tags: [GalleryTag]) {
+        let existing = Set(library.snapshot.favoriteTags.map(\.id))
+        let count = tags.filter { !existing.contains($0.id) }.count
+        if library.pin(tags) { tagFeedback = count == 0 ? "所选标签已在常用中" : "已加入 \(count) 个常用标签" }
+        else { tagFailure = library.error ?? "标签未能保存，请重试。" }
+    }
+
+    private func blockTags(_ tags: [GalleryTag]) {
+        let additions = tags.filter { !library.blockedIDs.contains($0.id) }
+        if library.block(tags) { lastBlockedTags = additions; clearTagSelection() }
+        else { tagFailure = library.error ?? "标签未能保存，请重试。" }
     }
     private var favoriteAccessibilityLabel: String {
         if case let .favorited(group) = favoriteState { return "\(favoriteTitle)，\(group)" }
