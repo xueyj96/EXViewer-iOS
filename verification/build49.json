@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "49",
+  "checked_at_utc": "2026-11-03T11:23:23.185115+00:00",
+  "runtime_source_sha256": "9724e933dd82981215b58b01b9b938d86a56b3b7b51b376cfa03fdb7849b1b11",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "native": {
+      "passed": 13,
+      "failed": 0,
+      "scope": "GalleryGridPlacementTests and StaticCoverTests"
+    },
+    "UI": {
+      "latest_unique_passed": 3,
+      "unresolved_failures": 0,
+      "scope": "Extreme covers in Discover and 600-item Favorites selection; late ratios preserve columns",
+      "prior_test_query_failures": "Resolved; original failure evidence retained locally; app runtime unchanged"
+    },
+    "unchanged_core_baseline": {
+      "passed": 63,
+      "failed": 0,
+      "scope": "Full ExViewerCore suite; current Core/Sources hashes match tested build48"
+    },
+    "search_navigation_baseline": {
+      "passed": 24,
+      "failed": 0,
+      "scope": "SearchRequestContractTests, GalleryPagerTests and DiscoveryNavigationTests, verified during this publication preparation"
+    }
+  },
+  "cover_preview": {
+    "minimum_width_to_height": 0.5,
+    "maximum_width_to_height": 2.0,
+    "strip_crop_alignment": "top",
+    "wide_crop_alignment": "center",
+    "reader_source_dimensions_changed": false
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "UI checks use neutral local fixtures, including 1:50 and 50:1 covers.",
+    "Real-site network speed and account operations are not established by these tests.",
+    "Phone installation and real-device UI acceptance are separate stages."
+  ]
+}

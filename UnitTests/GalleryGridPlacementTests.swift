@@ -2,6 +2,35 @@ import XCTest
 @testable import ExViewer
 
 final class GalleryGridPlacementTests: XCTestCase {
+    func testCoverPreviewBoundsExtremeAndInvalidRatiosButPreservesNormalCovers() {
+        XCTAssertEqual(GalleryCoverLayout.displayAspect(0.02), 0.5)
+        XCTAssertEqual(GalleryCoverLayout.displayAspect(50), 2)
+        for ratio in [0.5, 0.71, 1, 1.5, 2] {
+            XCTAssertEqual(GalleryCoverLayout.displayAspect(ratio), ratio)
+        }
+        for ratio in [Double.nan, .infinity, -.infinity, 0, -1] {
+            XCTAssertEqual(GalleryCoverLayout.displayAspect(ratio), 0.71)
+        }
+    }
+
+    func testExtremeStripCannotSendAnEntireBatchToTheOppositeColumn() {
+        var layout = GalleryGridPlacement()
+        let ids = (0..<40).map(String.init)
+        let aspects = Dictionary(uniqueKeysWithValues: ids.map { ($0, $0 == "0" ? 0.0001 : 50.0) })
+        layout.update(ids: ids, aspects: aspects)
+        XCTAssertGreaterThan(layout.columns[0].count, 15)
+        XCTAssertGreaterThan(layout.columns[1].count, 15)
+        let heights = layout.columns.map { $0.reduce(0.0) { $0 + 1 / GalleryCoverLayout.displayAspect(aspects[$1]!) + 0.36 } }
+        XCTAssertLessThan(abs(heights[0] - heights[1]), 2.36)
+    }
+
+    func testRemovingAnEntireColumnRepopulatesBothColumns() {
+        var layout = GalleryGridPlacement()
+        layout.update(ids: ["a", "b", "c", "d", "e", "f"], aspects: [:])
+        layout.update(ids: ["a", "c", "e"], aspects: [:])
+        XCTAssertEqual(layout.columns, [["a", "e"], ["c"]])
+    }
+
     func testInitialEqualHeightsAlternateWithDeterministicTies() {
         var layout = GalleryGridPlacement()
         layout.update(ids: ["a", "b", "c", "d"], aspects: [:])

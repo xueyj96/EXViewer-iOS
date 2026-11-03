@@ -104,10 +104,15 @@ enum QASamples {
     static func cover(seed: Int) -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ExViewer-neutral-fixtures", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("cover-aspect-\(seed).png")
+        let extreme = AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-extreme-covers")
+        let file = directory.appendingPathComponent("cover-aspect-\(extreme ? "extreme-" : "")\(seed).png")
         if FileManager.default.fileExists(atPath: file.path) { return file }
-        let size = seed.isMultiple(of: 2) ? CGSize(width: 720, height: 480) : CGSize(width: 480, height: 680)
-        let image = UIGraphicsImageRenderer(size: size).image { context in
+        let size: CGSize
+        if extreme && seed % 4 == 1 { size = CGSize(width: 64, height: 3200) }
+        else if extreme && seed % 4 == 2 { size = CGSize(width: 3200, height: 64) }
+        else { size = seed.isMultiple(of: 2) ? CGSize(width: 720, height: 480) : CGSize(width: 480, height: 680) }
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
             UIColor.systemGray5.setFill(); context.fill(CGRect(origin: .zero, size: size))
             UIColor.systemGray3.setFill(); context.cgContext.fillEllipse(in: CGRect(x: size.width * 0.12, y: size.height * 0.1, width: size.width * 0.45, height: size.width * 0.45))
             UIColor.systemGray.setFill(); context.fill(CGRect(x: 0, y: size.height * 0.65, width: size.width, height: size.height * 0.35))

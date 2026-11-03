@@ -166,6 +166,7 @@ struct StaticCover: View {
     let contextIdentity: String
     let requestIdentity: String
     var contentMode: ContentMode = .fit
+    var alignment: Alignment = .center
     var onDecodeFailure: (() -> Void)? = nil
 
     @Environment(\.displayScale) private var displayScale
@@ -182,7 +183,8 @@ struct StaticCover: View {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: contentMode)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(width: geometry.size.width, height: geometry.size.height, alignment: alignment)
+                        .clipped()
                         .accessibilityLabel("画廊封面").accessibilityIdentifier("cover.decoded-image")
                 } else {
                     Color.clear

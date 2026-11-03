@@ -229,7 +229,7 @@ struct GalleryRows: View {
                                     gridCell(gallery)
                                 }.id(gallery.id).background { measure(gallery) }
                             }
-                        }.scrollTargetLayout().frame(maxWidth: .infinity, alignment: .topLeading)
+                        }.scrollTargetLayout().frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
                     }
                 }.padding(.horizontal, 20).padding(.vertical, 12)
             } else {
@@ -420,8 +420,11 @@ struct GalleryGridCell: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             Color(uiColor: .secondarySystemGroupedBackground)
-                .aspectRatio(aspect.aspect, contentMode: .fit)
-                .overlay { CoverView(gallery: gallery) }
+                .aspectRatio(GalleryCoverLayout.displayAspect(Double(aspect.aspect)), contentMode: .fit)
+                .overlay {
+                    CoverView(gallery: gallery, contentMode: .fill,
+                              alignment: aspect.aspect < GalleryCoverLayout.minimumAspect ? .top : .center)
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .accessibilityElement(children: .contain).accessibilityIdentifier("gallery.cover.\(gallery.ref.gid)")
             Text(gallery.title).font(.subheadline.weight(.medium)).foregroundStyle(.primary)
@@ -502,6 +505,8 @@ struct GalleryRow: View {
 
 struct CoverView: View {
     var gallery: Gallery
+    var contentMode: ContentMode = .fit
+    var alignment: Alignment = .center
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @State private var file: URL?
@@ -519,6 +524,7 @@ struct CoverView: View {
                 StaticCover(file: file,
                             contextIdentity: contextIdentity,
                             requestIdentity: "\(gallery.id)|\(gallery.cover?.absoluteString ?? "none")|\(retry.uuidString)",
+                            contentMode: contentMode, alignment: alignment,
                             onDecodeFailure: { failure = ErrorMessages.message(ViewerError.unsupported) })
                     .overlay(alignment: .bottom) {
                         if let failure {

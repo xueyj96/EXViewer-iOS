@@ -10,7 +10,7 @@ final class LibraryLayoutV36UITests: XCTestCase {
         XCTAssertTrue(tab.waitForExistence(timeout: 12)); tab.tap()
         if app.buttons["library.scope.menu"].exists {
             app.buttons["library.scope.menu"].tap(); app.buttons["library.scope.1"].tap()
-        } else { app.segmentedControls["library.scope"].buttons["站点收藏"].tap() }
+        } else { app.buttons["library.scope.1"].tap() }
         XCTAssertTrue(app.buttons["favorites.gallery.10000"].waitForExistence(timeout: 12))
         return app
     }
