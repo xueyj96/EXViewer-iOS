@@ -111,6 +111,13 @@ struct DiscoverView: View {
                     commonSearchControl
                 }
             }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                    .padding(.horizontal, -6)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("discover.header.floating")

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "50",
+  "checked_at_utc": "2026-11-03T15:30:40.827874+00:00",
+  "runtime_source_sha256": "7b2845f765a578df5316d9af677c3e84b15f49cbb7562fbfbdb14bafe7c44112",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "UI": {
+      "passed": 2,
+      "failed": 0,
+      "scope": "CompactHeadersV42UITests: normal two-row search header and large-type dark portrait/landscape; draft load/apply/cancel flows"
+    },
+    "cover_baseline": {
+      "verification": "build49.json",
+      "native_passed": 13,
+      "UI_passed": 3,
+      "failed": 0,
+      "cover_code_changed_in_build50": false
+    }
+  },
+  "change": {
+    "runtime_file": "App/DiscoverView.swift",
+    "outer_corner_radius_pt": 14,
+    "line_width_pt": 0.5,
+    "horizontal_outset_pt": 6,
+    "extra_layout_height_pt": 0,
+    "extra_background_layer": false,
+    "frame_intercepts_input": false
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "UI checks use isolated neutral fixtures.",
+    "Real-site speed, account behavior and phone UI acceptance remain separate from build and installation verification."
+  ]
+}
