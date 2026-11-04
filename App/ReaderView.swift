@@ -125,11 +125,14 @@ private struct ReaderPageFrames: PreferenceKey {
         let current = context, revision = session.generation
         let demand = MediaRequestDemand(priority: priority)
         metadataDemand = demand
+        let favoriteScope = GalleryFavoriteScope(gallery, session)
+        let favoriteVersion = session.favoriteStateCache.entry(favoriteScope)?.version
         loading = true
         defer { if current == context { loading = false; if metadataDemand === demand { metadataDemand = nil } } }
         do {
             let detail = try EHParser.detail(await session.html(url, request: demand), reference: gallery.ref, pageURL: url)
             guard current == context, revision == session.generation, owner == library.owner else { return }
+            if detail.favoriteStateKnown { session.favoriteStateCache.put(detail.favoriteState, scope: favoriteScope, expectedVersion: favoriteVersion, conditional: true) }
             guard TagFilter.decision(tags: detail.gallery.tags, blocked: library.blockedIDs, complete: true) == .visible else { throw ViewerError.invalidQuery("此画廊命中本机屏蔽标签，可到账号的「标签与屏蔽」调整。") }
             beforeAppending?()
             seen.insert(url); var indexes = Set(pages.map(\.index)); pages += detail.pages.filter { indexes.insert($0.index).inserted }
@@ -807,7 +810,7 @@ struct ReaderView: View {
                                  cache: session.favoriteStateCache, scope: GalleryFavoriteScope(gallery, session))
     }
     private var favoriteAccessibilityValue: String {
-        let value = favoriteStateDescription(favoriteObservation.state)
+        let value = favoriteStateDescription(favoriteObservation.state) + (favoriteObservation.phase.map { "，" + $0.label } ?? "")
         if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-favorite-counters") {
             return value + ";" + NativeFavoritesQA.counts(reference: gallery.ref)
         }
@@ -1191,8 +1194,10 @@ struct GalleryDetailView: View {
                           .font(.caption).lineLimit(1).fixedSize(horizontal: true, vertical: false)
                           .frame(minHeight: 44).accessibilityIdentifier("detail.cancel-favorite")
                     }
-                  } else if case .unknown = favoriteState {
-                      Text("收藏状态待核实").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                  }
+                  if let phase = favoriteObservation.phase {
+                      Button(phase.label) { favoriteRemoval = false; favoriteEditing = true }
+                          .font(.caption).frame(minHeight: 28).accessibilityIdentifier("detail.favorite-sync")
                   }
                 }.accessibilityElement(children: .contain).accessibilityIdentifier("detail.actions")
                 if loading { ProgressView() }

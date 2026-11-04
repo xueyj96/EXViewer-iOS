@@ -17,6 +17,8 @@ struct GalleryFavoriteScope: Hashable {
 /// belongs to the explicitly opened editor, never to binding or notifications.
 @MainActor final class GalleryFavoriteObservation: ObservableObject {
     @Published private(set) var state: GalleryFavoriteState = .unknown
+    @Published private(set) var phase: FavoriteSyncPhase?
+    private let observerID = UUID()
     private var client: GalleryFavoriteClient?
     private var reference: GalleryRef?
     private var form: GalleryFavoriteForm?
@@ -30,12 +32,13 @@ struct GalleryFavoriteScope: Hashable {
               now: Date = Date()) {
         cancel(); self.reference = reference
         self.cache = cache; self.scope = scope
-        self.client = client; state = .unknown
+        self.client = client; state = .unknown; phase = nil
         guard client.isCurrent() else { return }
+        if let cache, let scope { cache.register(observerID, scope: scope, client: client) }
         if let cache, let scope, let recent = cache.recent(scope, now: now) {
-            state = recent.state; form = recent.form; observedAt = recent.date; cacheVersion = recent.version; return
+            state = recent.state; phase = recent.phase; form = recent.form; observedAt = recent.date; cacheVersion = recent.version; return
         }
-        if let cache, let scope { state = cache.entry(scope)?.state ?? .unknown }
+        if let cache, let scope { state = cache.entry(scope)?.state ?? .unknown; phase = cache.entry(scope)?.phase }
         cacheVersion = scope.flatMap { cache?.entry($0)?.version }
     }
     func accept(_ value: GalleryFavoriteState, form verifiedForm: GalleryFavoriteForm? = nil) {
@@ -47,9 +50,10 @@ struct GalleryFavoriteScope: Hashable {
         if let cache, let scope {
             cache.put(value, form: form?.state == value ? form : nil, scope: scope)
             cacheVersion = cache.entry(scope)?.version
+            if let value = cache.entry(scope) { state = value.state; phase = value.phase }
         }
     }
-    func cancel() { form = nil; observedAt = nil }
+    func cancel() { cache?.unregister(observerID); form = nil; observedAt = nil }
     private func beginChange() {
         cancel(); state = .unknown
         if let cache, let scope {
@@ -58,29 +62,53 @@ struct GalleryFavoriteScope: Hashable {
         }
     }
     func syncFromCache() {
-        guard client?.isCurrent() == true, let scope, let value = cache?.entry(scope), value.version != cacheVersion else { return }
-        cancel(); cacheVersion = value.version; state = value.state; form = value.form; observedAt = value.date
+        guard client?.isCurrent() == true, let scope, let value = cache?.entry(scope) else { return }
+        cacheVersion = value.version
+        if state != value.state { state = value.state }
+        if phase != value.phase { phase = value.phase }
+        form = value.form; observedAt = value.date
     }
 
     /// A recent same-account form can be reused by an explicit editor. There
     /// are no display-side reads to await or start. Verification remains fresh.
     func preparation(_ upstream: GalleryFavoriteClient, reference: GalleryRef, now: Date = Date()) -> GalleryFavoritePreparation {
         let valid = self.reference == reference && client?.isCurrent() == true && upstream.isCurrent()
-        let fresh = valid && observedAt.map { now.timeIntervalSince($0) >= 0 && now.timeIntervalSince($0) < 15 } == true
-        let initial = fresh ? form : nil
+        let cached = valid ? scope.flatMap { cache?.entry($0) } : nil
+        let fresh = valid && (scope.flatMap { cache?.formIsFresh($0, now: now) }
+            ?? (observedAt.map { now.timeIntervalSince($0) >= 0 && now.timeIntervalSince($0) < SiteFavoriteCache.refreshInterval } == true))
+        let initial = valid ? cached?.form ?? form : nil
+        let readScope = scope
         let wrapped = GalleryFavoriteClient(isCurrent: upstream.isCurrent, read: {
             guard upstream.isCurrent() else { throw ViewerError.stale }
-            return try await upstream.read()
+            let epoch = readScope.flatMap { self.cache?.mutationEpoch($0) }
+            let value = try await upstream.read()
+            guard upstream.isCurrent(), self.reference == reference, self.scope == readScope,
+                  readScope.flatMap({ self.cache?.mutationEpoch($0) }) == epoch else { throw ViewerError.stale }
+            guard value.reference == reference else { throw ViewerError.restricted }
+            self.accept(value.state, form: value)
+            return value
         }, submit: upstream.submit, willSubmit: { [weak self] in
             self?.beginChange(); await upstream.willSubmit()
         }, didSubmit: upstream.didSubmit)
-        return .init(client: wrapped, initialForm: initial)
+        let enqueue: ((GalleryFavoriteForm, FavoriteAction, String, String) throws -> Void)?
+        if valid, let cache, let scope {
+            enqueue = { form, action, note, title in try cache.enqueue(scope: scope, client: upstream, form: form, action: action, note: note, title: title) }
+        } else { enqueue = nil }
+        return .init(client: wrapped, initialForm: initial, initialState: cached?.state ?? state,
+                     requiresRefresh: initial != nil && !fresh, pending: cached?.phase != nil,
+                     pendingGroup: cached?.pendingGroup, pendingNote: cached?.pendingNote, enqueue: enqueue)
     }
 }
 
 struct GalleryFavoritePreparation {
     let client: GalleryFavoriteClient
     let initialForm: GalleryFavoriteForm?
+    var initialState: GalleryFavoriteState = .unknown
+    var requiresRefresh = false
+    var pending = false
+    var pendingGroup: Int?
+    var pendingNote: String?
+    var enqueue: ((GalleryFavoriteForm, FavoriteAction, String, String) throws -> Void)? = nil
 }
 
 @MainActor func favoriteClient(for gallery: Gallery, session: SiteSession) -> GalleryFavoriteClient {
@@ -90,7 +118,7 @@ struct GalleryFavoritePreparation {
 
 func favoriteStateDescription(_ state: GalleryFavoriteState) -> String {
     switch state {
-    case .unknown: return "状态待核实"
+    case .unknown: return "收藏状态尚未读取"
     case .notFavorited: return "未收藏"
     case .favorited(let group): return "已收藏，\(group)"
     }

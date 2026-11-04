@@ -69,7 +69,7 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
     @Published private(set) var generation = UUID()
     @Published private(set) var owner = "guest"
     @Published private(set) var favoritesRevision = UUID()
-    let favoriteStateCache = SiteFavoriteCache()
+    let favoriteStateCache: SiteFavoriteCache
     @Published var quota = AccountQuota()
     @Published var error: String?
     let webStore = WKWebsiteDataStore.nonPersistent()
@@ -96,10 +96,12 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
     init(qa: Bool = false, configuration: URLSessionConfiguration? = nil,
          searchInterval: TimeInterval = 3.1, pageConcurrencyLimit: (() -> Int)? = nil) {
         self.transportConfiguration = configuration
+        favoriteStateCache = SiteFavoriteCache(storageRoot: qa ? nil : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ExViewer"))
         self.pageScheduler = SiteRequestScheduler(searchInterval: searchInterval)
         self.pageConcurrencyLimit = pageConcurrencyLimit ?? {
             SiteRequestPolicy.configuredConcurrency(defaults: ReaderPreferenceDefaults.store)
         }
+        favoriteStateCache.activate(owner: owner, generation: generation)
         guard !qa else { return }
         do { cookies = try SessionVault.read(); updateOwner() }
         catch { self.error = (error as? ViewerError)?.localizedDescription ?? "本机登录记录暂时无法读取，请重试。" }
@@ -108,6 +110,7 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
         let member = cookies.first { $0.name == "ipb_member_id" && ($0.domain == ".e-hentai.org" || $0.domain == "e-hentai.org") }?.value
             ?? cookies.first { $0.name == "ipb_member_id" }?.value
         owner = member.map { SHA256.hash(data: Data($0.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined() } ?? "guest"
+        favoriteStateCache.activate(owner: owner, generation: generation)
     }
     private func accepted(_ cookie: HTTPCookie) -> Bool {
         let host = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
@@ -265,6 +268,8 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
             throw ViewerError.invalidQuery("每批请选择 1 至 25 个有效收藏。")
         }
         let revision = generation, account = owner
+        guard !favoriteStateCache.hasPending(references) else { throw ViewerError.invalidQuery("所选作品仍有收藏更改待处理，请先检查同步结果。") }
+        favoriteStateCache.invalidate(references, scopeOwner: account, generation: revision)
         let endpoint = site.baseURL.appendingPathComponent("favorites.php")
         let request = try FavoritesBatchRequest(url: endpoint, site: site, gids: references.map(\.gid), action: action)
         do {
@@ -290,6 +295,7 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
         defer { loggingOut = false }
         transport.invalidateAndCancel()
         try SessionVault.delete(); cookies = []; generation = UUID(); owner = "guest"
+        favoriteStateCache.activate(owner: owner, generation: generation)
         quota = AccountQuota(); ehStatus = "未验证"; exStatus = "未验证"
         try await webGate.acquire()
         await webStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)

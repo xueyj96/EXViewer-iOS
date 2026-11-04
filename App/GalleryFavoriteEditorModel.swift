@@ -14,7 +14,7 @@ import ExViewerCore
         return Self(isCurrent: current, read: {
             guard session.hasCredentials else { throw ViewerError.authentication }
             let url = try GalleryFavoriteForm.endpoint(for: reference)
-            return try GalleryFavoriteForm.read(await session.html(url), reference: reference)
+            return try GalleryFavoriteForm.read(await session.html(url, searchPriority: .prefetch), reference: reference)
         }, submit: { request in
             guard session.hasCredentials, current() else { throw ViewerError.stale }
             let response = try await session.html(request.url, method: "POST", body: request.body)
@@ -49,7 +49,7 @@ import ExViewerCore
               noteBytes <= 200 || GalleryFavoriteForm.normalizedNote(note) == form.note else { return false }
         return !form.confirms(.move(selection), note: note)
     }
-    var canRemove: Bool { !working && !needsVerification && form?.selectedGroup != nil }
+    var canRemove: Bool { if case .favorited = observedState { return !working && !needsVerification && form != nil }; return false }
 
     init(client: GalleryFavoriteClient, initialForm: GalleryFavoriteForm? = nil) {
         self.client = client
@@ -58,9 +58,32 @@ import ExViewerCore
 
     func cancel() { epoch = UUID(); loading = false; saving = false }
 
+    func useCachedState(_ value: GalleryFavoriteState, pending: Bool, group: Int?, note: String?) {
+        if value != .unknown { observedState = value }
+        if pending { selection = group; if let note { self.note = note } }
+    }
+    func useCachedForm(_ value: GalleryFavoriteForm) {
+        let keepSelection = form != nil && selection != form?.selectedGroup
+        let keepNote = form != nil && note != form?.note
+        form = value
+        if !keepSelection { selection = value.selectedGroup }
+        if !keepNote { note = value.note }
+    }
+    func enqueue(_ submit: (GalleryFavoriteForm, FavoriteAction, String, String) throws -> Void,
+                 title: String, remove: Bool = false) -> Bool {
+        guard client.isCurrent(), remove ? canRemove : canSave, let form else { return false }
+        let action: FavoriteAction
+        if remove { action = .remove } else { guard let selection else { return false }; action = .move(selection) }
+        do {
+            try submit(form, action, remove ? "" : GalleryFavoriteForm.normalizedNote(note), title)
+            lastReadSucceeded = false; return true
+        } catch { self.error = ErrorMessages.message(error, fallback: "本机未能保存这次更改，请重试。"); return false }
+    }
+
     /// Returns true only when a pending edit has been observed on the server.
-    @discardableResult func reload(preserveDraft: Bool = false) async -> Bool {
+    @discardableResult func reload(preserveDraft: Bool = false, preservingEdits: Bool = false) async -> Bool {
         guard !working, client.isCurrent() else { return false }
+        let oldForm = form, oldSelection = selection, oldNote = note
         let token = UUID(); epoch = token; loading = true; error = nil; lastReadSucceeded = false
         defer { if token == epoch { loading = false } }
         do {
@@ -68,7 +91,11 @@ import ExViewerCore
             let value = try await client.read()
             try Task.checkCancellation()
             guard epoch == token, client.isCurrent() else { return false }
-            return accept(value, preserveDraft: preserveDraft)
+            let keepSelection = preservingEdits && (selection != oldSelection || oldSelection != oldForm?.selectedGroup)
+            let keepNote = preservingEdits && (note != oldNote || oldNote != oldForm?.note)
+            let result = accept(value, preserveDraft: preserveDraft || preservingEdits)
+            if preservingEdits { if !keepSelection { selection = value.selectedGroup }; if !keepNote { note = value.note } }
+            return result
         } catch is CancellationError { return false }
         catch {
             guard epoch == token, client.isCurrent() else { return false }
@@ -112,7 +139,7 @@ import ExViewerCore
         } catch {
             guard epoch == token, client.isCurrent() else { return false }
             needsVerification = true
-            self.error = "本次收藏操作结果尚未确认。请先刷新状态，再继续操作。"
+            self.error = "暂时无法确认是否已生效，请检查结果。"
             return false
         }
     }

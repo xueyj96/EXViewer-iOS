@@ -141,6 +141,7 @@ import ExViewerCore
             let parse = Task.detached(priority: .userInitiated) { try EHParser.list(html, base: url) }
             let list = try await withTaskCancellationHandler(operation: { try await parse.value }, onCancel: { parse.cancel() })
             guard isCurrent(current, account: account, owner: owner, session: session), !Task.isCancelled else { return }
+            session.favoriteStateCache.seedFavorites(list.items, categories: list.favoriteCategories, url: url, scopeOwner: owner, generation: account)
             let replacingRoot = url == root
             let retainedRoot = replacingRoot && !items.isEmpty
             // Continuation URLs may omit filters; keep the original query's threshold.

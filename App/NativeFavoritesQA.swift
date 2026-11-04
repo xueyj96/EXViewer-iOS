@@ -56,7 +56,7 @@ import ExViewerCore
             return try GalleryFavoriteForm.read(html(reference: reference, group: record.group, note: record.note), reference: reference)
         }, submit: { request in
             record.posts += 1
-            try await Task.sleep(nanoseconds: 80_000_000)
+            try await Task.sleep(nanoseconds: args.contains("--qa-favorite-save-delay") ? 5_000_000_000 : 80_000_000)
             let body = String(decoding: request.body, as: UTF8.self).replacingOccurrences(of: "+", with: "%20")
             let fields = URLComponents(string: "https://example.invalid/?" + body)!.queryItems ?? []
             if !args.contains("--qa-favorite-unapplied") {

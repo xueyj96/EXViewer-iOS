@@ -90,6 +90,7 @@ final class NativeFavoritesV31UITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--qa", "--qa-favorite-sync-list"]; app.launch()
         XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 12)); app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap()
         let empty = app.staticTexts["当前分组没有收藏结果。"]
         XCTAssertTrue(empty.waitForExistence(timeout: 6))
         app.buttons["main.tab.discover"].tap(); app.buttons["gallery.open.1"].tap(); open(app)

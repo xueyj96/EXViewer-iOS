@@ -383,6 +383,11 @@ struct CloudFavoritesView: View {
         .sheet(item: $web) { OfficialWebView(destination: $0) }
         .task { prepareVisible(); reload(force: false) }
         .onChange(of: pager.items) { _, _ in prepareVisible() }
+        .onChange(of: pager.loading) { _, loading in
+            if !loading, message?.hasSuffix("正在更新收藏列表…") == true {
+                message = pager.failure == nil ? "收藏列表已更新。" : "操作已发送，列表暂未更新，请刷新。"
+            }
+        }
         .onChange(of: library.blockedIDs) { _, _ in selectionStore.clear(); selecting = false; prepareVisible() }
         .onChange(of: category) { _, _ in selectionStore.clear(); selecting = false; reload() }
         .onChange(of: site) { _, _ in cancel(); selectionStore.clear(); selecting = false; category = "all"; reload() }
@@ -554,21 +559,21 @@ struct CloudFavoritesView: View {
                 catch let failure as FavoriteMutationFailure {
                     guard operation == mutationID, generation == session.generation, owner == session.owner, sourceSite == site else { return }
                     let batchResult = failure.requestMayHaveBeenSent
-                        ? "本批 \(batch.count) 项可能已生效，结果待核实；后续批次已停止。"
-                        : "本批 \(batch.count) 项未发出；后续批次已停止。"
-                    let prefix = submitted > 0 ? "此前已确认提交 \(submitted) 项。" : ""
+                        ? "本批 \(batch.count) 项结果待确认，已暂停后续操作。"
+                        : "本批 \(batch.count) 项尚未发送，已暂停后续操作。"
+                    let prefix = submitted > 0 ? "此前已发送 \(submitted) 项操作。" : ""
                     message = prefix + batchResult + "\n" + ErrorMessages.message(failure.underlying)
                     return
                 }
                 catch {
                     guard operation == mutationID, generation == session.generation, owner == session.owner, sourceSite == site else { return }
-                    let prefix = submitted > 0 ? "此前已确认提交 \(submitted) 项。" : ""
-                    message = prefix + "本批 \(batch.count) 项未能确认提交；后续批次已停止。请刷新收藏核实后再操作。\n" + ErrorMessages.message(error)
+                    let prefix = submitted > 0 ? "此前已发送 \(submitted) 项操作。" : ""
+                    message = prefix + "本批 \(batch.count) 项尚未发送，已暂停后续操作。\n" + ErrorMessages.message(error)
                     return
                 }
             }
             guard operation == mutationID, generation == session.generation, owner == session.owner, sourceSite == site else { return }
-            selecting = false; selectionStore.clear(); message = "已提交 \(submitted) 项收藏操作，服务器返回内容可读取，正在刷新列表核实。"
+            selecting = false; selectionStore.clear(); message = "已提交 \(submitted) 项操作，正在更新收藏列表…"
             reload()
         }
     }
@@ -633,6 +638,10 @@ struct AccountView: View {
                 } label: { Label("标签与屏蔽", systemImage: "tag") }.accessibilityIdentifier("account.tags")
             }
             Section("本机数据") {
+                NavigationLink {
+                    FavoriteSyncStatusView(cache: session.favoriteStateCache).toolbar(.visible, for: .navigationBar)
+                } label: { Label("收藏同步", systemImage: "arrow.triangle.2.circlepath") }
+                    .accessibilityIdentifier("account.favorite-sync")
                 LabeledContent("浏览缓存", value: "上限 2 GB")
                 LabeledContent("手动下载", value: "按设备可用空间保存")
                 NavigationLink {

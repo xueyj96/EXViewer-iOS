@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "53",
+  "checked_at_utc": "2026-11-04T08:41:26.052273+00:00",
+  "runtime_source_sha256": "6b28944c2623de01b2df6de1d3b9e0af0c13840cb4cd3624c499893874381d17",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "native": {
+      "passed": 50,
+      "failed": 0,
+      "new_favorite_sync_tests": 21,
+      "scope": "Persistent favorite cache, observation, editor, transport and session lifecycle"
+    },
+    "UI": {
+      "passed": 7,
+      "failed": 0,
+      "scope": "Slow asynchronous save, uncertain result checking, add, move, note, removal, list refresh, read failure, dark appearance and large text"
+    },
+    "core_baseline": {
+      "verification": "build52.json",
+      "passed": 73,
+      "failed": 0,
+      "Core_source_file_hashes_unchanged": true,
+      "rerun_in_build53": false
+    },
+    "visual_review_completed": true,
+    "skipped": 0,
+    "latest_unresolved_failures": 0
+  },
+  "controlled_measurements": {
+    "environment": "Isolated iOS Simulator fixtures; not real-site or physical-device latency",
+    "warm_panel_opens": 20,
+    "warm_form_cache_hits": 20,
+    "warm_panel_network_reads": 0,
+    "delayed_submission_seconds": 5,
+    "save_dismissal_within_seconds": 1.2,
+    "reading_available_during_submission": true,
+    "cache_records": 5000,
+    "cache_enqueue_ms": 32.91583340615034,
+    "cache_restore_ms": 24.59558332338929,
+    "capacity_test_network_posts": 0
+  },
+  "change": {
+    "persistent_state_scope": "Account, site and gallery ID",
+    "local_intent_saved_before_display": true,
+    "background_serial_submit_and_confirm": true,
+    "latest_intent_wins": true,
+    "late_reads_and_old_account_responses_rejected": true,
+    "unknown_submission_result": "Read only; no automatic duplicate POST",
+    "known_unsent_failure": "Retain queued intent; continue on revisit or foreground",
+    "automatic_refresh": "Visible stale records only, on access or foreground; no continuous polling",
+    "fresh_form_seconds": 600,
+    "cache_record_limit": 5000,
+    "cache_file_limit_bytes": 2000000,
+    "pending_intent_limit": 64,
+    "credentials_gallery_tokens_or_forms_persisted": false,
+    "partial_list_absence_treated_as_removal": false,
+    "unreadable_cache_overwritten": false,
+    "image_loading_concurrency_changed": false
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "State survives restart; forms do not. The first edit after restart requires a fresh form read.",
+    "After restart, pending items resume when the corresponding gallery is revisited, because request references remain memory-only.",
+    "Cached status is the latest local view, not a guarantee against changes made by another client. Only server readback confirms synchronization.",
+    "No real-site favorite mutation or physical-device latency was exercised by these isolated tests.",
+    "The previously reported individual gallery response remains unavailable; its root cause is separate from this favorite change.",
+    "Installation readback and real-device UI or account acceptance remain separate evidence surfaces."
+  ]
+}

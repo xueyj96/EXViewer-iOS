@@ -84,6 +84,7 @@ private enum BrowserPreferenceDefaults {
 }
 
 struct RootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @State private var selection = AppMode.screen == "tags" || AppMode.screen == "account" ? 2 : 0
@@ -158,6 +159,7 @@ struct RootView: View {
         .onChange(of: session.owner) { _, _ in
             search = SearchQuery(); editingSaved = nil; searchRun = UUID(); selection = 0
         }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { session.favoriteStateCache.refreshActive() } }
         .sheet(isPresented: .constant(AppMode.screen == "reader" || AppMode.screen == "web-compat")) {
             if AppMode.screen == "web-compat" { WebCompatibilityQAView() }
             else { ReaderView(gallery: QASamples.galleries[0]) }

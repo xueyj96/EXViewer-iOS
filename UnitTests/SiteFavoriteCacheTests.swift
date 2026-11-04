@@ -43,16 +43,16 @@ import ExViewerCore
         o.syncFromCache(); XCTAssertEqual(o.state, .unknown)
     }
     func testCacheIsBoundedAndCannotCarryStateOrFormsAcrossAccountsAndSessions() throws {
-        let cache = SiteFavoriteCache(), generation = UUID()
+        let cache = SiteFavoriteCache(capacity: 64), generation = UUID()
         for id in 1...80 {
             cache.put(.notFavorited, scope: .init(reference: .init(site: .ex, gid: Int64(id), token: "preview"), owner: "aa", generation: generation))
         }
         XCTAssertNil(cache.entry(.init(reference: .init(site: .ex, gid: 1, token: "preview"), owner: "aa", generation: generation)))
         let old = GalleryFavoriteScope(reference: ref, owner: "aa", generation: generation)
         cache.put(.favorited("已读"), form: try form(2), scope: old)
-        XCTAssertNotNil(cache.recent(old)); XCTAssertNil(cache.recent(old, now: Date().addingTimeInterval(16)))
+        XCTAssertNotNil(cache.recent(old)); XCTAssertNil(cache.recent(old, now: Date().addingTimeInterval(601)))
         let other = GalleryFavoriteScope(reference: ref, owner: "bb", generation: UUID())
-        XCTAssertNil(cache.entry(other)); cache.put(.notFavorited, scope: other)
+        XCTAssertNil(cache.entry(other)); cache.activate(owner: other.owner, generation: other.generation); cache.put(.notFavorited, scope: other)
         XCTAssertNil(cache.entry(old)); XCTAssertEqual(cache.entry(other)?.state, .notFavorited)
     }
 }

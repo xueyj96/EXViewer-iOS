@@ -23,8 +23,8 @@ import ExViewerCore
         let scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID()), value = try form(2); var reads = 0
         let client = GalleryFavoriteClient(isCurrent: { true }, read: { reads += 1; return value }, submit: { _ in })
         cache.put(value.state, form: value, scope: scope)
-        o.bind(client, reference: ref, cache: cache, scope: scope, now: Date().addingTimeInterval(60))
-        XCTAssertEqual(o.state, .favorited("已读")); XCTAssertNil(o.preparation(client, reference: ref).initialForm)
+        o.bind(client, reference: ref, cache: cache, scope: scope, now: Date().addingTimeInterval(601))
+        XCTAssertEqual(o.state, .favorited("已读")); XCTAssertNotNil(o.preparation(client, reference: ref).initialForm); XCTAssertTrue(o.preparation(client, reference: ref, now: Date().addingTimeInterval(601)).requiresRefresh)
         XCTAssertEqual(reads, 0)
     }
     func testOnlyExplicitEditorReadsAndSubmissionStillUsesFreshReadback() async throws {
