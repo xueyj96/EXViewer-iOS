@@ -13,11 +13,11 @@ public enum EHParser {
     }
     private static func authenticationRequired(_ html: String) throws -> Bool {
         let document = try SwiftSoup.parse(html)
-        let hasContent = try !document.select("#gn, #gdt, .itg, #i3").isEmpty()
+        let hasContent = try !document.select("#gn, #gdt, .itg, #i3, form a[href*='.torrent']").isEmpty()
         let title = try document.title()
         // These regions contain titles, names, tags, thumbnails and comments.
         // Their text and attributes are not evidence that the response requires login.
-        try document.select("#gn, #gj, #gdn, #gd1, #gdt, #taglist, #cdiv, .itg, #i3, textarea, select, form .nosel, .fp, script, style, template").remove()
+        try document.select("#gn, #gj, #gdn, #gd1, #gdt, #taglist, #cdiv, .itg, #i3, textarea, select, form .nosel, .fp, a[href*='.torrent'], script, style, template").remove()
         let content = try document.body()?.text() ?? document.text()
         let value = content.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
         if value.contains("this page requires you to log on") { return true }

@@ -138,7 +138,7 @@ final class ExViewerStorageTests: XCTestCase {
         let valid = await repository.hasValidManualFile(at: file)
         guard valid else { XCTFail("Local manual-file fixture is not decodable; network fallback must not run."); return }
         // Existing durable files must be reindexed without a network request or cache size check.
-        let result = try await repository.saveManual(url: URL(string: "https://ehgt.org/manual-test.png")!, destination: file)
+        let result = try await repository.saveManual(url: URL(string: "https://ehgt.org/manual-test.png")!, owner: "manual-storage-fixture", destination: file)
         XCTAssertEqual(result, file)
         try await repository.clear(owner: "storage-test-" + UUID().uuidString)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))

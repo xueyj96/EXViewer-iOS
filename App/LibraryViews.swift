@@ -71,6 +71,7 @@ struct LibraryView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var scope = 0
     @State private var deleteRecord: DownloadRecord?
+    @State private var downloadHelp = false
     @State private var sortOrders: [LibrarySortSection: LibrarySortOrder] = [:]
     @StateObject private var readLaterSelection = LibrarySelectionStore()
     @State private var selectingReadLater = false
@@ -97,6 +98,7 @@ struct LibraryView: View {
         .onChange(of: library.owner) { _, _ in endReadLaterSelection() }
         .onChange(of: isActive) { _, active in if !active { endReadLaterSelection() } }
         .onChange(of: readLaterVisible.map(\.id)) { _, ids in readLaterSelection.updateLoadedIDs(Set(ids)) }
+        .sheet(isPresented: $downloadHelp) { DownloadHelpView() }
         .transformPreference(MainTabsHiddenPreference.self) { hidden in
             hidden = hidden || (selectingReadLater && scope == 0 && isActive)
         }
@@ -168,6 +170,10 @@ struct LibraryView: View {
     private var localActions: some View {
         HStack(spacing: 8) {
             sortMenu(scope == 3 ? .downloads : .bookmarks)
+            if scope == 3 {
+                Button { downloadHelp = true } label: { Label("下载说明", systemImage: "info.circle").labelStyle(.iconOnly) }
+                    .buttonStyle(FeedHeaderButtonStyle()).accessibilityIdentifier("downloads.help")
+            }
             if scope == 0 {
                 Button {
                     readLaterSelection.clear()
@@ -183,10 +189,8 @@ struct LibraryView: View {
 
     private var downloadsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("按设备可用空间保存，切到后台会暂停；下载内容不参与浏览缓存清理。")
-                .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 6)
             if library.snapshot.downloads.isEmpty {
-                StatusMessage(title: "在画廊详情下载当前画质，即可离线阅读。", symbol: "arrow.down.circle")
+                StatusMessage(title: "暂无下载", symbol: "arrow.down.circle")
             } else {
                 ForEach(LibrarySorting.downloads(library.snapshot.downloads, order: sortOrders[.downloads] ?? .original, history: library.snapshot.history)) { record in
                     VStack(alignment: .leading, spacing: 9) {

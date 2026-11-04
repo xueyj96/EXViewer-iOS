@@ -328,7 +328,7 @@ final class ChromeV17UITests: XCTestCase {
             let app = launch(arguments)
             let card = app.buttons["gallery.open.1"]
             XCTAssertTrue(card.waitForExistence(timeout: 12)); card.tap()
-            let site = app.buttons["detail.site-page"], archive = app.buttons["detail.archive"]
+            let site = app.buttons["detail.site-page"], archive = app.buttons["detail.download"]
             let tabs = app.descendants(matching: .any)["main.tabs.compact"].firstMatch
             for _ in 0..<5 {
                 if archive.exists && archive.frame.maxY < tabs.frame.minY - 8 { break }
@@ -336,7 +336,7 @@ final class ChromeV17UITests: XCTestCase {
             }
             XCTAssertTrue(site.exists); XCTAssertTrue(archive.exists)
             XCTAssertLessThan(archive.frame.maxY, tabs.frame.minY - 8, "Both rows must be scrollable fully above the floating tabs")
-            XCTAssertTrue(site.label.contains("查看完整画廊信息")); XCTAssertTrue(archive.label.contains("查看下载选项与费用"))
+            XCTAssertTrue(site.label.contains("查看完整画廊信息")); XCTAssertTrue(archive.label.contains("本地保存"))
             XCTAssertEqual(site.frame.minX, archive.frame.minX, accuracy: 1)
             XCTAssertEqual(site.frame.width, archive.frame.width, accuracy: 1)
             XCTAssertGreaterThanOrEqual(site.frame.height, 44); XCTAssertGreaterThanOrEqual(archive.frame.height, 44)

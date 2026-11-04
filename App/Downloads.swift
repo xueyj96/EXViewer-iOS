@@ -13,6 +13,7 @@ import ExViewerCore
         if let record = library.snapshot.downloads.first(where: { $0.id == gallery.id }), record.status == .complete { return }
         let completed = library.snapshot.downloads.first(where: { $0.id == gallery.id })?.completed ?? [:]
         library.updateDownload(.init(gallery: gallery.stored, status: .waiting, completed: completed, total: gallery.pages))
+        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-download-actions") { return }
         if running == nil { startNext() }
     }
     func pauseAll() {
@@ -48,7 +49,8 @@ import ExViewerCore
                         guard runID == run, revision == session.generation, owner == library.owner else { throw ViewerError.stale }
                         let name = "page-\(page.index).media"
                         let destination = directory.appendingPathComponent(name)
-                        let alreadySaved = await MediaRepository.shared.hasValidManualFile(at: destination)
+                        var alreadySaved = await MediaRepository.shared.hasValidManualFile(at: destination)
+                        if !alreadySaved { alreadySaved = try await MediaRepository.shared.copyCachedPage(page.url, owner: owner, destination: destination) }
                         try Task.checkCancellation()
                         guard runID == run, revision == session.generation, owner == library.owner else { throw ViewerError.stale }
                         if alreadySaved {
@@ -57,11 +59,11 @@ import ExViewerCore
                             if library.error != nil { throw ViewerError.storage }
                             continue
                         }
-                        if let remaining = session.quota.remaining, remaining == 0 { throw ViewerError.imageLimit }
                         let source = try EHParser.image(await session.html(page.url), base: page.url)
                         try Task.checkCancellation()
                         guard runID == run, revision == session.generation, owner == library.owner else { throw ViewerError.stale }
-                        _ = try await MediaRepository.shared.saveManual(url: source.url, destination: destination)
+                        _ = try await MediaRepository.shared.saveManual(url: source.url, owner: owner, destination: destination,
+                                                                      allowNetwork: session.quota.remaining != 0)
                         try Task.checkCancellation()
                         guard runID == run, revision == session.generation, owner == library.owner else { throw ViewerError.stale }
                         current.completed[page.index] = name; library.updateDownload(current)

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "55",
+  "checked_at_utc": "2026-11-04T22:18:10.288550+00:00",
+  "runtime_source_sha256": "d27010c996fc308a7de31a3ca65b8302bf527c30317fbb2143ae1657c810c076",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "core": {
+      "passed": 81,
+      "failed": 0,
+      "scope": "Full current core suite, including torrent listing, hash verification, bounded bencode parsing and authentication classification"
+    },
+    "native": {
+      "passed": 44,
+      "failed": 0,
+      "scope": "Cache promotion, account isolation, quota guard, durable manual files, storage failures, reader scheduling, network gates, progress and prefetch continuity"
+    },
+    "UI": {
+      "passed": 7,
+      "failed": 0,
+      "scope": "Quiet downloads, save queue, torrent list and system export cancellation, detail clearance, four aligned library headers, offline reading and rolling prefetch"
+    },
+    "latest_unresolved_failures": 0
+  },
+  "verified_observations": {
+    "cache_promotion": {
+      "seen_image_network_requests": 1,
+      "extra_image_requests_to_save_seen_page": 0,
+      "offline_bytes_equal_browse_bytes": true,
+      "offline_copy_survives_browse_clear_and_fully_decodes": true,
+      "exact_image_disk_cache_reused_after_repository_restart": true,
+      "zero_quota_allows_cache_copy_but_stops_fresh_image_transfer": true,
+      "other_account_does_not_reuse_cache": true,
+      "corrupt_cache_uses_normal_image_transfer": true,
+      "copy_storage_failure_does_not_redownload": true,
+      "manual_file_over_64_MiB_reused": true
+    },
+    "download_flow": {
+      "existing_offline_queue_reused": true,
+      "instructions_behind_info": true,
+      "detail_rows_scroll_above_floating_tabs": true,
+      "GP_archive_or_paid_original_or_reset_endpoints_requested_by_saving": 0
+    },
+    "BT_export": {
+      "native_seed_metadata_list": true,
+      "magnet_copy_feedback": true,
+      "actual_system_file_share_presented_and_cancelled": true,
+      "no_recipient_or_downloader_selected_in_QA": true,
+      "return_to_same_session_has_no_offline_download_record": true,
+      "export_info_dictionary_preserved_byte_exact_and_hash_checked": true,
+      "personalized_announce_queries_and_webseed_metadata_removed": true,
+      "raw_file_limit_bytes": 2000000
+    },
+    "existing_behavior": {
+      "four_library_headers_remain_aligned": true,
+      "dark_and_large_type_checked": true,
+      "offline_reader_has_no_main_tab_overlay": true,
+      "rolling_prefetch_keeps_forward_pages_11_through_18_when_at_page_10": true
+    }
+  },
+  "implementation_limits": {
+    "page_to_image_hints": "RAM only, account and cache-epoch scoped, at most 1024; after restart disk reuse requires resolving the same image URL",
+    "offline_saving": "Independent copies; existing single-image queue; no browse-cache capacity or 64 MB file cap applied to manual downloads",
+    "BT": "List and public seed/magnet export only; no in-App engine or background BT service"
+  },
+  "not_exercised": [
+    "Real-site download speed and quota response",
+    "Live torrent payload retrieval and external downloader completion",
+    "Physical device UI and account operations",
+    "Actual response of the previously reported single gallery"
+  ],
+  "sources": [
+    "https://ehwiki.org/wiki/Downloading",
+    "https://ehwiki.org/wiki/EHTracker",
+    "https://ehwiki.org/wiki/EHTracker/Making_a_New_Torrent",
+    "https://github.com/EhPanda-Team/EhPanda/blob/main/EhPanda/App/Tools/Defaults.swift#L86"
+  ]
+}

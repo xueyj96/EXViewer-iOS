@@ -103,7 +103,7 @@ final class LibraryLayoutV36UITests: XCTestCase {
         app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--qa-offline-layout"]
         app.launch()
         XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 12)); app.buttons["main.tab.library"].tap()
-        app.segmentedControls["library.scope"].buttons["下载"].tap()
+        app.buttons["library.scope.3"].tap()
         let read = app.buttons["离线阅读"].firstMatch
         XCTAssertTrue(read.waitForExistence(timeout: 5)); read.tap()
         XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 8))

@@ -617,7 +617,7 @@ struct ReaderView: View {
                             try EHParser.image(await session.html(page.url, recoverConnection: false, request: demand), base: page.url)
                         }
                     },
-                    loadMedia: { try await MediaRepository.shared.file(for: $0, owner: context.owner, request: demand) },
+                    loadMedia: { try await MediaRepository.shared.pageFile(for: $0, page: page.url, owner: context.owner, request: demand) },
                     isCurrent: { isCurrent(context) })
             }
         }, isCurrent: { isCurrent(context) })
@@ -1124,6 +1124,7 @@ struct GalleryDetailView: View {
     @State private var loading = false
     @State private var reader = false
     @State private var web: WebDestination?
+    @State private var downloadOptions = false
     @State private var lastBlockedTags: [GalleryTag] = []
     @State private var selectedTagIDs = Set<String>()
     @State private var tagSearchDraft: DetailTagSearchDraft?
@@ -1244,15 +1245,13 @@ struct GalleryDetailView: View {
                     detailLink(title: "站点原页", subtitle: "查看完整画廊信息", icon: "safari", identifier: "detail.site-page") {
                         web = .init(title: "画廊原网页", url: current.ref.url)
                     }
-                    if let archive = detail?.archive {
-                        Divider().padding(.leading, 50)
-                        detailLink(title: "归档下载", subtitle: "查看下载选项与费用", icon: "archivebox", identifier: "detail.archive") {
-                            web = .init(title: "归档下载", url: archive)
-                        }
-                    }
+                    Divider().padding(.leading, 50)
+                    detailLink(title: "下载", subtitle: "本地保存 · BT 种子", icon: "arrow.down.to.line", identifier: "detail.download") {
+                        downloadOptions = true
+                    }.disabled(detail == nil)
                 }.background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-                Text("当前画质下载会使用看图额度。归档价格和免费配额以站点当前账号页面为准。").font(.caption).foregroundStyle(.secondary)
             }.padding(22)
+                .padding(.bottom, onResumeReading == nil ? 64 : 0)
         }
             .accessibilityIdentifier("detail.scroll")
             .navigationTitle(selectedTags.isEmpty ? "画廊详情" : "已选 \(selectedTags.count) 个")
@@ -1286,6 +1285,7 @@ struct GalleryDetailView: View {
                 })
             }
             .sheet(item: $web, onDismiss: { Task { await load() } }) { OfficialWebView(destination: $0) }
+            .sheet(isPresented: $downloadOptions) { GalleryDownloadsView(gallery: current) }
             .sheet(isPresented: $favoriteEditing) {
                 GalleryFavoriteEditorView(gallery: current, session: session, requestRemoval: favoriteRemoval, preparation: favoriteObservation.preparation(favoriteClient(for: current, session: session), reference: current.ref)) { favoriteObservation.accept($0, form: $1) }
             }
@@ -1308,8 +1308,8 @@ struct GalleryDetailView: View {
         Menu {
             Button { web = .init(title: "画廊原网页", url: current.ref.url) } label: { Label("站点原网页", systemImage: "safari") }
                 .accessibilityIdentifier("detail.more.site-page")
-            Button { downloads.enqueue(current) } label: { Label("下载当前画质", systemImage: "arrow.down") }
-                .disabled(detail == nil || AppMode.qa)
+            Button { downloadOptions = true } label: { Label("下载", systemImage: "arrow.down") }
+                .disabled(detail == nil).accessibilityIdentifier("detail.more.download")
             Button { library.toggleReadLater(current) } label: {
                 Label(library.containsReadLater(current) ? "移出稍后再读" : "加入稍后再读", systemImage: "text.badge.plus")
             }.accessibilityIdentifier("detail.local-bookmark")

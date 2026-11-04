@@ -241,6 +241,9 @@ actor MediaRepository {
         init(priority: MediaRequestPriority) { demand = MediaRequestDemand(priority: priority) }
     }
     private var flights: [FlightKey: Flight] = [:]
+    private struct PageCacheKey: Hashable { let owner: String; let page: URL }
+    private struct PageSource { let image: URL; let epoch: UUID; let date: Date }
+    private var pageSources: [PageCacheKey: PageSource] = [:]
     init(root: URL? = nil, configuration: URLSessionConfiguration? = nil, browseCacheBudget: Int64 = 2_000_000_000) {
         self.root = root ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("ExViewerMedia", isDirectory: true)
         self.transferClient = configuration == nil ? .shared : MediaTransferClient(configuration: configuration)
@@ -430,33 +433,69 @@ actor MediaRepository {
         index.record(target, size: incomingSize, at: Date())
     }
 
-    /// Streams a manual offline copy directly to its durable destination, outside the browse cache.
-    /// A valid existing target is reused, including when its library index write previously failed.
-    func saveManual(url: URL, destination: URL) async throws -> URL {
-        guard URLPolicy.media(url) else { throw ViewerError.restricted }
+    /// Associate the page with its completed image for cache-to-offline promotion.
+    /// This bounded hint stays in memory; a miss uses the normal page resolver.
+    func pageFile(for image: URL, page: URL, owner: String, request: MediaRequestDemand) async throws -> URL {
+        let epoch = epochs[owner] ?? UUID(); epochs[owner] = epoch
+        let file = try await self.file(for: image, owner: owner, request: request)
+        if epochs[owner] == epoch {
+            pageSources[PageCacheKey(owner: owner, page: page)] = PageSource(image: image, epoch: epoch, date: Date())
+            if pageSources.count > 1_024, let oldest = pageSources.min(by: { $0.value.date < $1.value.date })?.key {
+                pageSources.removeValue(forKey: oldest)
+            }
+        }
+        return file
+    }
+
+    /// Only copies existing bytes. A missing hint/file never starts a request.
+    func copyCachedPage(_ page: URL, owner: String, destination: URL) async throws -> Bool {
+        guard let source = pageSources[PageCacheKey(owner: owner, page: page)], epochs[owner] == source.epoch else { return false }
+        try await manualGate.acquire()
+        defer { Task { await manualGate.release() } }
+        try Task.checkCancellation()
+        if Self.isDecodableImage(at: destination) { return true }
+        guard epochs[owner] == source.epoch else { return false }
+        let cached = target(for: source.image, owner: owner)
+        guard Self.isDecodableImage(at: cached) else { return false }
+        try persistManualFile(cached, destination: destination, copying: true)
+        touch(cached, owner: owner)
+        return true
+    }
+
+    /// Copies a valid owner-scoped browse file first; otherwise streams to a
+    /// durable destination with no browsing-cache size or storage cap.
+    func saveManual(url: URL, owner: String, destination: URL, allowNetwork: Bool = true) async throws -> URL {
+        let paidPaths = Set(["archiver.php", "fullimg.php", "hathdl.php", "home.php"])
+        guard URLPolicy.media(url), !url.path.lowercased().split(separator: "/").contains(where: { paidPaths.contains(String($0)) }) else { throw ViewerError.restricted }
         if Self.isDecodableImage(at: destination) { return destination }
         try await manualGate.acquire()
         defer { Task { await manualGate.release() } }
         try Task.checkCancellation()
         if Self.isDecodableImage(at: destination) { return destination }
-
-        let temporary = try await FileTransfer(limit: nil, client: transferClient).fetch(url)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        try Task.checkCancellation()
-        guard let source = CGImageSourceCreateWithURL(temporary as CFURL, nil),
-              CGImageSourceGetCount(source) > 0,
-              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
-            throw ViewerError.unsupported
+        let cached = target(for: url, owner: owner)
+        if Self.isDecodableImage(at: cached) {
+            try persistManualFile(cached, destination: destination, copying: true)
+            touch(cached, owner: owner)
+        } else {
+            guard allowNetwork else { throw ViewerError.imageLimit }
+            let temporary = try await FileTransfer(limit: nil, client: transferClient).fetch(url)
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            try Task.checkCancellation()
+            guard Self.isDecodableImage(at: temporary) else { throw ViewerError.unsupported }
+            try persistManualFile(temporary, destination: destination, copying: false)
         }
+        return destination
+    }
 
+    private func persistManualFile(_ source: URL, destination: URL, copying: Bool) throws {
         let directory = destination.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
         let staged = directory.appendingPathComponent(".manual-\(UUID().uuidString).tmp")
-        try FileManager.default.moveItem(at: temporary, to: staged)
         defer { try? FileManager.default.removeItem(at: staged) }
+        if copying { try FileManager.default.copyItem(at: source, to: staged) }
+        else { try FileManager.default.moveItem(at: source, to: staged) }
         try Task.checkCancellation()
-
         if FileManager.default.fileExists(atPath: destination.path) {
             let backup = directory.appendingPathComponent(".manual-\(UUID().uuidString).bak")
             try FileManager.default.moveItem(at: destination, to: backup)
@@ -464,15 +503,10 @@ actor MediaRepository {
                 try FileManager.default.moveItem(at: staged, to: destination)
                 try? FileManager.default.removeItem(at: backup)
             } catch {
-                if !FileManager.default.fileExists(atPath: destination.path) {
-                    try? FileManager.default.moveItem(at: backup, to: destination)
-                }
+                if !FileManager.default.fileExists(atPath: destination.path) { try? FileManager.default.moveItem(at: backup, to: destination) }
                 throw error
             }
-        } else {
-            try FileManager.default.moveItem(at: staged, to: destination)
-        }
-        return destination
+        } else { try FileManager.default.moveItem(at: staged, to: destination) }
     }
 
     func hasValidManualFile(at url: URL) -> Bool { Self.isDecodableImage(at: url) }
@@ -483,6 +517,7 @@ actor MediaRepository {
     }
     func clear(owner: String) throws {
         epochs[owner] = UUID()
+        pageSources = pageSources.filter { $0.key.owner != owner }
         for (key, flight) in flights.filter({ $0.key.owner == owner }) {
             flights.removeValue(forKey: key); flight.task?.cancel()
             for consumer in flight.consumers.values {
