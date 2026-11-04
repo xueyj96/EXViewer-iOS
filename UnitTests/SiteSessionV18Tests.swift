@@ -119,6 +119,36 @@ import ExViewerCore
         }
     }
 
+    func testGalleryResponseWithCommentAuthWordsReachesTheDetailParser() async throws {
+        let html = "<h1 id='gn'>Neutral art book</h1><div id='gdt'><a href='/s/neutral/42-1'>Page 1</a></div><div id='cdiv'><div class='c3'>sadpanda</div><p>This page requires you to log on.</p></div>"
+        PageProtocol.reset { _, _ in .response(200, html, [:]) }
+        let session = session()
+        let reference = GalleryRef(site: .eh, gid: 42, token: "neutral")
+        let response = try await session.html(reference.url)
+        let detail = try EHParser.detail(response, reference: reference)
+        XCTAssertEqual(detail.gallery.title, "Neutral art book")
+        XCTAssertEqual(detail.pages.map(\.index), [1])
+        XCTAssertEqual(PageProtocol.count(reference.url.path), 1)
+    }
+
+    func testRealLoginResponseRetainsAuthenticationAndDoesNotRetry() async {
+        for status in [200, 401] {
+            PageProtocol.reset { _, _ in .response(status, "<p>This page requires you to <b>log on</b>.</p>", [:]) }
+            let session = session()
+            do { _ = try await session.html(url("/actual-login")); XCTFail("Expected authentication") }
+            catch { XCTAssertEqual(error as? ViewerError, .authentication) }
+            XCTAssertEqual(PageProtocol.count("/actual-login"), 1)
+        }
+    }
+
+    func testForbiddenResponseIsNotRelabeledByACommentUsername() async {
+        PageProtocol.reset { _, _ in .response(403, "<h1 id='gn'>Neutral</h1><div id='cdiv'>sadpanda</div>", [:]) }
+        let session = session()
+        do { _ = try await session.html(url("/forbidden-gallery")); XCTFail("Expected HTTP 403") }
+        catch { XCTAssertEqual(error as? RequestFailure, .http(.page, 403)) }
+        XCTAssertEqual(PageProtocol.count("/forbidden-gallery"), 1)
+    }
+
     func testReadingPipelineKeepsOneTwoAttemptBudgetWithoutNestedGetRetries() async {
         PageProtocol.reset { _, _ in .lost }
         let session = session()

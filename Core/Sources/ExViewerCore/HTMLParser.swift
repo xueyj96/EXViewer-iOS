@@ -7,8 +7,35 @@ public enum EHParser {
         if value.contains("cf-chl-") || value.contains("just a moment...") || value.contains("checking your browser") { throw ViewerError.challenge }
         if value.contains("exceeded your image") || value.contains("image viewing limits") && value.contains("exceeded") || value.contains("509.gif") { throw ViewerError.imageLimit }
         if value.contains("your ip address has been temporarily banned") { throw ViewerError.restricted }
-        if value.contains("sadpanda") || value.contains("sad panda") { throw ViewerError.authentication }
-        if value.contains("this page requires you to log on") { throw ViewerError.authentication }
+        let mayRequireLogin = value.contains("sad") && value.contains("panda")
+            || value.contains("this page") && value.contains("log on")
+        if mayRequireLogin, try authenticationRequired(html) { throw ViewerError.authentication }
+    }
+    private static func authenticationRequired(_ html: String) throws -> Bool {
+        let document = try SwiftSoup.parse(html)
+        let hasContent = try !document.select("#gn, #gdt, .itg, #i3").isEmpty()
+        let title = try document.title()
+        // These regions contain titles, names, tags, thumbnails and comments.
+        // Their text and attributes are not evidence that the response requires login.
+        try document.select("#gn, #gj, #gdn, #gd1, #gdt, #taglist, #cdiv, .itg, #i3, textarea, select, form .nosel, .fp, script, style, template").remove()
+        let content = try document.body()?.text() ?? document.text()
+        let value = content.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if value.contains("this page requires you to log on") { return true }
+        // Legacy Panda denial pages are standalone responses. A normal gallery
+        // or image must not become a denial because its title is "Sad Panda".
+        guard !hasContent else { return false }
+        func pandaLabel(_ value: String) -> Bool {
+            value.lowercased().filter { $0.isLetter } == "sadpanda"
+        }
+        if pandaLabel(title) || pandaLabel(value) { return true }
+        guard value.isEmpty else { return false }
+        return try document.select("img[src]").contains { image in
+            let path = URLComponents(string: try image.attr("src"))?.path ?? ""
+            let filename = (path as NSString).lastPathComponent
+            let name = (filename as NSString).deletingPathExtension
+            let alternative = try image.attr("alt")
+            return pandaLabel(name) || pandaLabel(alternative)
+        }
     }
     private static func text(_ element: Element?, _ selector: String) -> String { (try? element?.select(selector).first()?.text()) ?? "" }
     private static func url(_ raw: String?, base: URL) -> URL? {

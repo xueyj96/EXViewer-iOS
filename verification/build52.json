@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "52",
+  "checked_at_utc": "2026-11-04T02:51:29.098000+00:00",
+  "runtime_source_sha256": "1716f870bf9bf28e98dd2761811b7e5f7b12f3dc3c682d044967c0d96d404d8a",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "core": {
+      "passed": 73,
+      "failed": 0,
+      "scope": "Full ExViewerCore suite, including 10 PageAuthenticationTests"
+    },
+    "native": {
+      "passed": 9,
+      "failed": 0,
+      "scope": "SiteSessionV18Tests: transport to detail parsing, genuine authentication, forbidden response classification, retry bounds and request scheduling"
+    },
+    "UI_baseline": {
+      "verification": "build51.json",
+      "passed": 7,
+      "failed": 0,
+      "App_source_file_hashes_unchanged": true,
+      "rerun_in_build52": false
+    }
+  },
+  "change": {
+    "runtime_file": "Core/Sources/ExViewerCore/HTMLParser.swift",
+    "reproduced_before_fix": "Normal gallery, list and image content containing Panda or login-related words was rejected as authentication before normal parsing",
+    "authentication_evidence": "Login notices outside user-controlled content, or standalone legacy Panda denial responses",
+    "excluded_content": "Gallery titles, uploader, cover and thumbnail fields, tags, comments, image content, favorite notes, category controls, script and style text",
+    "genuine_login_rejection_preserved": true,
+    "HTTP_401_and_403_handling_changed": false,
+    "challenge_quota_and_IP_denial_handling_changed": false,
+    "retry_or_concurrency_policy_changed": false,
+    "UI_code_changed": false
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "The reported individual gallery was not located by one anonymous title lookup; its actual response has not been inspected.",
+    "The code defect was reproduced with neutral response fixtures; the reported gallery root cause remains unconfirmed until its response is available.",
+    "No account cookies, passwords, raw authenticated HTML or private keys were exported for this investigation.",
+    "Installation readback and real-device UI or account acceptance are separate stages."
+  ]
+}
