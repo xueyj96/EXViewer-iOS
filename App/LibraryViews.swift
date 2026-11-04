@@ -749,27 +749,17 @@ private struct LocalDataManagementView: View {
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     Text("图片加载并发")
-                    Picker("图片加载并发", selection: $downloadConcurrency) {
-                        ForEach(ReaderLoadPolicy.concurrencyChoices, id: \.self) { count in
-                            Text("\(count)").tag(count)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("account.loading.concurrency")
-                    .accessibilityValue(String(downloadConcurrency))
+                    LoadingConcurrencyPicker(title: "图片加载并发", choices: ReaderLoadPolicy.concurrencyChoices,
+                                             selection: $downloadConcurrency, identifier: "account.loading.concurrency")
+                        .frame(height: 32)
                     Text("限制同时加载的阅读图片数量。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     Text("站点页面并发")
-                    Picker("站点页面并发", selection: $pageConcurrency) {
-                        ForEach(SiteRequestPolicy.concurrencyChoices, id: \.self) { count in
-                            Text("\(count)").tag(count)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("account.loading.site-concurrency")
-                    .accessibilityValue(String(pageConcurrency))
+                    LoadingConcurrencyPicker(title: "站点页面并发", choices: SiteRequestPolicy.concurrencyChoices,
+                                             selection: $pageConcurrency, identifier: "account.loading.site-concurrency")
+                    .frame(height: 32)
                     .onChange(of: pageConcurrency) { _, _ in session.updatePageConcurrency() }
                     Text("站点连接不稳定时可调低；搜索仍保留请求间隔。")
                         .font(.caption).foregroundStyle(.secondary)

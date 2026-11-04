@@ -69,96 +69,132 @@ import ExViewerCore
         return condition()
     }
 
-    func testLargePrefetchWindowStopsAndCancelsSpeculationAfterConnectionLoss() async throws {
-        let store = ReaderMediaStore()
-        let loader = ControlledLoader()
-        let identity = scope()
+    func testSingleConnectionLossPreservesHealthyRequestsAndRefillsWindow() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()
         defer { store.reset() }
-
         update(store, loader, scope: identity, current: 1)
-        let windowStarted = await waitUntil { loader.calls.count == 16 }
-        XCTAssertTrue(windowStarted, "The 128-page window fills only the configured 16 concurrent slots")
+        let started = await waitUntil { loader.calls.count == 16 }
+        XCTAssertTrue(started)
         let current = try XCTUnwrap(loader.call(page: 1))
         let failed = try XCTUnwrap(loader.call(page: 2))
-        XCTAssertEqual(failed.priority, .prefetch)
-        XCTAssertEqual(store.prefetchCount, 128)
-
         loader.reject(failed, with: RequestFailure.transport(.media, URLError.networkConnectionLost.rawValue))
-        let pausedAndCancelled = await waitUntil {
-            store.prefetchPaused && (3...16).allSatisfy { page in
-                loader.call(page: page).map { loader.cancelled.contains($0.id) } ?? false
-            }
-        }
-        XCTAssertTrue(pausedAndCancelled, "A final -1005 response must pause the window and cancel its remaining speculative calls")
-        XCTAssertFalse(loader.cancelled.contains(current.id), "The current foreground request must survive a background network failure")
-        for _ in 0..<50 { await Task.yield() }
-        XCTAssertEqual(loader.calls.count, 16, "A paused window must not refill after cancellation settles")
-        XCTAssertEqual(store.failures[2] as? RequestFailure,
-                       RequestFailure.transport(.media, URLError.networkConnectionLost.rawValue))
+        let refilled = await waitUntil { store.failures[2] != nil && loader.call(page: 17) != nil }
+        XCTAssertTrue(refilled, "One failed image must not stop filling the forward window")
+        XCTAssertFalse(store.prefetchPaused)
+        XCTAssertFalse(loader.cancelled.contains(current.id))
+        XCTAssertTrue((3...16).allSatisfy { loader.call(page: $0).map { !loader.cancelled.contains($0.id) } ?? false })
+        loader.resolve(try XCTUnwrap(loader.call(page: 3)))
+        let healthyCompleted = await waitUntil { store.files[3] != nil && loader.call(page: 18) != nil }
+        XCTAssertTrue(healthyCompleted)
+        XCTAssertEqual(loader.calls.filter { $0.page == 2 }.count, 1, "Window refill must not automatically retry the failed image")
+        print("READER54_ISOLATED_FAILURE_CANCELLED_HEALTHY=0;REFILL_PAGE=17;FAILED_PAGE_ATTEMPTS=1")
     }
 
-    func testOnlyForegroundStartedAfterNetworkPauseCanRestoreAutomaticPrefetch() async throws {
-        let store = ReaderMediaStore()
-        let loader = ControlledLoader()
-        let identity = scope()
+    func testThreeDistinctFailuresPauseAndFreshForegroundCanRestorePrefetch() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()
         defer { store.reset() }
-
         update(store, loader, scope: identity, current: 1)
         let started = await waitUntil { loader.calls.count == 16 }
         XCTAssertTrue(started)
         let oldCurrent = try XCTUnwrap(loader.call(page: 1))
-        let failure = try XCTUnwrap(loader.call(page: 2))
-        loader.reject(failure, with: RequestFailure.transport(.media, URLError.timedOut.rawValue))
-        let paused = await waitUntil { store.prefetchPaused && store.failures[2] != nil }
-        XCTAssertTrue(paused)
-
-        // This foreground began before the network pause. Its later success is
-        // valid media, but cannot establish that connectivity recovered.
+        for page in 2...4 {
+            loader.reject(try XCTUnwrap(loader.call(page: page)), with: RequestFailure.transport(.media, URLError.timedOut.rawValue))
+            let failed = await waitUntil { store.failures[page] != nil && store.inflight[page] == nil }
+            XCTAssertTrue(failed)
+            if page < 4 { XCTAssertFalse(store.prefetchPaused) }
+        }
+        let pausedAndCancelled = await waitUntil {
+            store.prefetchPaused && (5...16).allSatisfy { page in
+                loader.call(page: page).map { loader.cancelled.contains($0.id) } ?? false
+            }
+        }
+        XCTAssertTrue(pausedAndCancelled)
+        XCTAssertFalse(loader.cancelled.contains(oldCurrent.id))
+        let countAtPause = loader.calls.count
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(loader.calls.count, countAtPause)
+        XCTAssertLessThanOrEqual(countAtPause, 18, "Three final failures allow at most two replacement requests before stopping")
         loader.resolve(oldCurrent)
-        let oldCurrentCommitted = await waitUntil { store.files[1] != nil && store.inflight[1] == nil }
-        XCTAssertTrue(oldCurrentCommitted)
-        XCTAssertTrue(store.prefetchPaused)
-
+        let committed = await waitUntil { store.files[1] != nil && store.inflight[1] == nil }
+        XCTAssertTrue(committed)
+        XCTAssertTrue(store.prefetchPaused, "A foreground that began before the pause cannot clear it")
         update(store, loader, scope: identity, current: 2)
-        let newCurrentStarted = await waitUntil { loader.call(page: 2, attempt: 2) != nil }
-        XCTAssertTrue(newCurrentStarted, "Moving to a failed prefetched page grants one fresh foreground attempt")
-        let recoveredCurrent = try XCTUnwrap(loader.call(page: 2, attempt: 2))
-        XCTAssertEqual(recoveredCurrent.priority, .foreground)
-        loader.resolve(recoveredCurrent)
-        let resumed = await waitUntil { !store.prefetchPaused && store.files[2] != nil && loader.call(page: 3, attempt: 2) != nil }
-        XCTAssertTrue(resumed, "A current foreground started after the network pause can recover automatic prefetch on success")
-        XCTAssertEqual(loader.call(page: 3, attempt: 2)?.priority, .prefetch)
+        let restarted = await waitUntil { loader.call(page: 2, attempt: 2) != nil }
+        XCTAssertTrue(restarted)
+        loader.resolve(try XCTUnwrap(loader.call(page: 2, attempt: 2)))
+        let resumed = await waitUntil { !store.prefetchPaused && store.files[2] != nil && loader.call(page: 5, attempt: 2) != nil }
+        XCTAssertTrue(resumed)
+        XCTAssertEqual(loader.calls.filter { $0.page == 3 }.count, 1, "Other failed pages retain their visible/manual retry contract")
     }
 
-    func testTimeoutAndConnectionRefusedAlsoPausePageAndMediaRequests() async throws {
+    func testIsolatedTimeoutAndConnectionRefusedPreserveBothPageAndMediaWork() async throws {
         let failures: [(String, RequestFailure)] = [
             ("timeout-page", .transport(.page, URLError.timedOut.rawValue)),
             ("refused-media", .transport(.media, URLError.cannotConnectToHost.rawValue))
         ]
         for (name, failure) in failures {
-            let store = ReaderMediaStore()
-            let loader = ControlledLoader()
-            let identity = scope()
+            let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()
             update(store, loader, scope: identity, current: 1, prefetchCount: 3, concurrency: 4)
             let started = await waitUntil { loader.calls.count == 4 }
-            XCTAssertTrue(started, "The bounded test window should start for \(name)")
-            let failed = try XCTUnwrap(loader.call(page: 2))
-            loader.reject(failed, with: failure)
-            let cancelled = await waitUntil {
-                store.prefetchPaused && [3, 4].allSatisfy { page in
-                    loader.call(page: page).map { loader.cancelled.contains($0.id) } ?? false
-                }
-            }
-            XCTAssertTrue(cancelled, "\(name) should pause automatic work and cancel outstanding prefetch")
-            XCTAssertEqual(loader.calls.count, 4, "The cancelled window must not refill after \(name)")
+            XCTAssertTrue(started)
+            loader.reject(try XCTUnwrap(loader.call(page: 2)), with: failure)
+            let failed = await waitUntil { store.failures[2] != nil && store.inflight[2] == nil }
+            XCTAssertTrue(failed)
+            XCTAssertFalse(store.prefetchPaused, name)
+            XCTAssertTrue([3, 4].allSatisfy { loader.call(page: $0).map { !loader.cancelled.contains($0.id) } ?? false }, name)
+            XCTAssertEqual(loader.calls.filter { $0.page == 2 }.count, 1)
             store.reset()
         }
+    }
+
+    func testSuccessfulPageResetsTheTransportFailureStreak() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()
+        defer { store.reset() }
+        update(store, loader, scope: identity, current: 1, concurrency: 4)
+        let started = await waitUntil { loader.calls.count == 4 }
+        XCTAssertTrue(started)
+        for page in 2...3 {
+            loader.reject(try XCTUnwrap(loader.call(page: page)), with: RequestFailure.transport(.page, URLError.networkConnectionLost.rawValue))
+            let filled = await waitUntil { loader.call(page: page + 3) != nil }
+            XCTAssertTrue(filled)
+        }
+        loader.resolve(try XCTUnwrap(loader.call(page: 4)))
+        let healthy = await waitUntil { store.files[4] != nil && loader.call(page: 7) != nil }
+        XCTAssertTrue(healthy)
+        for page in 5...6 {
+            loader.reject(try XCTUnwrap(loader.call(page: page)), with: RequestFailure.transport(.media, URLError.timedOut.rawValue))
+            let filled = await waitUntil { loader.call(page: page + 3) != nil }
+            XCTAssertTrue(filled)
+            XCTAssertFalse(store.prefetchPaused, "A successful intervening image prevents unrelated failures accumulating forever")
+        }
+    }
+
+    func testScopeChangeDoesNotCarryOldTransportFailuresIntoNewGallery() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader(), old = scope()
+        defer { store.reset() }
+        update(store, loader, scope: old, current: 1, concurrency: 4)
+        let started = await waitUntil { loader.calls.count == 4 }
+        XCTAssertTrue(started)
+        for page in 2...3 {
+            loader.reject(try XCTUnwrap(loader.call(page: page)), with: RequestFailure.transport(.page, URLError.timedOut.rawValue))
+            let failed = await waitUntil { store.failures[page] != nil }
+            XCTAssertTrue(failed)
+        }
+        let next = scope()
+        update(store, loader, scope: next, current: 1, concurrency: 4)
+        let changed = await waitUntil { loader.call(page: 4, attempt: 2) != nil }
+        XCTAssertTrue(changed)
+        loader.reject(try XCTUnwrap(loader.call(page: 4, attempt: 2)), with: RequestFailure.transport(.media, URLError.networkConnectionLost.rawValue))
+        let failed = await waitUntil { store.failures[4] != nil }
+        XCTAssertTrue(failed)
+        XCTAssertFalse(store.prefetchPaused)
     }
 
     func testRestrictedAnd429PausesNeedExplicitRetryEvenAfterNewCurrentSucceeds() async throws {
         let protectedFailures: [(String, Error)] = [
             ("authentication", ViewerError.authentication),
             ("challenge", ViewerError.challenge),
+            ("quota", ViewerError.imageLimit),
             ("http-429", RequestFailure.http(.media, 429))
         ]
 

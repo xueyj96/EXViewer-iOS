@@ -51,6 +51,7 @@ struct ReaderMediaScope: Hashable, Sendable {
     private var failurePriorities: [Int: MediaRequestPriority] = [:]
     private var foregroundRecoveryUsed = Set<Int>()
     private var prefetchPauseReason: PrefetchPauseReason?
+    private var networkFailurePages = Set<Int>()
     private var connectivityEpoch: UInt64 = 0
     private var isCurrent: Validity?
     private var revision = UUID()
@@ -278,6 +279,7 @@ struct ReaderMediaScope: Hashable, Sendable {
                 self.files[index] = url
                 self.failures.removeValue(forKey: index)
                 self.failurePriorities.removeValue(forKey: index)
+                if self.prefetchPauseReason == nil { self.networkFailurePages.removeAll() }
                 if startedAsCurrentForeground,
                    self.currentPage == index,
                    self.prefetchPauseReason == .network,
@@ -302,8 +304,7 @@ struct ReaderMediaScope: Hashable, Sendable {
                 self.failures[index] = error
                 self.failurePriorities[index] = demand.priority
                 self.progress.removeValue(forKey: index)
-                if let reason = Self.pauseReason(for: error) {
-                    self.pausePrefetch(reason)
+                if let reason = Self.pauseReason(for: error), self.shouldPause(reason, afterFailureAt: index) {
                     for other in Array(self.requests.keys) where other != index {
                         guard let otherRequest = self.requests[other],
                               otherRequest.priority == .prefetch || otherRequest.priority == .thumbnail else { continue }
@@ -324,6 +325,20 @@ struct ReaderMediaScope: Hashable, Sendable {
         inflight[index] = priority
     }
 
+    /// One bad image source must not discard healthy neighboring transfers.
+    /// Three different pages failing without a success establish a broader
+    /// connectivity failure. Failed pages retain their existing explicit /
+    /// visible retry budget; filling the window never retries them.
+    private func shouldPause(_ reason: PrefetchPauseReason, afterFailureAt index: Int) -> Bool {
+        if reason == .network {
+            guard prefetchPauseReason != .restricted else { return false }
+            if networkFailurePages.count < 3 { networkFailurePages.insert(index) }
+            guard networkFailurePages.count >= 3 else { return false }
+        }
+        pausePrefetch(reason)
+        return true
+    }
+
     private func pausePrefetch(_ reason: PrefetchPauseReason) {
         switch reason {
         case .restricted:
@@ -340,6 +355,7 @@ struct ReaderMediaScope: Hashable, Sendable {
     private func clearPrefetchPause(advanceEpoch: Bool) {
         prefetchPauseReason = nil
         prefetchPaused = false
+        networkFailurePages.removeAll()
         if advanceEpoch { connectivityEpoch &+= 1 }
     }
 

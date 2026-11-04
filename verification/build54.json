@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "build": "54",
+  "checked_at_utc": "2026-11-04T13:06:24.997590+00:00",
+  "runtime_source_sha256": "6a5588548d04163bb3df19deb1a0830920aaf623e69f498d7d841fb4bd7663c0",
+  "release_build": "SUCCEEDED",
+  "tests": {
+    "native": {
+      "passed": 70,
+      "failed": 0,
+      "scope": "Reader scheduling, isolated transport failures, protected pauses, request gates, media transport, disk cache, progress, recovery and settings policy"
+    },
+    "UI": {
+      "passed": 7,
+      "failed": 0,
+      "scope": "Loading values persist across restart and reach reader; isolated failure preserves metadata and healthy preloads; visible retry; rolling window across 10 pages; cached reverse; navigation; asynchronous favorite save",
+      "execution_groups": [1, 6],
+      "runtime_source_hash_identical_across_groups": true
+    },
+    "core_baseline": {
+      "verification": "build52.json",
+      "passed": 73,
+      "failed": 0,
+      "Core_source_file_hashes_unchanged_from_build52_and53": true,
+      "rerun_in_build54": false
+    },
+    "visual_review_completed": true,
+    "skipped": 0,
+    "latest_unresolved_failures": 0
+  },
+  "controlled_observations": {
+    "environment": "Isolated iOS Simulator fixtures; no live site load test",
+    "single_failure_with_16_pending_requests": {
+      "before_build": "53",
+      "before_other_preloads_cancelled": 14,
+      "after_other_preloads_cancelled": 0,
+      "window_refills_after_failed_request": true,
+      "failed_page_automatically_retried_by_window": false
+    },
+    "page_parser_transfer_and_disk_cache": {
+      "forced_failing_image_attempts": 2,
+      "healthy_future_images_ready_while_on_page1": 5,
+      "completed_files_fully_decoded": 6,
+      "extra_requests_when_showing_cached_page3": 0,
+      "extra_media_requests_for_separate_disk_lookup": 0
+    },
+    "rolling_reader_window": {
+      "fixture_pages": 40,
+      "prefetch_window": 8,
+      "concurrency": 4,
+      "current_after_forward_turns": 10,
+      "completed_forward_pages": [11, 12, 13, 14, 15, 16, 17, 18],
+      "cached_reverse_preserves_presentation": true
+    },
+    "settings": {
+      "saved_prefetch": 64,
+      "saved_image_concurrency": 4,
+      "saved_site_page_concurrency": 1,
+      "values_restored_after_relaunch": true,
+      "prefetch_and_image_concurrency_reach_reader": true
+    }
+  },
+  "failure_policy": {
+    "isolated_transport_failure": "Retain healthy transfers and fill the forward window; preserve the failed page's existing retry contract",
+    "distinct_consecutive_failed_pages_before_network_pause": 3,
+    "successful_load_clears_failure_streak": true,
+    "maximum_replacement_requests_before_three_failure_pause": 2,
+    "authentication_quota_challenge_and_HTTP429_pause_immediately": true,
+    "per_image_pipeline_attempt_budget": 2,
+    "request_concurrency_defaults_and_limits_increased": false,
+    "cache_capacity_changed": false,
+    "new_polling_or_retry_timer": false
+  },
+  "loading_control_fix": {
+    "before": "Selecting image concurrency 4 left visual selection, accessible value and stored preference at 16",
+    "after": "Native segmented controls explicitly publish value changes; the same persistence-to-reader UI test passes",
+    "navigation_gesture_code_changed": false
+  },
+  "public_ipa": {
+    "personal_profile_included": false,
+    "requires_own_signing": true
+  },
+  "limitations": [
+    "Controlled transfer fixtures exercise parser, URLSession delivery, disk writing and full image decode; they do not measure live-site bandwidth or physical-device latency.",
+    "A prefetch target is a forward window, not a guarantee that every file is already downloaded.",
+    "Three distinct consecutive transport failures still pause automatic work; a fresh current-page success or explicit retry follows the existing recovery contract.",
+    "Installation readback and real-device reading acceptance are separate stages.",
+    "The separate previously reported single-gallery response remains unavailable."
+  ]
+}

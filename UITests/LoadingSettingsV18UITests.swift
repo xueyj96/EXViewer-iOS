@@ -39,24 +39,28 @@ final class LoadingSettingsV18UITests: XCTestCase {
         readerShot.lifetime = .keepAlways; add(readerShot)
     }
 
-    func testNetworkPauseStopsAutomaticMetadataAndDoesNotBlockVisibleTurns() {
+    func testIsolatedNetworkFailureKeepsMetadataAndHealthyNeighborPreloadsRunning() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--qa", "--screen", "reader", "--qa-reset-reader-preferences",
                                "--qa-reader-transition", "--qa-reader-many", "--qa-reader-paging",
-                               "--qa-reader-prefetch-timeout", "--qa-metadata-ms=3000"]
+                               "--qa-reader-prefetch-timeout", "--qa-prefetch=6", "--qa-metadata-ms=3000"]
         app.launch()
         let page = app.buttons["reader.page"]
         XCTAssertTrue(page.waitForExistence(timeout: 12))
         let state = app.descendants(matching: .any)["reader.cache.qa"].firstMatch
         XCTAssertTrue(state.waitForExistence(timeout: 8))
-        let stopped = NSPredicate { _, _ in
+        let filled = NSPredicate { _, _ in
             let value = state.value as? String ?? ""
-            return value.contains("automaticMetadata=false;") && value.contains("metadataLoading=false;")
+            return value.contains("files=1,3,4,5,6,7;") && value.contains("automaticMetadata=false;") && value.contains("metadataLoading=false;")
         }
-        expectation(for: stopped, evaluatedWith: state); waitForExpectations(timeout: 8)
+        expectation(for: filled, evaluatedWith: state); waitForExpectations(timeout: 12)
+        XCTAssertEqual(page.label, "1 / 12", "A failed preload must not change the current page")
+        print("READER54_HEALTHY_FUTURE_FILES_AT_PAGE1 \(state.value ?? "unavailable")")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "reader54.isolated-failure-keeps-window"; shot.lifetime = .keepAlways; add(shot)
         XCTAssertFalse(app.buttons["reader.prefetch-menu"].exists)
-        app.buttons["reader.next"].tap()
+        app.coordinate(withNormalizedOffset: .init(dx: 0.82, dy: 0.36)).tap()
         let second = NSPredicate { _, _ in page.label.hasSuffix("2 / 12") || page.label.hasSuffix("2 / 3") }
         expectation(for: second, evaluatedWith: page); waitForExpectations(timeout: 6)
         XCTAssertTrue(app.buttons["reader.close"].isHittable)
