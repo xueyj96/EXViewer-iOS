@@ -1,8 +1,9 @@
 import XCTest
+import UIKit
 
 final class ExViewerUITests: XCTestCase {
-    private func launch(_ screen: String = "browse") -> XCUIApplication {
-        let app = XCUIApplication(); app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--screen", screen]; app.launch(); return app
+    private func launch(_ screen: String = "browse", extraArguments: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication(); app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--screen", screen] + extraArguments; app.launch(); return app
     }
     private func capture(_ app: XCUIApplication, _ name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot()); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
@@ -13,7 +14,7 @@ final class ExViewerUITests: XCTestCase {
     private func openComposer(_ app: XCUIApplication) -> XCUIElement {
         let entry = app.buttons["discover.search-entry"]
         XCTAssertTrue(entry.waitForExistence(timeout: 12)); entry.tap()
-        XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         return field(app, "compose.text")
     }
     private func submit(_ app: XCUIApplication, text: String) {
@@ -23,7 +24,7 @@ final class ExViewerUITests: XCTestCase {
         }
         input.typeText(text); app.buttons["compose.apply"].tap()
         XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 6))
-        XCTAssertFalse(app.navigationBars["组合搜索"].exists)
+        XCTAssertFalse(app.searchComposerTitle("搜索").exists)
     }
     private func readThroughDetails(_ app: XCUIApplication) {
         let title = app.staticTexts["海岸线 · 插画与速写"]
@@ -50,7 +51,7 @@ final class ExViewerUITests: XCTestCase {
         app.staticTexts["海岸线 · 插画与速写"].tap()
         app.buttons["full color"].tap()
         XCTAssertTrue(app.buttons["包含 · other:full color  ×"].waitForExistence(timeout: 6))
-        XCTAssertFalse(app.navigationBars["画廊详情"].exists)
+        XCTAssertFalse(app.staticTexts["画廊详情"].exists)
         app.buttons["discover.back"].tap()
         XCTAssertTrue(app.segmentedControls.buttons["热门"].isSelected)
         capture(app, "Detail tag replaces discovery and returns to previous feed")
@@ -64,7 +65,7 @@ final class ExViewerUITests: XCTestCase {
         let moved = NSPredicate { _, _ in (image.value as? String) != initial }
         expectation(for: moved, evaluatedWith: image); waitForExpectations(timeout: 4)
         XCTAssertEqual(app.buttons["reader.page"].label, "1 / 3")
-        app.buttons["reader.direction"].tap(); app.buttons["从上到下 ↓"].tap()
+        ReaderSettingsUIHelpers.setDirection("topToBottom", in: app)
         app.swipeUp()
         let changed = NSPredicate { _, _ in app.buttons["reader.page"].label != "1 / 3" }
         expectation(for: changed, evaluatedWith: app.buttons["reader.page"]); waitForExpectations(timeout: 6)
@@ -77,7 +78,7 @@ final class ExViewerUITests: XCTestCase {
         let input = openComposer(app); input.tap(); input.typeText("Landscape -other:watercolor")
         app.buttons["compose.filters"].tap()
         let artist = app.textFields["compose.artist"]; artist.tap(); artist.typeText("Mori")
-        let titleScope = app.switches["关键词只匹配标题"]
+        let titleScope = app.switches["仅搜标题"]
         titleScope.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
         XCTAssertEqual(titleScope.value as? String, "1")
         app.buttons["compose.apply"].tap()
@@ -98,13 +99,13 @@ final class ExViewerUITests: XCTestCase {
         XCTAssertEqual(restored.value as? String, "Landscape")
         app.buttons["compose.filters"].tap()
         XCTAssertEqual(app.textFields["compose.artist"].value as? String, "Mori")
-        XCTAssertEqual(app.switches["关键词只匹配标题"].value as? String, "1")
+        XCTAssertEqual(app.switches["仅搜标题"].value as? String, "1")
         app.buttons["BackButton"].tap()
         restored.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         restored.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Landscape".count))
         restored.typeText("Landscape edited")
         app.buttons["compose.save-favorite"].tap()
-        XCTAssertTrue(app.navigationBars["编辑搜索组合"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["编辑搜索组合"].waitForExistence(timeout: 5))
         app.buttons["search.save.confirm"].tap()
         XCTAssertEqual(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.value as? String, "已保存")
         app.buttons["compose.apply"].tap()
@@ -130,7 +131,7 @@ final class ExViewerUITests: XCTestCase {
         app.buttons["main.tab.account"].tap()
         let tagSettings = app.buttons["account.tags"]
         XCTAssertTrue(tagSettings.waitForExistence(timeout: 5)); tagSettings.tap()
-        let scope = app.segmentedControls.buttons["屏蔽标签"]
+        let scope = app.buttons["tags.scope.1"]
         XCTAssertTrue(scope.waitForExistence(timeout: 15)); scope.tap()
         app.buttons["tags.add"].tap()
         let tag = app.textFields["tag.name"]
@@ -152,16 +153,55 @@ final class ExViewerUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["海岸线 · 插画与速写"].waitForExistence(timeout: 5))
     }
     func testAccountSeparatesSessionAndEXVerification() {
-        let app = launch("account")
+        let app = launch("account", extraArguments: ["--qa-account-status-preview"])
         XCTAssertTrue(app.buttons["account.login-management"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.buttons["登录"].exists)
-        XCTAssertTrue(app.staticTexts["尚未取得当前额度"].exists)
+        let accountTitle = app.staticTexts["站点账号"]
+        let login = app.buttons["登录"]
+        XCTAssertTrue(accountTitle.exists && login.exists)
+        XCTAssertEqual(accountTitle.frame.midY, login.frame.midY, accuracy: 1)
         capture(app, "Compact account and separate site states")
         app.buttons["account.login-management"].tap()
         XCTAssertTrue(app.buttons["重新登录"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["验证当前会话"].exists)
         XCTAssertFalse(app.buttons["account.ex-web"].exists)
+        let eh = app.staticTexts["E-Hentai"]
+        let ex = app.staticTexts["ExHentai"]
+        let failed = app.staticTexts["连接失败"]
+        let available = app.staticTexts["EX 画廊可访问"]
+        for item in [eh, ex, failed, available] { XCTAssertTrue(item.exists) }
+        XCTAssertEqual(eh.frame.minX, ex.frame.minX, accuracy: 1)
+        XCTAssertEqual(failed.frame.maxX, available.frame.maxX, accuracy: 1)
+        XCTAssertEqual(eh.frame.midY, failed.frame.midY, accuracy: 1)
+        XCTAssertEqual(ex.frame.midY, available.frame.midY, accuracy: 1)
         capture(app, "Login management and independent EX verification")
+
+        app.buttons["BackButton"].tap()
+        let quota = app.buttons["account.quota"]
+        for _ in 0..<4 { if quota.isHittable { break }; app.swipeUp() }
+        quota.tap()
+        XCTAssertTrue(app.staticTexts["计量方式"].waitForExistence(timeout: 5))
+        capture(app, "IP quota with external settings button")
+        XCTAssertTrue(app.staticTexts["暂不可读"].exists)
+        let settings = app.descendants(matching: .any)["account.quota.settings"].firstMatch
+        XCTAssertTrue(settings.exists)
+        // A List row's accessibility frame also includes its four-point bottom gap.
+        XCTAssertEqual(settings.frame.height, 40, accuracy: 1)
+        let quotaRows = ["计量方式", "用量 / 上限", "重置费用"].map { app.staticTexts[$0] }
+        for (upper, lower) in zip(quotaRows, quotaRows.dropFirst()) {
+            XCTAssertEqual(lower.frame.midY - upper.frame.midY, 36, accuracy: 1)
+        }
+        XCTAssertEqual(settings.frame.midY - quotaRows[2].frame.midY, 42, accuracy: 2)
+
+        app.buttons["BackButton"].tap()
+        let storage = app.buttons["account.storage"]
+        for _ in 0..<4 { if storage.isHittable { break }; app.swipeUp() }
+        storage.tap()
+        let cacheLimit = app.staticTexts["浏览缓存上限"]
+        for _ in 0..<4 { if cacheLimit.isHittable { break }; app.swipeUp() }
+        let clearCache = app.buttons["清理浏览缓存"]
+        XCTAssertTrue(cacheLimit.exists && clearCache.isHittable)
+        XCTAssertFalse(app.staticTexts["按设备可用空间保存"].exists)
+        capture(app, "Storage counters and aligned clear cache action")
     }
     func testSiteFavoritesAndManualStoragePolicy() {
         let app = launch()
@@ -180,18 +220,22 @@ final class ExViewerUITests: XCTestCase {
     func testFavoritesMultiSelectRequiresExplicitConfirmation() {
         let app = launch()
         app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap()
         let first = app.buttons["favorites.gallery.1"]
         XCTAssertTrue(first.waitForExistence(timeout: 10))
         first.press(forDuration: 0.8)
         XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
         app.buttons["favorites.select.2"].tap()
         XCTAssertTrue(app.staticTexts["已选 2 项"].exists)
+        app.buttons["favorites.manage"].tap()
         app.buttons["favorites.remove"].tap()
         XCTAssertTrue(app.buttons["移除所选收藏"].waitForExistence(timeout: 5))
         app.buttons["取消"].tap()
         XCTAssertTrue(app.staticTexts["已选 2 项"].exists)
-        app.buttons["favorites.move"].tap(); app.buttons["稍后阅读"].tap()
-        app.buttons["确认移动"].tap()
+        app.buttons["favorites.move"].tap()
+        let group = app.buttons["favorites.move-to.0"]
+        XCTAssertTrue(group.waitForExistence(timeout: 5)); group.tap()
+        app.buttons["favorites.confirm-move"].tap()
         XCTAssertTrue(app.staticTexts["测试模式仅检查多选交互，未修改站点收藏。"].waitForExistence(timeout: 5))
         capture(app, "Favorites selection and explicit batch confirmation")
     }
@@ -210,13 +254,17 @@ final class ExViewerUITests: XCTestCase {
         continueByScrolling(app.scrollViews["discover.feed"].buttons["gallery.open.101"])
         capture(app, "Discovery appends after actual downward browsing")
         submit(app, text: "Neutral query")
-        XCTAssertTrue(app.staticTexts["已执行：EX · Neutral query"].waitForExistence(timeout: 5))
+        let searchEntry = app.buttons["discover.search-entry"]
+        let applied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "Neutral query"),
+                                                  object: searchEntry)
+        XCTAssertEqual(XCTWaiter.wait(for: [applied], timeout: 5), .completed)
         let firstSearchResult = app.scrollViews["discover.feed"].buttons["gallery.open.1"]
         expectation(for: NSPredicate { _, _ in firstSearchResult.isHittable }, evaluatedWith: nil)
         waitForExpectations(timeout: 5)
         continueByScrolling(app.scrollViews["discover.feed"].buttons["gallery.open.101"])
         capture(app, "Search results append in the same feed")
         app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap()
         XCTAssertTrue(app.buttons["favorites.gallery.1"].waitForExistence(timeout: 10))
         continueByScrolling(app.buttons["favorites.gallery.101"])
         capture(app, "Favorites append after actual downward browsing")
@@ -228,23 +276,97 @@ final class ExViewerUITests: XCTestCase {
         XCTAssertTrue(app.buttons["排除 · other:city  ×"].exists)
         let input = openComposer(app)
         XCTAssertEqual(input.value as? String, "Autumn")
-        XCTAssertEqual(app.switches["关键词只匹配标题"].value as? String, "1")
+        XCTAssertEqual(app.switches["仅搜标题"].value as? String, "1")
         app.buttons["compose.cancel"].tap()
         capture(app, "Inline syntax remains compatible in combination input")
     }
 
     func testQuotaAndSponsorshipUseNativePages() {
+        assertAccountSubpages(orientation: .portrait)
+    }
+
+    func testAccountSubpagesAlignInLandscape() {
+        assertAccountSubpages(orientation: .landscapeLeft)
+    }
+
+    private func assertAccountSubpages(orientation: UIDeviceOrientation) {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = orientation
+        defer { XCUIDevice.shared.orientation = .portrait }
         let app = launch("account")
+        let accountHeader = app.descendants(matching: .any)["account.header"].firstMatch
+        XCTAssertTrue(accountHeader.waitForExistence(timeout: 6))
+        let settled = NSPredicate { _, _ in (app.frame.width > app.frame.height) == orientation.isLandscape }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: settled, object: nil)], timeout: 6), .completed)
+        let accountFrame = accountHeader.frame
+        for page in ["login-management": "login-page", "tags": "tags-page", "favorite-sync": "favorite-sync-page",
+                     "storage": "storage-page", "quota": "quota-page", "sponsorship": "sponsorship-page"]
+            .sorted(by: { $0.key < $1.key }) {
+            let link = app.buttons["account.\(page.key)"]
+            let lowerEdge = app.buttons["main.tab.account"].frame.minY
+            for _ in 0..<8 {
+                if link.isHittable && link.frame.midY > accountHeader.frame.maxY + 4 &&
+                    link.frame.midY < lowerEdge - 4 { break }
+                if link.frame.midY < accountHeader.frame.maxY { app.swipeDown(velocity: .slow) }
+                else { app.swipeUp(velocity: .slow) }
+            }
+            XCTAssertTrue(link.isHittable)
+            XCTAssertGreaterThan(link.frame.midY, accountHeader.frame.maxY)
+            XCTAssertLessThan(link.frame.midY, lowerEdge)
+            if orientation.isLandscape && page.key == "tags" {
+                capture(app, "account-landscape-tags-before")
+                link.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.5)).tap()
+            } else {
+                link.tap()
+            }
+            let header = app.descendants(matching: .any)["account.\(page.value).header"].firstMatch
+            let title = app.staticTexts["account.\(page.value).title"]
+            let opened = title.waitForExistence(timeout: 5)
+            if !opened { capture(app, "account-\(page.key)-route-failure") }
+            XCTAssertTrue(opened)
+            XCTAssertEqual(header.frame.minX, accountFrame.minX, accuracy: 1)
+            XCTAssertEqual(header.frame.maxX, accountFrame.maxX, accuracy: 1)
+            XCTAssertEqual(title.frame.midX, header.frame.midX, accuracy: 1)
+            let back = header.buttons["BackButton"]
+            let action = header.buttons[page.key == "tags" ? "tags.add" : "account.\(page.value).action"]
+            XCTAssertTrue(action.exists)
+            XCTAssertEqual(action.frame.midY, back.frame.midY, accuracy: 1)
+            XCTAssertEqual(action.frame.width, back.frame.width, accuracy: 1)
+            XCTAssertEqual(action.frame.minX - title.frame.maxX, 4, accuracy: 1)
+            XCTAssertEqual(title.frame.minX - back.frame.maxX, 4, accuracy: 1)
+            if page.key == "storage", orientation.isLandscape {
+                let prefetch = app.sliders["account.loading.prefetch"]
+                let imageConcurrency = app.sliders["account.loading.concurrency"]
+                let siteConcurrency = app.sliders["account.loading.site-concurrency"]
+                let download = app.sliders["account.loading.download-concurrency"]
+                let bottomBarTop = app.buttons["main.tab.account"].frame.minY
+                for slider in [prefetch, imageConcurrency, siteConcurrency, download] {
+                    XCTAssertTrue(slider.isHittable)
+                    XCTAssertGreaterThanOrEqual(slider.frame.height, 44)
+                    XCTAssertLessThanOrEqual(slider.frame.maxY, bottomBarTop)
+                }
+                XCTAssertEqual(prefetch.frame.midY, imageConcurrency.frame.midY, accuracy: 1)
+                XCTAssertEqual(siteConcurrency.frame.midY, download.frame.midY, accuracy: 1)
+            }
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = "account-\(orientation.isLandscape ? "landscape" : "portrait")-\(page.key)"
+            shot.lifetime = .keepAlways
+            add(shot)
+            header.buttons["BackButton"].tap()
+            XCTAssertTrue(accountHeader.waitForExistence(timeout: 5))
+        }
         let quota = app.buttons["account.quota"]
         for _ in 0..<4 { if quota.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(app.staticTexts["尚未取得当前额度"].exists)
+        capture(app, "Account quota and sponsorship rows")
         quota.tap()
-        XCTAssertTrue(app.navigationBars["看图额度"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["看图额度"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.webViews.count, 0)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["BackButton"].tap()
         let sponsorship = app.buttons["account.sponsorship"]
         for _ in 0..<4 { if sponsorship.isHittable { break }; app.swipeUp() }
         sponsorship.tap()
-        XCTAssertTrue(app.navigationBars["赞助与权益"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["赞助与权益"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.webViews.count, 0)
         capture(app, "Native account quota and sponsorship pages")
     }
@@ -267,7 +389,6 @@ final class ExViewerUITests: XCTestCase {
         app.buttons["compose.filters"].tap()
         let first = app.buttons["compose.category.2"], second = app.buttons["compose.category.4"]
         let all = app.buttons["compose.categories.select-all"], invert = app.buttons["compose.categories.invert"]
-        let count = app.staticTexts["compose.categories.count"]
         for _ in 0..<5 { if first.isHittable && invert.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(first.isHittable); XCTAssertTrue(second.isHittable)
         XCTAssertLessThan(abs(first.frame.minY - second.frame.minY), 4)
@@ -276,28 +397,25 @@ final class ExViewerUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(first.frame.height, 44)
         XCTAssertGreaterThanOrEqual(all.frame.height, 44)
         XCTAssertGreaterThanOrEqual(invert.frame.height, 44)
-        XCTAssertEqual(count.label, "已选 10/10"); XCTAssertFalse(all.isEnabled)
+        XCTAssertFalse(all.isEnabled)
         first.tap(); second.tap()
-        XCTAssertEqual(count.label, "已选 8/10")
+        XCTAssertEqual(first.value as? String, "未选择"); XCTAssertEqual(second.value as? String, "未选择")
         invert.tap()
-        XCTAssertEqual(count.label, "已选 2/10")
         XCTAssertEqual(first.value as? String, "已选择"); XCTAssertEqual(second.value as? String, "已选择")
         XCTAssertEqual(app.buttons["compose.category.8"].value as? String, "未选择")
         if first.frame.minY > app.frame.height * 0.5 { app.swipeUp() }
         capture(app, "Category filters aligned with select all and invert")
         invert.tap()
-        XCTAssertEqual(count.label, "已选 8/10")
+        XCTAssertEqual(first.value as? String, "未选择"); XCTAssertEqual(second.value as? String, "未选择")
         all.tap()
-        XCTAssertEqual(count.label, "已选 10/10")
+        XCTAssertFalse(all.isEnabled)
         invert.tap()
-        XCTAssertEqual(count.label, "已选 0/10")
         XCTAssertTrue(app.staticTexts["compose.categories.empty"].exists)
         XCTAssertFalse(app.buttons["compose.apply"].isEnabled)
         invert.tap()
-        XCTAssertEqual(count.label, "已选 10/10")
+        XCTAssertFalse(all.isEnabled)
         XCTAssertTrue(app.buttons["compose.apply"].isEnabled)
         first.tap()
-        app.buttons["BackButton"].tap()
         app.buttons["compose.cancel"].tap()
         XCTAssertFalse(app.buttons["discover.back"].exists)
         let reopened = openComposer(app)
@@ -310,7 +428,6 @@ final class ExViewerUITests: XCTestCase {
         XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 5))
         _ = openComposer(app); app.buttons["compose.filters"].tap()
         for _ in 0..<5 { if first.isHittable { break }; app.swipeUp() }
-        XCTAssertEqual(count.label, "已选 2/10")
         XCTAssertEqual(first.value as? String, "已选择"); XCTAssertEqual(second.value as? String, "已选择")
         XCTAssertEqual(app.buttons["compose.category.8"].value as? String, "未选择")
     }
@@ -330,7 +447,6 @@ final class ExViewerUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(invert.frame.height, 44)
         XCTAssertEqual(first.label, "Doujinshi"); XCTAssertEqual(second.label, "Manga")
         first.tap(); invert.tap()
-        XCTAssertEqual(app.staticTexts["compose.categories.count"].label, "已选 1/10")
         XCTAssertEqual(first.value as? String, "已选择"); XCTAssertEqual(second.value as? String, "未选择")
         capture(app, "Category filters in dark mode with accessibility text size")
     }

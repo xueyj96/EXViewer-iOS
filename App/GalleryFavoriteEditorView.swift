@@ -2,22 +2,22 @@ import SwiftUI
 import ExViewerCore
 
 struct GalleryFavoriteEditorView: View {
+    private enum Panel { case actions, edit, remove }
     let gallery: Gallery
     let onState: (GalleryFavoriteState, GalleryFavoriteForm?) -> Void
-    let requestRemoval: Bool
     private let preparation: GalleryFavoritePreparation?
     private let scope: GalleryFavoriteScope
     private let initialPendingNote: String
     @ObservedObject private var syncCache: SiteFavoriteCache
     @StateObject private var model: GalleryFavoriteEditorModel
     @Environment(\.dismiss) private var dismiss
-    @State private var removing = false
+    @State private var panel: Panel
     @State private var mutation: Task<Void, Never>?
     @State private var checkingResult = false
 
-    init(gallery: Gallery, session: SiteSession, requestRemoval: Bool = false,
+    init(gallery: Gallery, session: SiteSession,
          preparation: GalleryFavoritePreparation? = nil, onState: @escaping (GalleryFavoriteState, GalleryFavoriteForm?) -> Void) {
-        self.gallery = gallery; self.onState = onState; self.requestRemoval = requestRemoval
+        self.gallery = gallery; self.onState = onState
         self.preparation = preparation; syncCache = session.favoriteStateCache; scope = GalleryFavoriteScope(gallery, session)
         let client = preparation?.client ?? favoriteClient(for: gallery, session: session)
         let initial = preparation?.initialForm.flatMap { $0.reference == gallery.ref ? $0 : nil }
@@ -25,12 +25,14 @@ struct GalleryFavoriteEditorView: View {
         let value = GalleryFavoriteEditorModel(client: client, initialForm: initial)
         if let preparation { value.useCachedState(preparation.initialState, pending: preparation.pending, group: preparation.pendingGroup, note: preparation.pendingNote) }
         _model = StateObject(wrappedValue: value)
+        if case .favorited = value.observedState { _panel = State(initialValue: .actions) }
+        else { _panel = State(initialValue: .edit) }
     }
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    Text(gallery.title).font(.subheadline).lineLimit(2)
+                    Text(gallery.title).font(.subheadline).lineLimit(1).truncationMode(.tail)
                     LabeledContent("站点", value: gallery.ref.site.name)
                     LabeledContent("当前状态", value: status)
                         .accessibilityIdentifier("favorite.editor.status")
@@ -73,7 +75,18 @@ struct GalleryFavoriteEditorView: View {
                         }
                     }
                 }
-                if requestRemoval, model.form != nil {
+                if panel == .actions, case .favorited = model.observedState {
+                    Section {
+                        Button { panel = .edit } label: {
+                            Label("调整分组与备注", systemImage: "folder")
+                        }.accessibilityIdentifier("favorite.editor.edit")
+                        Button(role: .destructive) { panel = .remove } label: {
+                            Label("取消收藏", systemImage: "star.slash")
+                        }.accessibilityIdentifier("favorite.editor.remove")
+                    }
+                    .disabled(syncCache.entry(scope)?.phase == .uncertain)
+                }
+                if panel == .remove, model.form != nil {
                     Section {
                         if model.canRemove {
                             Text("取消这部作品的站点收藏？")
@@ -84,7 +97,7 @@ struct GalleryFavoriteEditorView: View {
                         }
                     } footer: { Text("稍后再读、下载文件和阅读进度会保留。") }
                 }
-                if let form = model.form, !requestRemoval {
+                if let form = model.form, panel == .edit {
                     Section {
                         ForEach(form.groups) { group in
                             Button { model.selection = group.id } label: {
@@ -93,11 +106,18 @@ struct GalleryFavoriteEditorView: View {
                                     Spacer(minLength: 12)
                                     Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
                                         .opacity(model.selection == group.id ? 1 : 0)
-                                }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                            }.buttonStyle(.plain).disabled(model.saving || model.needsVerification)
-                                .accessibilityIdentifier("favorite.editor.group.\(group.id)")
-                                .accessibilityValue(model.selection == group.id ? "已选择" : "未选择")
-                                .accessibilityAddTraits(model.selection == group.id ? .isSelected : [])
+                                }
+                                .padding(.vertical, FeedChrome.panelSpacing)
+                                .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.saving || model.needsVerification)
+                            .listRowInsets(EdgeInsets(top: 0, leading: FeedChrome.systemGroupedListInset,
+                                                     bottom: 0, trailing: FeedChrome.systemGroupedListInset))
+                            .accessibilityIdentifier("favorite.editor.group.\(group.id)")
+                            .accessibilityValue(model.selection == group.id ? "已选择" : "未选择")
+                            .accessibilityAddTraits(model.selection == group.id ? .isSelected : [])
                         }
                     } header: { Text("收藏分组") }
                     footer: { if model.selection == nil { Text("选择一个分组，再保存到站点账号。") } }
@@ -111,10 +131,10 @@ struct GalleryFavoriteEditorView: View {
                                 (GalleryFavoriteForm.normalizedNote(model.note) == form.note ? "已保留原有备注；新备注请控制长度。" : "备注过长，请删减后保存。"))
                             .foregroundStyle(model.noteBytes > 200 && GalleryFavoriteForm.normalizedNote(model.note) != form.note ? Color.red : .secondary)
                     }
-                    if case .favorited = model.observedState {
+                    if model.canRemove {
                         Section {
-                            Button("取消收藏", role: .destructive) { removing = true }
-                                .disabled(!model.canRemove).accessibilityIdentifier("favorite.editor.remove")
+                            Button("取消收藏", role: .destructive) { panel = .remove }
+                                .accessibilityIdentifier("favorite.editor.remove")
                         }
                     }
                 }
@@ -122,7 +142,7 @@ struct GalleryFavoriteEditorView: View {
                     Text("reads=\(model.reads);posts=\(model.posts)").font(.system(size: 1)).foregroundStyle(.clear)
                         .accessibilityIdentifier("favorite.editor.qa-counts")
                 }
-                if model.form != nil && model.error == nil {
+                if panel == .edit && model.form != nil && model.error == nil {
                     Section {
                         Button("刷新站点状态") {
                             mutation = Task {
@@ -134,29 +154,28 @@ struct GalleryFavoriteEditorView: View {
                     }
                 }
             }
-            .navigationTitle("站点收藏").navigationBarTitleDisplayMode(.inline).appNavigationChrome()
-            .toolbar {
-                AppToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }.disabled(model.saving)
-                        .accessibilityIdentifier("favorite.editor.cancel")
-                }
-                AppToolbarItem(placement: .confirmationAction, tone: .accent) {
+            .floatingGroupedPageContent()
+            .floatingPageHeader("站点收藏", identifier: "favorite.editor") {
+                Button(panel == .actions ? "关闭" : "取消") { dismiss() }
+                    .buttonStyle(FeedHeaderButtonStyle()).disabled(model.saving)
+                    .accessibilityIdentifier("favorite.editor.cancel")
+            } trailing: {
+                if panel == .edit {
                     Button { save() } label: {
                         if model.saving { ProgressView().accessibilityLabel("保存中") } else { Text("保存") }
-                    }.disabled(!model.canSave || syncCache.entry(scope)?.phase == .uncertain ||
+                    }
+                    .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+                    .disabled(!model.canSave || syncCache.entry(scope)?.phase == .uncertain ||
                                (preparation?.pending == true && model.selection == preparation?.pendingGroup && model.note == initialPendingNote))
                         .accessibilityIdentifier("favorite.editor.save")
                 }
             }
-            .confirmationDialog("取消这部作品的站点收藏？", isPresented: $removing, titleVisibility: .visible) {
-                Button("取消收藏", role: .destructive) { save(remove: true) }
-                    .accessibilityIdentifier("favorite.editor.confirm-remove")
-            }
         }
-        .presentationDetents(requestRemoval ? [.medium, .large] : [.large])
+        .presentationDetents(panel == .edit ? [.large] : [.medium, .large])
         .interactiveDismissDisabled(model.saving)
-        .task {
-            if syncCache.entry(scope)?.phase != .uncertain && (model.form == nil || preparation?.requiresRefresh == true) {
+        .task(id: panel != .actions) {
+            if panel != .actions && syncCache.entry(scope)?.phase != .uncertain &&
+                (model.form == nil || preparation?.requiresRefresh == true) {
                 await model.reload(preservingEdits: model.form != nil); publishState()
             }
         }
@@ -202,10 +221,13 @@ struct FavoriteSyncStatusView: View {
     @ObservedObject var cache: SiteFavoriteCache
     var body: some View {
         List {
-            if let failure = cache.readFailure { Text(failure).foregroundStyle(.red) }
-            else if cache.changes.isEmpty { Text("没有待处理的收藏更改").foregroundStyle(.secondary) }
+            if let failure = cache.readFailure {
+                Text(failure).foregroundStyle(.red).accountPageCard()
+            } else if cache.changes.isEmpty {
+                Text("没有待处理的收藏更改").foregroundStyle(.secondary).accountPageCard()
+            }
             ForEach(cache.changes) { change in
-                Section {
+                VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
                     Text(change.title).font(.subheadline).lineLimit(2)
                     LabeledContent("状态", value: change.phase.label)
                     if let message = change.message { Text(message).font(.caption).foregroundStyle(.secondary) }
@@ -217,7 +239,15 @@ struct FavoriteSyncStatusView: View {
                         }
                     } else { Text("打开这部作品后继续同步。").font(.caption).foregroundStyle(.secondary) }
                 }
+                .accountPageCard()
             }
-        }.navigationTitle("收藏同步").navigationBarTitleDisplayMode(.inline).appNavigationChrome(backButton: true)
+        }
+        .accountSubpageHeader("收藏同步", identifier: "account.favorite-sync-page") {
+            Button { cache.refreshActive() } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(FeedHeaderButtonStyle())
+                .accessibilityLabel("刷新收藏同步")
+                .accessibilityIdentifier("account.favorite-sync-page.action")
+                .disabled(cache.changes.isEmpty)
+        }
     }
 }

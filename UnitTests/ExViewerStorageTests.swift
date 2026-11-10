@@ -159,6 +159,27 @@ final class ExViewerStorageTests: XCTestCase {
         XCTAssertEqual(library.snapshot.downloads.first?.status, .waiting)
     }
 
+    @MainActor func testBatchReadLaterAndDownloadsPersistOnceWithoutRestartingExistingJobs() throws {
+        let library = LibraryStore(qa: true)
+        let root = library.directory.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let galleries = LibrarySelectionQA.galleries
+        let paused = try XCTUnwrap(galleries.first)
+        library.updateDownload(.init(gallery: paused, status: .paused, completed: [1: "page-1.media"], total: paused.pages))
+        XCTAssertEqual(library.addReadLater(galleries + [paused]), galleries.count)
+        XCTAssertEqual(library.addReadLater([paused]), 0)
+        let manager = DownloadManager(session: SiteSession(qa: true), library: library)
+        manager.suspendForBackground()
+        XCTAssertEqual(manager.enqueueNew(galleries + [paused]), galleries.count - 1)
+        XCTAssertEqual(manager.enqueueNew(galleries), 0)
+        let restored = LibraryStore(qa: true, storageRoot: root)
+        XCTAssertEqual(restored.snapshot.readLater.map(\.id), galleries.map(\.id))
+        XCTAssertEqual(restored.snapshot.downloads.map(\.id), galleries.map(\.id))
+        XCTAssertEqual(restored.download(for: paused.ref)?.status, .paused)
+        XCTAssertEqual(restored.download(for: paused.ref)?.completed, [1: "page-1.media"])
+        XCTAssertTrue(restored.snapshot.downloads.dropFirst().allSatisfy { $0.status == .waiting })
+    }
+
     @MainActor func testPausedTaskCannotWriteIntoAnotherLibrary() async {
         let library = LibraryStore(qa: true)
         let root = library.directory.deletingLastPathComponent()

@@ -22,6 +22,7 @@ struct MediaCanvas: UIViewRepresentable {
     var onImageSizeChanged: ((CGSize) -> Void)? = nil
     var interactions = CanvasInteractions()
     var onPresentation: ((ImageCanvasPresentation) -> Void)? = nil
+    var onDecodeFailure: ((URL) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(onZoomChanged: onZoomChanged, onImageSizeChanged: onImageSizeChanged, interactions: interactions, onPresentation: onPresentation) }
     func makeUIView(context: Context) -> ImageCanvasView {
@@ -30,6 +31,7 @@ struct MediaCanvas: UIViewRepresentable {
         view.onImageSizeChanged = { [weak coordinator = context.coordinator] size in coordinator?.report(size) }
         view.readerInteractions = context.coordinator.canvasInteractions
         view.onPresentation = { [weak coordinator = context.coordinator] value in coordinator?.reportPresentation(value) }
+        connectDecodeFailure(view, coordinator: context.coordinator)
         view.load(file, animate: animated)
         return view
     }
@@ -42,10 +44,15 @@ struct MediaCanvas: UIViewRepresentable {
         view.onImageSizeChanged = { [weak coordinator = context.coordinator] size in coordinator?.report(size) }
         view.readerInteractions = context.coordinator.canvasInteractions
         view.onPresentation = { [weak coordinator = context.coordinator] value in coordinator?.reportPresentation(value) }
+        connectDecodeFailure(view, coordinator: context.coordinator)
         if view.file != file {
             context.coordinator.invalidatePendingReports()
             view.load(file, animate: animated)
         } else { view.setAnimated(animated) }
+    }
+    private func connectDecodeFailure(_ view: ImageCanvasView, coordinator: Coordinator) {
+        coordinator.onDecodeFailure = onDecodeFailure
+        view.onDecodeFailure = { [weak coordinator] file in coordinator?.reportDecodeFailure(file) }
     }
     static func dismantleUIView(_ view: ImageCanvasView, coordinator: Coordinator) {
         coordinator.invalidatePendingReports()
@@ -58,6 +65,7 @@ struct MediaCanvas: UIViewRepresentable {
         var onImageSizeChanged: ((CGSize) -> Void)?
         var interactions: CanvasInteractions
         var onPresentation: ((ImageCanvasPresentation) -> Void)?
+        var onDecodeFailure: ((URL) -> Void)?
         private var revision = UUID()
         init(onZoomChanged: ((Bool) -> Void)?, onImageSizeChanged: ((CGSize) -> Void)?, interactions: CanvasInteractions, onPresentation: ((ImageCanvasPresentation) -> Void)?) { self.onZoomChanged = onZoomChanged; self.onImageSizeChanged = onImageSizeChanged; self.interactions = interactions; self.onPresentation = onPresentation }
         var canvasInteractions: CanvasInteractions {
@@ -92,6 +100,13 @@ struct MediaCanvas: UIViewRepresentable {
             let expected = revision, callback = interactions.longPress
             DispatchQueue.main.async { [weak self] in
                 guard self?.revision == expected else { return }; callback?()
+            }
+        }
+        func reportDecodeFailure(_ file: URL) {
+            let expected = revision, callback = onDecodeFailure
+            DispatchQueue.main.async { [weak self] in
+                guard self?.revision == expected else { return }
+                callback?(file)
             }
         }
         func reportPresentation(_ value: ImageCanvasPresentation) {
@@ -139,6 +154,7 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
         }
     }
     var onPresentation: ((ImageCanvasPresentation) -> Void)?
+    var onDecodeFailure: ((URL) -> Void)?
     private(set) var file: URL?
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -212,6 +228,7 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
                 guard let self, self.loadRevision == revision, self.file == file else { return }
                 self.loadTask = nil
                 self.showDecodeError()
+                self.onDecodeFailure?(file)
             }
         }
     }

@@ -1,6 +1,5 @@
 import Combine
 import Foundation
-import SwiftUI
 
 @MainActor
 struct LibrarySelectionSummaryState: Equatable {
@@ -37,7 +36,6 @@ final class LibrarySelectionStore: ObservableObject {
     let summary = LibrarySelectionSummary()
     private(set) var selectedIDs = Set<String>()
     private var loadedIDs = Set<String>()
-    private var loadedSelectedCount = 0
     private var entries: [String: LibrarySelectionEntry] = [:]
 
     func entry(for id: String) -> LibrarySelectionEntry {
@@ -55,7 +53,6 @@ final class LibrarySelectionStore: ObservableObject {
         for id in removed { entries[id]?.update(false) }
         selectedIDs.subtract(removed)
         loadedIDs = ids
-        loadedSelectedCount = selectedIDs.intersection(ids).count
         entries = entries.reduce(into: [:]) { retained, element in
             if ids.contains(element.key) { retained[element.key] = element.value }
         }
@@ -69,7 +66,6 @@ final class LibrarySelectionStore: ObservableObject {
             entry.update(false)
         }
         selectedIDs = [id]
-        loadedSelectedCount = loadedIDs.contains(id) ? 1 : 0
         entry(for: id).update(true)
         publishSummary()
         return true
@@ -79,11 +75,9 @@ final class LibrarySelectionStore: ObservableObject {
     func toggle(_ id: String) -> Bool {
         guard loadedIDs.contains(id) else { return false }
         if selectedIDs.remove(id) != nil {
-            if loadedIDs.contains(id) { loadedSelectedCount = max(0, loadedSelectedCount - 1) }
             entries[id]?.update(false)
         } else {
             selectedIDs.insert(id)
-            if loadedIDs.contains(id) { loadedSelectedCount += 1 }
             entries[id]?.update(true)
         }
         publishSummary()
@@ -97,13 +91,11 @@ final class LibrarySelectionStore: ObservableObject {
                 selectedIDs.remove(id)
                 entries[id]?.update(false)
             }
-            loadedSelectedCount = 0
         } else {
             for id in loadedIDs {
                 selectedIDs.insert(id)
                 entries[id]?.update(true)
             }
-            loadedSelectedCount = loadedIDs.count
         }
         publishSummary()
     }
@@ -111,7 +103,6 @@ final class LibrarySelectionStore: ObservableObject {
     func remove(_ ids: [String]) {
         for id in ids {
             guard selectedIDs.remove(id) != nil else { continue }
-            if loadedIDs.contains(id) { loadedSelectedCount = max(0, loadedSelectedCount - 1) }
             entries[id]?.update(false)
         }
         publishSummary()
@@ -120,93 +111,12 @@ final class LibrarySelectionStore: ObservableObject {
     func clear() {
         for (id, entry) in entries where selectedIDs.contains(id) { entry.update(false) }
         selectedIDs.removeAll(keepingCapacity: true)
-        loadedSelectedCount = 0
         publishSummary()
     }
 
     private func publishSummary() {
+        // A selection can only contain loaded IDs, including after the feed changes.
         summary.update(count: selectedIDs.count,
-                       allLoadedSelected: !loadedIDs.isEmpty && loadedSelectedCount == loadedIDs.count)
-    }
-}
-
-struct FavoritesSelectionCount: View {
-    @ObservedObject private var summary: LibrarySelectionSummary
-
-    init(summary: LibrarySelectionSummary) { _summary = ObservedObject(wrappedValue: summary) }
-
-    var body: some View {
-        Text("已选 \(summary.value.count) 项")
-            .monospacedDigit()
-            .lineLimit(1).minimumScaleFactor(0.75)
-            .foregroundStyle(.secondary)
-            .accessibilityIdentifier("favorites.selection-count")
-    }
-}
-
-struct FavoritesSelectionActions: View {
-    @ObservedObject private var summary: LibrarySelectionSummary
-    private let store: LibrarySelectionStore
-    private let onMove: (Int) -> Void
-    private let onRemove: () -> Void
-    private let categoryName: (Int) -> String
-
-    init(store: LibrarySelectionStore, onMove: @escaping (Int) -> Void, onRemove: @escaping () -> Void,
-         categoryName: @escaping (Int) -> String) {
-        self.store = store
-        self.onMove = onMove
-        self.onRemove = onRemove
-        self.categoryName = categoryName
-        _summary = ObservedObject(wrappedValue: store.summary)
-    }
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            actions(compact: false)
-            actions(compact: true)
-        }
-    }
-
-    private func actions(compact: Bool) -> some View {
-        HStack {
-            Button {
-                store.toggleAllLoaded()
-            } label: {
-                if compact { Image(systemName: summary.value.allLoadedSelected ? "minus.circle" : "checkmark.circle").font(.system(size: 18)) }
-                else { Text(summary.value.allLoadedSelected ? "取消全选" : "全选已加载") }
-            }
-            .buttonStyle(AppActionButtonStyle(singleLine: true))
-            .accessibilityLabel(summary.value.allLoadedSelected ? "取消全选" : "全选已加载")
-            .frame(minHeight: 44)
-            .accessibilityIdentifier("favorites.select-all")
-
-            Spacer()
-
-            Menu {
-                ForEach(0...9, id: \.self) { index in
-                    Button(categoryName(index)) { onMove(index) }
-                        .accessibilityIdentifier("favorites.move-to.\(index)")
-                }
-            } label: {
-                if compact { Image(systemName: "folder").font(.system(size: 18)) }
-                else { Text("移到分组") }
-            }
-            .buttonStyle(AppActionButtonStyle(singleLine: true))
-            .accessibilityLabel("移到分组")
-            .frame(minHeight: 44)
-            .disabled(summary.value.count == 0)
-            .accessibilityIdentifier("favorites.move")
-
-            Button(role: .destructive, action: onRemove) {
-                if compact { Image(systemName: "trash").font(.system(size: 18)) }
-                else { Text("移除") }
-            }
-                .buttonStyle(AppActionButtonStyle(singleLine: true))
-                .accessibilityLabel("移除")
-                .frame(minHeight: 44)
-                .disabled(summary.value.count == 0)
-                .accessibilityIdentifier("favorites.remove")
-        }
-        .font(.subheadline)
+                       allLoadedSelected: !loadedIDs.isEmpty && selectedIDs.count == loadedIDs.count)
     }
 }

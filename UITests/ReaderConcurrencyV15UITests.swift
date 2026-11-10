@@ -34,13 +34,10 @@ final class ReaderConcurrencyV15UITests: XCTestCase {
         waitForCache("concurrency=16;", app: app)
 
         LoadingSettingsUIHelpers.open(in: app)
-        let concurrency = app.segmentedControls["account.loading.concurrency"]
-        XCTAssertEqual(concurrency.value as? String, "16")
+        let concurrency = app.sliders["account.loading.concurrency"]
+        XCTAssertEqual(concurrency.value as? String, "16 路")
         for value in [2, 4, 8, 16] {
-            let option = concurrency.buttons["\(value)"]
-            XCTAssertTrue(option.waitForExistence(timeout: 3))
-            option.tap()
-            XCTAssertEqual(concurrency.value as? String, "\(value)", "Concurrency option \(value) should be selectable")
+            LoadingSettingsUIHelpers.chooseImageConcurrency(value, in: app)
         }
         LoadingSettingsUIHelpers.setPrefetch(128, in: app)
         XCTAssertEqual(LoadingSettingsUIHelpers.prefetchCount(in: app), 128)

@@ -2,6 +2,14 @@ import XCTest
 @testable import ExViewerCore
 
 final class SearchInputTests: XCTestCase {
+    func testQuotedKeywordDoesNotInterpretColonAsATagScope() throws {
+        let parsed = try SearchInputParser.parse(#""language:chinese""#)
+        XCTAssertEqual(parsed.query.text, "language:chinese")
+        XCTAssertTrue(parsed.query.matchPhrase)
+        XCTAssertTrue(parsed.query.rules.isEmpty)
+        XCTAssertEqual(try parsed.query.expression(), #""language:chinese""#)
+    }
+
     func testMixedCaseTagScopesEmitCanonicalTermsWithoutChangingTitleOrDisplay() throws {
         let parsed = try SearchInputParser.parse(#"title:"Autumn Book" LANGUAGE:EnGLISh -OTHER:"Full Color" ~ArTiSt:SaMpLe"#)
         XCTAssertEqual(try parsed.query.expression(), #"title:"Autumn Book" language:"english"$ -other:"full color"$ ~artist:"sample"$"#)

@@ -1,19 +1,21 @@
 import Foundation
 
-/// Schedules site-page work and search dispatch pacing in the same queue.
+/// Schedules site-page work and paced search and metadata dispatches.
 /// Leases remain active until explicitly released, even if the limit changes.
 @MainActor final class SiteRequestScheduler {
+    enum Pacing: Hashable { case search, metadata, download }
+
     private final class Waiter {
         let id: UUID
         let demand: MediaRequestDemand
-        let search: Bool
+        let pacing: Pacing?
         let order: UInt64
         let continuation: CheckedContinuation<UUID, Error>
         var observer: UUID?
 
-        init(id: UUID, demand: MediaRequestDemand, search: Bool, order: UInt64,
+        init(id: UUID, demand: MediaRequestDemand, pacing: Pacing?, order: UInt64,
              continuation: CheckedContinuation<UUID, Error>) {
-            self.id = id; self.demand = demand; self.search = search
+            self.id = id; self.demand = demand; self.pacing = pacing
             self.order = order; self.continuation = continuation
         }
     }
@@ -27,7 +29,7 @@ import Foundation
     private var waiters: [Waiter] = []
     private var active: [UUID: Active] = [:]
     private var nextOrder: UInt64 = 0
-    private var lastSearchStart: TimeInterval?
+    private var lastStarts: [Pacing: TimeInterval] = [:]
     private var timer: Task<Void, Never>?
 
     init(searchInterval: TimeInterval = 3.1) {
@@ -42,16 +44,17 @@ import Foundation
         pump()
     }
 
-    func acquire(request: MediaRequestDemand, search: Bool, limit requestedLimit: Int) async throws -> UUID {
+    func acquire(request: MediaRequestDemand, pacing: Pacing?, limit requestedLimit: Int) async throws -> UUID {
         try Task.checkCancellation()
         limit = SiteRequestPolicy.clampedConcurrency(requestedLimit)
         let id = UUID()
         do {
             let lease = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    if canGrantImmediately(request: request, search: search) {
+                    let dispatchPacing = effectivePacing(pacing, for: request)
+                    if canGrantImmediately(request: request, pacing: dispatchPacing) {
                         active[id] = Active(demand: request)
-                        if search { lastSearchStart = ProcessInfo.processInfo.systemUptime }
+                        if let dispatchPacing { lastStarts[dispatchPacing] = ProcessInfo.processInfo.systemUptime }
                         continuation.resume(returning: id)
                         return
                     }
@@ -60,7 +63,7 @@ import Foundation
                         return
                     }
                     nextOrder &+= 1
-                    let waiter = Waiter(id: id, demand: request, search: search,
+                    let waiter = Waiter(id: id, demand: request, pacing: pacing,
                                         order: nextOrder, continuation: continuation)
                     waiter.observer = request.observe { [weak self] in
                         Task { @MainActor [weak self] in self?.pump() }
@@ -117,12 +120,10 @@ import Foundation
             for waiter in ordered {
                 let isForeground = waiter.demand.priority == .foreground
                 if !isForeground && !canStartBackground { continue }
-                if waiter.search, let lastSearchStart {
-                    let delay = searchInterval - (now - lastSearchStart)
-                    if delay > 0 {
-                        pacedWait = min(pacedWait ?? delay, delay)
-                        continue
-                    }
+                let delay = remainingDelay(effectivePacing(waiter.pacing, for: waiter.demand), now: now)
+                if delay > 0 {
+                    pacedWait = min(pacedWait ?? delay, delay)
+                    continue
                 }
                 selected = waiter
                 break
@@ -136,20 +137,15 @@ import Foundation
             } else { continue }
             if let observer = waiter.observer { waiter.demand.removeObserver(observer) }
             active[waiter.id] = Active(demand: waiter.demand)
-            if waiter.search { lastSearchStart = ProcessInfo.processInfo.systemUptime }
+            if let pacing = effectivePacing(waiter.pacing, for: waiter.demand) { lastStarts[pacing] = ProcessInfo.processInfo.systemUptime }
             waiter.continuation.resume(returning: waiter.id)
-        }
-        if waiters.contains(where: { $0.search }) {
-            let now = ProcessInfo.processInfo.systemUptime
-            let delay = max(0, searchInterval - (now - (lastSearchStart ?? -Double.infinity)))
-            schedulePump(after: delay)
         }
     }
 
     private var activeForegroundCount: Int { active.values.filter { $0.demand.priority == .foreground }.count }
     private var activeBackgroundCount: Int { active.count - activeForegroundCount }
 
-    private func canGrantImmediately(request: MediaRequestDemand, search: Bool) -> Bool {
+    private func canGrantImmediately(request: MediaRequestDemand, pacing: Pacing?) -> Bool {
         guard active.count < limit else { return false }
         let foreground = request.priority == .foreground
         if foreground {
@@ -157,15 +153,28 @@ import Foundation
         } else {
             guard limit == 1 || activeForegroundCount > 0 || activeBackgroundCount < limit - 1 else { return false }
         }
-        if search, let lastSearchStart,
-           searchInterval - (ProcessInfo.processInfo.systemUptime - lastSearchStart) > 0 {
-            return false
+        return remainingDelay(pacing, now: ProcessInfo.processInfo.systemUptime) <= 0
+    }
+
+    private func remainingDelay(_ pacing: Pacing?, now: TimeInterval) -> TimeInterval {
+        guard let pacing, let last = lastStarts[pacing] else { return 0 }
+        let interval: TimeInterval = switch pacing {
+        case .search: searchInterval
+        case .metadata: 1.3
+        case .download: 0.75
         }
-        return true
+        return interval - (now - last)
+    }
+
+    private func effectivePacing(_ pacing: Pacing?, for demand: MediaRequestDemand) -> Pacing? {
+        // A reader joining an offline page request can promote it immediately.
+        pacing == .download && demand.priority != .download ? nil : pacing
     }
 
     private func schedulePump(after delay: TimeInterval?) {
-        guard let delay, delay.isFinite, delay > 0, timer == nil else { return }
+        timer?.cancel()
+        timer = nil
+        guard let delay, delay.isFinite, delay > 0 else { return }
         timer = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
             catch { return }

@@ -1,65 +1,132 @@
 import SwiftUI
 import UIKit
 
-enum FloatingChrome {
-    static let background = Color(uiColor: .systemBackground).opacity(0.64)
-    static let headerBackground = Color(uiColor: .secondarySystemGroupedBackground).opacity(0.64)
-    static let controlFill = Color.primary.opacity(0.10)
+enum AppShape {
+    static let control = RoundedRectangle(cornerRadius: 8, style: .continuous)
+    static let card = RoundedRectangle(cornerRadius: 12, style: .continuous)
+    static let panelInset: CGFloat = 6
+    static let panel = aligned(with: control, offset: panelInset)
+    static let segmentInset: CGFloat = 3
+    static let segment = aligned(with: control, offset: -segmentInset)
+
+    // Offset the radius by the gap so nested corners follow the same curve.
+    static func aligned(with shape: RoundedRectangle, offset: CGFloat) -> RoundedRectangle {
+        RoundedRectangle(cornerRadius: max(0, shape.cornerSize.width + offset), style: .continuous)
+    }
 }
 
-private struct FloatingHeaderSurface: ViewModifier {
-    func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-        content
-            .background {
-                shape.fill(FloatingChrome.headerBackground)
-                    .padding(.horizontal, -6)
-                    .allowsHitTesting(false).accessibilityHidden(true)
-            }
-            .overlay {
-                shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-                    .padding(.horizontal, -6)
-                    .allowsHitTesting(false).accessibilityHidden(true)
-            }
-    }
+enum FloatingChrome {
+    static let surfaceOpacity = 0.90
+    static let background = Color(uiColor: .systemBackground).opacity(surfaceOpacity)
+    static let headerBackground = Color(uiColor: .secondarySystemGroupedBackground).opacity(surfaceOpacity)
+    static let readerBackground = Color.black.opacity(surfaceOpacity)
 }
 
 struct AppControlSurface: ViewModifier {
     var selected = false
-    var verticalInset: CGFloat = 0
+    var insets = EdgeInsets()
     @Environment(\.colorScheme) private var scheme
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let shape = AppShape.control
         content
             .background {
                 ZStack {
                     shape.fill(FloatingChrome.background)
                     if selected { shape.fill(Color.accentColor.opacity(0.08)) }
-                }.padding(.vertical, verticalInset)
+                }.padding(insets)
             }
             .overlay {
                 shape.strokeBorder(selected ? Color.accentColor.opacity(0.30) : Color.primary.opacity(scheme == .dark ? 0.16 : 0.10), lineWidth: 0.5)
-                    .padding(.vertical, verticalInset)
+                    .padding(insets)
             }
     }
 }
 
+enum TagChipMetrics {
+    static let faceHeight: CGFloat = 26
+    static let targetHeight: CGFloat = 32
+    static var verticalOverhang: CGFloat { (targetHeight - faceHeight) / 2 }
+}
+
 extension View {
-    func floatingHeaderSurface() -> some View { modifier(FloatingHeaderSurface()) }
+    func formRowSurface(shape: RoundedRectangle = AppShape.card, outer: Bool = false) -> some View {
+        background(outer ? Color.primary.opacity(0.035) : Color(uiColor: .secondarySystemGroupedBackground), in: shape)
+            .overlay {
+                shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+    }
+
+    func tagChipFaceLayout() -> some View {
+        padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .frame(minHeight: TagChipMetrics.faceHeight)
+    }
+
+    func tagChipTargetLayout() -> some View {
+        frame(minWidth: FeedChrome.rowHeight, minHeight: TagChipMetrics.targetHeight)
+    }
 
     func appControlSurface(selected: Bool = false, verticalInset: CGFloat = 0) -> some View {
-        modifier(AppControlSurface(selected: selected, verticalInset: verticalInset))
+        appControlSurface(selected: selected, insets: EdgeInsets(top: verticalInset, leading: 0, bottom: verticalInset, trailing: 0))
+    }
+
+    func appControlSurface(selected: Bool = false, insets: EdgeInsets) -> some View {
+        modifier(AppControlSurface(selected: selected, insets: insets))
+    }
+}
+
+struct CompactFormSegmentPicker<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [Value]
+    let title: (Value) -> String
+    let accessibilityLabel: String
+    let identifier: String
+    var body: some View {
+        HStack(spacing: FeedChrome.panelSpacing) {
+            ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                Button { selection = option } label: {
+                    Text(title(option))
+                        .font(.footnote.weight(selection == option ? .semibold : .regular))
+                        .foregroundStyle(selection == option ? Color.accentColor : Color.primary)
+                        .padding(.horizontal, FeedChrome.panelSpacing)
+                        .frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight)
+                        .background {
+                            AppShape.segment
+                                .fill(selection == option ? Color.accentColor.opacity(0.12) : Color.clear)
+                                .padding(.vertical, AppShape.segmentInset)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == option ? .isSelected : [])
+                .accessibilityIdentifier("\(identifier).\(index)")
+            }
+        }
+        .padding(.horizontal, AppShape.segmentInset)
+        .background(Color.primary.opacity(0.045), in: AppShape.control)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityIdentifier(identifier)
     }
 }
 
 struct TagChipButtonStyle: ButtonStyle {
     var selected = false
+    var allowsMultiline = false
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.subheadline)
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .appControlSurface(selected: selected)
-            .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        configuration.label.font(.footnote)
+            .lineLimit(allowsMultiline ? nil : 1)
+            .tagChipFaceLayout()
+            .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: AppShape.control)
+            .overlay {
+                AppShape.control.strokeBorder(
+                    selected ? Color.accentColor.opacity(0.40) : Color.primary.opacity(0.15), lineWidth: 0.5
+                ).allowsHitTesting(false)
+            }
+            .tagChipTargetLayout()
+            .contentShape(Rectangle())
             .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
     }
 }
@@ -69,6 +136,7 @@ struct AppActionButtonStyle: ButtonStyle {
     enum Tone { case neutral, accent, destructive }
     var tone: Tone = .neutral
     var singleLine = false
+    var minSurfaceHeight: CGFloat = 32
     @Environment(\.isEnabled) private var enabled
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -85,11 +153,11 @@ struct AppActionButtonStyle: ButtonStyle {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(ink)
             .padding(.horizontal, 12)
-            .frame(minHeight: 32)
-            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(ink.opacity(scheme == .dark ? 0.16 : 0.08), lineWidth: 0.5))
+            .frame(minHeight: minSurfaceHeight)
+            .background(fill, in: AppShape.control)
+            .overlay(AppShape.control.strokeBorder(ink.opacity(scheme == .dark ? 0.16 : 0.08), lineWidth: 0.5))
             .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
-            .frame(minWidth: 44, minHeight: 44)
+            .frame(minWidth: FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight)
             .contentShape(Rectangle())
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -117,34 +185,28 @@ struct AppToolbarItem<Content: View>: ToolbarContent {
 }
 
 extension View {
-    func appNavigationChrome(backButton: Bool = false, cancelSelection: (() -> Void)? = nil) -> some View {
-        modifier(AppNavigationChromeModifier(backButton: backButton, cancelSelection: cancelSelection))
+    func appNavigationChrome(backButton: Bool = false, showsToolbarBackButton: Bool = true) -> some View {
+        modifier(AppNavigationChromeModifier(backButton: backButton, showsToolbarBackButton: showsToolbarBackButton))
     }
 }
 
 private struct AppNavigationChromeModifier: ViewModifier {
     let backButton: Bool
-    let cancelSelection: (() -> Void)?
+    let showsToolbarBackButton: Bool
     @Environment(\.dismiss) private var dismiss
 
     func body(content: Content) -> some View {
         content
             .navigationBarBackButtonHidden(backButton)
             .toolbar {
-                if backButton {
+                if backButton && showsToolbarBackButton {
                     AppToolbarItem(placement: .topBarLeading) {
-                        if let cancelSelection {
-                            Button("取消", action: cancelSelection)
-                                .accessibilityLabel("取消标签选择")
-                                .accessibilityIdentifier("detail.tags.cancel")
-                        } else {
-                            Button { dismiss() } label: {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 16, weight: .medium))
-                            }
-                            .accessibilityLabel("返回")
-                            .accessibilityIdentifier("BackButton")
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 16, weight: .medium))
                         }
+                        .accessibilityLabel("返回")
+                        .accessibilityIdentifier("BackButton")
                     }
                 }
             }
@@ -227,7 +289,8 @@ private struct NavigationChrome: UIViewControllerRepresentable {
             let ink = UIColor.label.resolvedColor(with: traits)
             let appearance = UINavigationBarAppearance()
             appearance.configureWithTransparentBackground()
-            appearance.backgroundColor = UIColor.systemBackground.resolvedColor(with: traits).withAlphaComponent(0.94)
+            appearance.backgroundColor = UIColor.systemBackground.resolvedColor(with: traits)
+                .withAlphaComponent(CGFloat(FloatingChrome.surfaceOpacity))
             appearance.backgroundEffect = nil; appearance.shadowColor = .clear
             appearance.titleTextAttributes = [.foregroundColor: ink]
             navigation.navigationBar.standardAppearance = appearance
@@ -352,5 +415,49 @@ private struct NavigationChrome: UIViewControllerRepresentable {
             }
             return true
         }
+    }
+}
+
+struct TagWrapLayout: Layout {
+    var spacing: CGFloat
+    var keepsFirstPairTogether = false
+    var rowSpacing: CGFloat = 0
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 320
+        return CGSize(width: width, height: rows(width: width, subviews: subviews).height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (subview, frame) in zip(subviews, rows(width: bounds.width, subviews: subviews).frames) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          anchor: .topLeading, proposal: .init(width: frame.width, height: frame.height))
+        }
+    }
+
+    private func rows(width: CGFloat, subviews: Subviews) -> (frames: [CGRect], height: CGFloat) {
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var frames: [CGRect] = []
+        let joinsFirstPair = keepsFirstPairTogether && subviews.count > 1 && width >= 88 + spacing
+        for (index, subview) in subviews.enumerated() {
+            let rowBudget: CGFloat
+            switch (joinsFirstPair, index) {
+            case (true, 0): rowBudget = width - 44 - spacing
+            case (true, 1): rowBudget = width - x
+            default: rowBudget = width
+            }
+            let available = min(rowBudget, subview.sizeThatFits(.unspecified).width)
+            let size = subview.sizeThatFits(.init(width: available, height: nil))
+            if x > 0 && x + size.width > width {
+                x = 0
+                y += rowHeight + rowSpacing
+                rowHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return (frames, y + rowHeight)
     }
 }

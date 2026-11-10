@@ -3,21 +3,44 @@ import SwiftUI
 struct LibraryFloatingHeader<Controls: View>: View {
     @Binding private var selection: Int
     private let scopeEnabled: Bool
+    private let identifier: String
     private let controls: Controls
 
-    init(selection: Binding<Int>, scopeEnabled: Bool = true, @ViewBuilder controls: () -> Controls) {
+    init(selection: Binding<Int>, scopeEnabled: Bool = true, identifier: String, @ViewBuilder controls: () -> Controls) {
         _selection = selection
         self.scopeEnabled = scopeEnabled
+        self.identifier = identifier
         self.controls = controls()
     }
 
     var body: some View {
-        FloatingHeaderPanel {
-            VStack(spacing: 0) {
+        FloatingHeaderPanel(identifier: identifier, twoRows: true) {
+            FeedHeaderRows {
                 LibraryScopePicker(selection: $selection).disabled(!scopeEnabled)
-                controls.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            } secondary: {
+                controls
             }
-            .floatingHeaderSurface()
+        }
+    }
+}
+
+struct LibraryHeaderActions<Leading: View, Trailing: View>: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @ViewBuilder let leading: () -> Leading
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: FeedChrome.rowSpacing(for: typeSize)) {
+                leading()
+                trailing().frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        } else {
+            HStack(spacing: FeedChrome.panelSpacing) {
+                leading()
+                Spacer(minLength: 0)
+                trailing().layoutPriority(1)
+            }
         }
     }
 }
@@ -25,43 +48,84 @@ struct LibraryFloatingHeader<Controls: View>: View {
 struct LibraryHeaderCount: View {
     let title: String
     let symbol: String
+    var fillsWidth = false
+    var detail: String? = nil
     @Environment(\.dynamicTypeSize) private var typeSize
-    @ScaledMetric(relativeTo: .subheadline) private var symbolWidth: CGFloat = 18
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol).frame(width: symbolWidth)
-            Text(title)
+        Group {
+            if let detail {
+                HStack(spacing: FeedChrome.controlSpacing) {
+                    count.layoutPriority(1)
+                    Spacer(minLength: 0)
+                    Text(detail)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+            } else {
+                count
+            }
         }
-            .fixedSize(horizontal: true, vertical: false)
-            .font(.subheadline).foregroundStyle(.secondary)
-            .padding(.horizontal, 8).frame(minHeight: 44)
-            .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 6)
-            .accessibilityElement(children: .ignore).accessibilityLabel(title)
+        .frame(maxWidth: fillsWidth ? .infinity : nil)
+        .foregroundStyle(.secondary)
+        .feedHeaderControl(typeSize: typeSize)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(detail ?? "")
+    }
+
+    private var count: some View {
+        ViewThatFits(in: .horizontal) {
+            Label(title, systemImage: symbol).fixedSize()
+            Text(title).lineLimit(1).minimumScaleFactor(0.8)
+        }
     }
 }
 
-struct LibrarySortMenuLabel: View {
+struct LibraryMenuLabel: View {
     let title: String
+    var symbol = "arrow.up.arrow.down"
+    var fillsWidth = false
     var body: some View {
         HStack(spacing: 6) {
-            Label(title, systemImage: "arrow.up.arrow.down").labelStyle(.titleAndIcon)
-            Image(systemName: "chevron.down").font(.caption2).foregroundStyle(.secondary)
+            Image(systemName: symbol).accessibilityHidden(true)
+            Text(title).lineLimit(1).truncationMode(.tail)
+            if fillsWidth { Spacer(minLength: 0) }
+            Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
         }
+    }
+}
+
+struct LibrarySortControlLabel: View {
+    let title: String
+    var fillsWidth = true
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            if !typeSize.isAccessibilitySize {
+                LibraryMenuLabel(title: title).fixedSize()
+                Text(title).fixedSize()
+            }
+            Image(systemName: "arrow.up.arrow.down")
+        }
+        .frame(maxWidth: fillsWidth && !typeSize.isAccessibilitySize ? .infinity : nil)
     }
 }
 
 struct LibraryScopePicker: View {
     @Binding var selection: Int
     @Environment(\.dynamicTypeSize) private var typeSize
-    private let titles = ["稍后再读", "站点收藏", "阅读历史", "下载"]
+    private let titles = ["稍后再读", "站点收藏", "阅读历史", "离线下载"]
     private let symbols = ["text.badge.plus", "heart", "clock", "arrow.down.circle"]
     var body: some View {
-        if typeSize.isAccessibilitySize {
+        if typeSize >= .xxLarge {
             scopeMenu
         } else {
             ViewThatFits(in: .horizontal) {
-                FeedScopePicker(selection: $selection, options: titles.indices.map { .init(id: $0, title: titles[$0], symbol: symbols[$0]) }, identifier: "library.scope")
+                FeedScopePicker(selection: $selection, options: titles.indices.map { .init(id: $0, title: titles[$0], symbol: symbols[$0]) }, identifier: "library.scope", alignsToHeaderGrid: true)
                 scopeMenu
             }
         }
@@ -76,29 +140,8 @@ struct LibraryScopePicker: View {
                 }
             } label: {
                 HStack { Label(titles[selection], systemImage: symbols[selection]); Spacer(); Image(systemName: "chevron.down") }
-                    .font(.subheadline.weight(.medium)).padding(.horizontal, 10)
-                    .frame(minHeight: 44).contentShape(Rectangle())
-                    .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 6)
-            }.accessibilityIdentifier("library.scope.menu")
-    }
-}
-
-struct ReadLaterSelectionActions: View {
-    @ObservedObject var summary: LibrarySelectionSummary
-    let store: LibrarySelectionStore
-    var onRemove: () -> Void
-    var body: some View {
-        HStack {
-            Button(summary.value.allLoadedSelected ? "取消全选" : "全选") { store.toggleAllLoaded() }
-                .buttonStyle(AppActionButtonStyle(singleLine: true)).frame(minHeight: 44)
-                .accessibilityIdentifier("read-later.select-all")
-            Spacer()
-            Button("移出稍后再读", role: .destructive, action: onRemove)
-                .buttonStyle(AppActionButtonStyle(singleLine: true)).frame(minHeight: 44)
-                .disabled(summary.value.count == 0).accessibilityIdentifier("read-later.remove")
-        }
-        .padding(8).background(FloatingChrome.background, in: RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal, 20).accessibilityElement(children: .contain)
-        .accessibilityIdentifier("read-later.actions")
+            }
+            .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true))
+            .accessibilityIdentifier("library.scope.menu")
     }
 }

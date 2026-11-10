@@ -19,6 +19,7 @@ import ExViewerCore
     private var retryURL: URL?
     private var activeURL: URL?
     private var activePriority: SearchRequestPriority = .foreground
+    private var removedFavoriteIDs = Set<String>()
     private var minimumRating: Int? { root.flatMap(GalleryRatingFilter.minimum(in:)) }
     private var cacheEpoch = 0
     private let cache: FeedSnapshotCache?
@@ -65,13 +66,14 @@ import ExViewerCore
         sourceGeneration = snapshot.generation; retryURL = snapshot.retryURL; cachedAt = snapshot.cachedAt
         cacheEpoch = snapshot.cacheEpoch
     }
-    func reset(url: URL, session: SiteSession, qa: Bool = false) {
+    func reset(url: URL, session: SiteSession, qa: Bool = false, replaceInFlight: Bool = false) {
         let same = root == url && sourceOwner == session.owner && sourceGeneration == session.generation
         // Repeated pull-to-refresh while this root is already loading shares
         // that request instead of cancelling and adding another queue slot.
-        if same && loading && activeURL == url { return }
+        if same && loading && activeURL == url && !replaceInFlight { return }
         let retained = same ? items : []
         cancel(); root = url; self.qa = qa && !FeedCacheQA.isEnabled; loaded = []; next = nil; failure = nil
+        removedFavoriteIDs.removeAll()
         items = retained; if retained.isEmpty { categories = [:]; cachedAt = nil }
         sourceOwner = session.owner; sourceGeneration = session.generation; interrupted = false
         if self.qa {
@@ -94,7 +96,9 @@ import ExViewerCore
                 guard isCurrent(current, account: account, owner: owner, session: session), !Task.isCancelled else { return }
                 cacheEpoch = epoch
                 if let snapshot {
-                    items = snapshot.items; next = snapshot.next; categories = snapshot.categories; cachedAt = snapshot.savedAt
+                    items = snapshot.items.filter { !removedFavoriteIDs.contains($0.id) }
+                    next = snapshot.next.flatMap { SiteFavoriteOrder.continuation($0, from: url) }
+                    categories = snapshot.categories; cachedAt = snapshot.savedAt
                 }
             }
             await loadPage(url, session: session, current: current, account: account, owner: owner, priority: .foreground)
@@ -121,6 +125,13 @@ import ExViewerCore
     func invalidateFavoriteCache(owner: String) async {
         await cache?.invalidateFavorites(owner: owner)
     }
+    func removeConfirmedFavorites(_ ids: Set<String>) {
+        guard root?.path == "/favorites.php", !ids.isEmpty else { return }
+        removedFavoriteIDs.formUnion(ids)
+        if items.contains(where: { ids.contains($0.id) }) {
+            items.removeAll { ids.contains($0.id) }
+        }
+    }
     private func beginPage(_ url: URL, session: SiteSession, priority: SearchRequestPriority) {
         guard !loading, !loaded.contains(url), let root, URLPolicy.continuation(url, from: root),
               sourceOwner == session.owner, sourceGeneration == session.generation else { return }
@@ -137,28 +148,32 @@ import ExViewerCore
             if current == context { loading = false; activeURL = nil; task = nil }
         }
         do {
-            let html = try await requestHTML(url, session: session, search: true, priority: priority)
+            let html: String
+            if let loadHTML { html = try await loadHTML(url, true, nil) }
+            else { html = try await session.html(url, search: true, searchPriority: priority) }
             let parse = Task.detached(priority: .userInitiated) { try EHParser.list(html, base: url) }
             let list = try await withTaskCancellationHandler(operation: { try await parse.value }, onCancel: { parse.cancel() })
             guard isCurrent(current, account: account, owner: owner, session: session), !Task.isCancelled else { return }
-            session.favoriteStateCache.seedFavorites(list.items, categories: list.favoriteCategories, url: url, scopeOwner: owner, generation: account)
+            let sourceItems = list.items.filter { !removedFavoriteIDs.contains($0.id) }
+            session.favoriteStateCache.seedFavorites(sourceItems, categories: list.favoriteCategories, url: url, scopeOwner: owner, generation: account)
             let replacingRoot = url == root
             let retainedRoot = replacingRoot && !items.isEmpty
             // Continuation URLs may omit filters; keep the original query's threshold.
             let minimum = minimumRating
             var unconfirmedRatings = false
             var pageItems: [Gallery] = []
-            var positions = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
             categories = list.favoriteCategories
-            for offset in stride(from: 0, to: list.items.count, by: 25) {
+            for offset in stride(from: 0, to: sourceItems.count, by: 25) {
                 try Task.checkCancellation()
-                let batch = Array(list.items[offset..<min(offset + 25, list.items.count)])
+                let batch = Array(sourceItems[offset..<min(offset + 25, sourceItems.count)])
                 let enriched: [Gallery]
                 do {
-                    let body = try GalleryMetadata.request(batch)
-                    let json = try await requestHTML(URL(string: "https://api.e-hentai.org/api.php")!, session: session, body: body, priority: priority)
-                    let parse = Task.detached(priority: .userInitiated) { try GalleryMetadata.merge(Data(json.utf8), into: batch) }
-                    enriched = try await withTaskCancellationHandler(operation: { try await parse.value }, onCancel: { parse.cancel() })
+                    if let loadHTML {
+                        let json = try await loadHTML(SiteSession.metadataURL, false, GalleryMetadata.request(batch))
+                        enriched = try GalleryMetadata.merge(Data(json.utf8), into: batch)
+                    } else {
+                        enriched = try await session.galleryMetadata(batch, priority: priority == .prefetch ? .prefetch : .foreground)
+                    }
                 } catch is CancellationError { throw CancellationError() }
                 catch {
                     if minimum != nil { throw error }
@@ -169,10 +184,11 @@ import ExViewerCore
                 if minimum != nil, enriched.contains(where: { GalleryRatingFilter.average($0.rating) == nil }) {
                     unconfirmedRatings = true
                 }
-                let accepted = enriched.filter { GalleryRatingFilter.includes($0, minimum: minimum) }
+                let accepted = enriched.filter { !removedFavoriteIDs.contains($0.id) && GalleryRatingFilter.includes($0, minimum: minimum) }
                 pageItems += accepted
                 if !retainedRoot {
                     var updated = items
+                    var positions = Dictionary(uniqueKeysWithValues: updated.enumerated().map { ($0.element.id, $0.offset) })
                     for gallery in accepted {
                         if let index = positions[gallery.id] {
                             if !updated[index].tagsComplete && gallery.tagsComplete { updated[index] = gallery }
@@ -180,14 +196,18 @@ import ExViewerCore
                     }
                     items = updated
                 }
-                if offset + 25 < list.items.count { try await Task.sleep(nanoseconds: 1_300_000_000) }
             }
             try Task.checkCancellation()
             guard isCurrent(current, account: account, owner: owner, session: session) else { return }
             if unconfirmedRatings { throw ViewerError.ratingUnavailable }
-            if replacingRoot { items = pageItems; cachedAt = nil }
+            if replacingRoot {
+                pageItems.removeAll { removedFavoriteIDs.contains($0.id) }
+                items = pageItems; cachedAt = nil
+            }
             loaded.insert(url); retryURL = nil
-            next = list.next.flatMap { loaded.contains($0) ? nil : $0 }
+            next = root.flatMap { root in
+                list.next.flatMap { SiteFavoriteOrder.continuation($0, from: root) }
+            }.flatMap { loaded.contains($0) ? nil : $0 }
             categories = list.favoriteCategories; interrupted = false
             if replacingRoot, let cache {
                 await cache.save(.init(owner: owner, root: url, items: pageItems, next: next, categories: categories), expectedEpoch: cacheEpoch)
@@ -197,10 +217,5 @@ import ExViewerCore
             guard isCurrent(current, account: account, owner: owner, session: session) else { return }
             interrupted = false; failure = ErrorMessages.message(error, fallback: ViewerError.network.localizedDescription)
         }
-    }
-    private func requestHTML(_ url: URL, session: SiteSession, search: Bool = false, body: Data? = nil, priority: SearchRequestPriority) async throws -> String {
-        if let loadHTML { return try await loadHTML(url, search, body) }
-        return try await session.html(url, search: search, method: body == nil ? "GET" : "POST", body: body,
-                                      contentType: body == nil ? "application/x-www-form-urlencoded" : "application/json", searchPriority: priority)
     }
 }

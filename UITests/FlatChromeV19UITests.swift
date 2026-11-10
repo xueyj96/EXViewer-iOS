@@ -9,7 +9,7 @@ final class FlatChromeV19UITests: XCTestCase {
         let storage = app.buttons["account.storage"]
         XCTAssertTrue(storage.waitForExistence(timeout: 10))
         storage.tap()
-        let navigation = app.navigationBars["阅读与存储"]
+        let navigation = app.descendants(matching: .any)["account.storage-page.header"].firstMatch
         XCTAssertTrue(navigation.waitForExistence(timeout: 6))
         let back = navigation.buttons["BackButton"]
         XCTAssertTrue(back.exists && back.isHittable)

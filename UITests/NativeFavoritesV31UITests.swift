@@ -8,7 +8,13 @@ final class NativeFavoritesV31UITests: XCTestCase {
         XCTAssertTrue(app.buttons["detail.site-favorite"].waitForExistence(timeout: 8)); return app
     }
     private func open(_ app: XCUIApplication) {
-        app.buttons["detail.site-favorite"].tap()
+        let favorite = app.buttons["detail.site-favorite"]
+        let isSaved = favorite.label.contains("收藏完成")
+        favorite.tap()
+        if isSaved {
+            let edit = app.buttons["favorite.editor.edit"]
+            XCTAssertTrue(edit.waitForExistence(timeout: 5)); edit.tap()
+        }
         XCTAssertTrue(app.buttons["favorite.editor.group.0"].waitForExistence(timeout: 8))
         XCTAssertEqual(app.webViews.count, 0, "Routine favorite editing must use native controls")
     }
@@ -21,13 +27,13 @@ final class NativeFavoritesV31UITests: XCTestCase {
     }
     func testCancelDoesNotFavoriteAndLocalBookmarkLivesInMore() {
         let app = detail()
-        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("收藏到站点"))
+        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("添加收藏"))
         app.buttons["detail.more"].tap()
         let local = app.buttons["detail.local-bookmark"]; XCTAssertTrue(local.waitForExistence(timeout: 3)); local.tap()
-        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("收藏到站点"))
-        app.buttons["detail.more"].tap(); XCTAssertTrue(app.buttons["移除本机书签"].waitForExistence(timeout: 3)); app.buttons["移除本机书签"].tap()
+        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("添加收藏"))
+        app.buttons["detail.more"].tap(); XCTAssertTrue(app.buttons["移出稍后再读"].waitForExistence(timeout: 3)); app.buttons["移出稍后再读"].tap()
         open(app); app.buttons["favorite.editor.group.1"].tap(); app.buttons["favorite.editor.cancel"].tap()
-        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("收藏到站点"))
+        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("添加收藏"))
         open(app); XCTAssertEqual(app.buttons["favorite.editor.group.1"].value as? String, "未选择")
         XCTAssertFalse(app.buttons["favorite.editor.save"].isEnabled)
         screenshot(app, "native-favorite.cancel-keeps-unfavorited")
@@ -47,10 +53,11 @@ final class NativeFavoritesV31UITests: XCTestCase {
         XCTAssertTrue(destination.isHittable); destination.tap(); app.buttons["favorite.editor.save"].tap()
         XCTAssertTrue(app.buttons["detail.site-favorite"].waitForExistence(timeout: 6))
         XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("已读")); screenshot(app, "native-favorite.saved-detail")
-        open(app); let remove = app.buttons["favorite.editor.remove"]; reveal(app, remove); remove.tap()
+        app.buttons["detail.site-favorite"].tap()
+        let remove = app.buttons["favorite.editor.remove"]; XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()
         let confirm = app.buttons["favorite.editor.confirm-remove"].firstMatch; XCTAssertTrue(confirm.waitForExistence(timeout: 4)); confirm.tap()
         XCTAssertTrue(app.buttons["detail.site-favorite"].waitForExistence(timeout: 6))
-        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("收藏到站点"))
+        XCTAssertTrue(app.buttons["detail.site-favorite"].label.contains("添加收藏"))
     }
     func testUnknownSubmissionKeepsSelectionAndRefreshOnlyConfirmsIt() {
         let app = detail(["--qa-favorite-unknown"]); open(app)
@@ -96,8 +103,9 @@ final class NativeFavoritesV31UITests: XCTestCase {
         app.buttons["main.tab.discover"].tap(); app.buttons["gallery.open.1"].tap(); open(app)
         app.buttons["favorite.editor.group.1"].tap(); app.buttons["favorite.editor.save"].tap()
         XCTAssertTrue(app.buttons["detail.site-favorite"].waitForExistence(timeout: 6)); app.buttons["main.tab.library"].tap()
-        let item = app.buttons["favorites.gallery.1"]; XCTAssertTrue(item.waitForExistence(timeout: 6)); item.tap(); open(app)
-        let remove = app.buttons["favorite.editor.remove"]; reveal(app, remove); remove.tap()
+        let item = app.buttons["favorites.gallery.1"]; XCTAssertTrue(item.waitForExistence(timeout: 6)); item.tap()
+        app.buttons["detail.site-favorite"].tap()
+        let remove = app.buttons["favorite.editor.remove"]; XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()
         let confirm = app.buttons["favorite.editor.confirm-remove"].firstMatch
         XCTAssertTrue(confirm.waitForExistence(timeout: 4)); confirm.tap()
         XCTAssertTrue(app.buttons["detail.site-favorite"].waitForExistence(timeout: 6)); app.buttons["BackButton"].tap()

@@ -22,6 +22,26 @@ import ExViewerCore
         XCTAssertNil(GalleryFeedViewport(space: "qa", height: 100, topOcclusion: 120).nearestVisibleAnchor(in: cells))
     }
 
+    func testMasonryCoverLookaheadStartsAtEachVisibleColumnEdge() {
+        func gallery(_ id: Int64) -> Gallery {
+            Gallery(ref: GalleryRef(site: .ex, gid: id, token: "test"), title: "Sample")
+        }
+        let columns = [[1, 3, 5, 7, 9].map(gallery), [2, 4, 6, 8, 10].map(gallery)]
+        let viewport = GalleryFeedViewport(space: "qa", height: 800, topOcclusion: 120)
+        // Upcoming cards are intentionally missing from the measured frames:
+        // the lazy columns need not have instantiated them yet.
+        let frames = [
+            "ex:1": CGRect(x: 20, y: 100, width: 165, height: 400),
+            "ex:3": CGRect(x: 20, y: 520, width: 165, height: 450),
+            "ex:2": CGRect(x: 201, y: 100, width: 165, height: 800),
+        ]
+        let edges = viewport.coverEdges(in: frames)
+        XCTAssertEqual(edges.map(\.id), ["ex:3", "ex:2"])
+        XCTAssertEqual(edges.flatMap { GalleryFeedViewport.upcomingCovers(after: $0.id, in: columns) }.map(\.id),
+                       ["ex:5", "ex:7", "ex:4", "ex:6"])
+        XCTAssertTrue(GalleryFeedViewport.upcomingCovers(after: "ex:9", in: columns).isEmpty)
+    }
+
     func testRepeatedViewportFramesPublishOnlyActualAnchorTransitions() throws {
         let anchors = (0..<240).map { "ex:\($0 / 40 + 1)" }
         func entry() -> DiscoveryEntry {

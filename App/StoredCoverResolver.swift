@@ -2,7 +2,7 @@ import Foundation
 import ExViewerCore
 
 /// Saved galleries deliberately omit transient media URLs. Resolve only covers
-/// requested by visible views, sharing a small serial metadata queue.
+/// requested by the feed, sharing a small serial metadata queue.
 @MainActor final class StoredCoverResolver {
     static let shared = StoredCoverResolver()
     typealias Fetch = @MainActor ([Gallery]) async throws -> [Gallery]
@@ -22,7 +22,6 @@ import ExViewerCore
     }
     private let cacheLimit: Int
     private let batchDelay: UInt64
-    private let interval: TimeInterval
     private var context: String?
     private var cache: [GalleryRef: URL] = [:]
     private var cacheOrder: [GalleryRef] = []
@@ -30,17 +29,9 @@ import ExViewerCore
     private var queue: [GalleryRef] = []
     private var worker: Task<Void, Never>?
     private var workerID = UUID()
-    private var lastBatchStart: TimeInterval?
 
-    init(cacheLimit: Int = 256, batchDelay: UInt64 = 50_000_000, interval: TimeInterval = 1.3) {
-        self.cacheLimit = max(1, cacheLimit); self.batchDelay = batchDelay; self.interval = max(0, interval)
-    }
-
-    static func metadata(_ galleries: [Gallery], session: SiteSession) async throws -> [Gallery] {
-        let data = try GalleryMetadata.request(galleries)
-        let json = try await session.html(URL(string: "https://api.e-hentai.org/api.php")!, method: "POST", body: data,
-                                          contentType: "application/json", request: MediaRequestDemand(priority: .thumbnail))
-        return try GalleryMetadata.merge(Data(json.utf8), into: galleries)
+    init(cacheLimit: Int = 256, batchDelay: UInt64 = 50_000_000) {
+        self.cacheLimit = max(1, cacheLimit); self.batchDelay = batchDelay
     }
 
     func source(for gallery: Gallery, context: String, fetch: @escaping Fetch) async throws -> URL {
@@ -77,7 +68,7 @@ import ExViewerCore
     private func reset(_ context: String) {
         worker?.cancel(); worker = nil; workerID = UUID()
         for item in pending.values { for waiter in item.waiters.values { waiter.resume(throwing: CancellationError()) } }
-        pending = [:]; queue = []; cache = [:]; cacheOrder = []; lastBatchStart = nil
+        pending = [:]; queue = []; cache = [:]; cacheOrder = []
         self.context = context
     }
 
@@ -98,17 +89,12 @@ import ExViewerCore
         while self.context == context && workerID == id && !Task.isCancelled {
             do {
                 try await Task.sleep(nanoseconds: batchDelay)
-                if let last = lastBatchStart {
-                    let remaining = interval - (ProcessInfo.processInfo.systemUptime - last)
-                    if remaining > 0 { try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) }
-                }
                 try Task.checkCancellation()
                 guard self.context == context, workerID == id else { return }
                 let keys = Array(queue.filter { pending[$0] != nil }.prefix(25))
                 guard !keys.isEmpty else { return }
                 let batch = keys.compactMap { pending[$0]?.gallery }
                 queue.removeAll { keys.contains($0) }
-                lastBatchStart = ProcessInfo.processInfo.systemUptime
                 let galleries = try await fetch(batch)
                 try Task.checkCancellation()
                 guard self.context == context, workerID == id else { return }

@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 final class ReaderV8UITests: XCTestCase {
     private let galleryTitle = "海岸线 · 插画与速写"
@@ -20,17 +21,17 @@ final class ReaderV8UITests: XCTestCase {
     }
 
     private func chooseMode(_ title: String, in app: XCUIApplication) {
-        app.buttons["reader.settings"].tap()
-        let modePicker = app.segmentedControls["reader.settings.mode"]
-        XCTAssertTrue(modePicker.waitForExistence(timeout: 5))
-        selectMode(title, picker: modePicker, app: app)
+        ReaderSettingsUIHelpers.open(in: app)
+        selectMode(title, in: app)
     }
 
-    private func selectMode(_ title: String, picker: XCUIElement, app: XCUIApplication) {
-        for _ in 0..<4 { if picker.buttons[title].isHittable { break }; app.swipeDown() }
-        XCTAssertTrue(picker.buttons[title].isHittable, "Mode option \(title) should be reachable in the settings form")
-        picker.buttons[title].tap()
-        XCTAssertTrue(picker.buttons[title].isSelected)
+    private func selectMode(_ title: String, in app: XCUIApplication) {
+        let option = app.buttons[title]
+        XCTAssertTrue(option.waitForExistence(timeout: 5))
+        for _ in 0..<4 { if option.isHittable { break }; app.swipeDown() }
+        XCTAssertTrue(option.isHittable, "Mode option \(title) should be reachable in the settings panel")
+        option.tap()
+        XCTAssertTrue(option.isSelected)
     }
 
     private func chooseDirection(_ rawValue: String, in app: XCUIApplication) {
@@ -42,7 +43,7 @@ final class ReaderV8UITests: XCTestCase {
     }
 
     private func finishSettings(_ app: XCUIApplication) {
-        app.navigationBars["阅读设置"].buttons["完成"].tap()
+        ReaderSettingsUIHelpers.close(in: app)
     }
 
     private func setDirection(_ rawValue: String, in app: XCUIApplication) {
@@ -67,30 +68,48 @@ final class ReaderV8UITests: XCTestCase {
     }
 
     private func assertMode(_ title: String, selected: Bool, in app: XCUIApplication) {
-        app.buttons["reader.settings"].tap()
-        let picker = app.segmentedControls["reader.settings.mode"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertEqual(picker.buttons[title].isSelected, selected)
+        ReaderSettingsUIHelpers.open(in: app)
+        XCTAssertEqual(app.buttons[title].isSelected, selected)
         finishSettings(app)
     }
 
     func testModeAndFourDirectionsAreIndependent() {
-        let app = launchReaderThroughDiscovery()
-        app.buttons["reader.settings"].tap()
-        let picker = app.segmentedControls["reader.settings.mode"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        selectMode("连续模式", picker: picker, app: app)
+        XCUIDevice.shared.orientation = .portrait
+        let app = launchReaderThroughDiscovery(extraArguments: ["--qa-reader-transition"])
+        let controls = app.descendants(matching: .any)["reader.controls.compact"].firstMatch
+        XCTAssertEqual(controls.buttons.allElementsBoundByIndex.map(\.identifier), ["reader.page", "reader.settings"])
+        XCTAssertTrue(controls.sliders["reader.progress"].isHittable)
+        _ = visibleMedia("media.static", in: app)
+        capture(app, "reader-compact-controls")
+        ReaderSettingsUIHelpers.open(in: app)
+        XCTAssertTrue(app.buttons["reader.settings.site-favorite"].isHittable)
+        XCTAssertTrue(app.buttons["reader.settings.read-later"].isHittable)
+        XCTAssertGreaterThan(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.frame.minY, app.frame.height * 0.4)
+        let left = app.buttons["reader.settings.direction.leftToRight"].frame
+        let right = app.buttons["reader.settings.direction.rightToLeft"].frame
+        let down = app.buttons["reader.settings.direction.topToBottom"].frame
+        XCTAssertEqual(right.minX - left.maxX, 4, accuracy: 1)
+        XCTAssertEqual(down.minY - left.maxY, 4, accuracy: 1)
+        capture(app, "reader-compact-settings")
+        selectMode("连续模式", in: app)
         for raw in ["leftToRight", "rightToLeft", "topToBottom", "bottomToTop"] {
             chooseDirection(raw, in: app)
-            XCTAssertTrue(picker.buttons["连续模式"].isSelected, "Changing \(raw) must not change reading mode")
+            XCTAssertTrue(app.buttons["连续模式"].isSelected, "Changing \(raw) must not change reading mode")
         }
-        selectMode("单页模式", picker: picker, app: app)
+        selectMode("单页模式", in: app)
         for raw in ["leftToRight", "rightToLeft", "topToBottom", "bottomToTop"] {
             chooseDirection(raw, in: app)
-            XCTAssertTrue(picker.buttons["单页模式"].isSelected, "Changing \(raw) must not change reading mode")
+            XCTAssertTrue(app.buttons["单页模式"].isSelected, "Changing \(raw) must not change reading mode")
         }
+        XCTAssertTrue(app.buttons["reader.settings.direction.bottomToTop"].isSelected)
         finishSettings(app)
-        XCTAssertTrue(app.buttons["reader.direction"].label.contains("↑"))
+    }
+
+    private func capture(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
     }
 
     func testSinglePageSwipeAndEdgeControlsFollowAllFourDirections() {
@@ -134,28 +153,75 @@ final class ReaderV8UITests: XCTestCase {
         waitForExpectations(timeout: 5)
     }
 
+    func testReaderRotationBothWaysKeepsPageAndCanStillTurn() throws {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launchReaderThroughDiscovery()
+        chooseMode("单页模式", in: app)
+        chooseDirection("leftToRight", in: app)
+        finishSettings(app)
+        app.coordinate(withNormalizedOffset: .init(dx: 0.82, dy: 0.50)).tap()
+        waitForPage("2 / 3", in: app)
+
+        for orientation in [UIDeviceOrientation.landscapeLeft, .portrait, .landscapeRight, .portrait] {
+            XCUIDevice.shared.orientation = orientation
+            let stable = NSPredicate { _, _ in
+                (app.frame.width > app.frame.height) == orientation.isLandscape &&
+                    app.buttons["reader.page"].label == "2 / 3"
+            }
+            expectation(for: stable, evaluatedWith: app)
+            waitForExpectations(timeout: 8)
+            let boundsProbe = app.descendants(matching: .any)["reader.system.chrome.qa"].firstMatch
+            let values = (boundsProbe.value as? String ?? "").split(separator: ";")
+            func coordinate(_ key: String) -> Double? {
+                values.first(where: { $0.hasPrefix(key + "=") }).flatMap { Double($0.dropFirst(key.count + 1)) }
+            }
+            let left = try XCTUnwrap(coordinate("safeMinX"))
+            let right = try XCTUnwrap(coordinate("safeMaxX"))
+            let close = app.buttons["reader.close"], settings = app.buttons["reader.settings"]
+            XCTAssertTrue(close.isHittable && settings.isHittable)
+            XCTAssertGreaterThanOrEqual(close.frame.minX, left - 1)
+            XCTAssertLessThanOrEqual(settings.frame.maxX, right + 1)
+            if orientation.isLandscape {
+                settings.tap()
+                let done = app.buttons["reader.settings.done"]
+                XCTAssertTrue(done.waitForExistence(timeout: 6))
+                XCTAssertTrue(done.isHittable)
+                XCTAssertLessThanOrEqual(done.frame.maxX, right + 1)
+                done.tap()
+            }
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = "reader-rotation-\(orientation.rawValue)"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+
+        app.coordinate(withNormalizedOffset: .init(dx: 0.82, dy: 0.50)).tap()
+        waitForPage("3 / 3", in: app)
+    }
+
     func testModeAndDirectionChangesKeepCurrentPageAndPersistAfterRelaunch() {
         let app = launchReaderThroughDiscovery()
         chooseMode("单页模式", in: app)
         chooseDirection("bottomToTop", in: app)
         finishSettings(app)
-        app.buttons["下一页，从下到上"].tap()
+        app.coordinate(withNormalizedOffset: .init(dx: 0.58, dy: 0.18)).tap()
         waitForPage("2 / 3", in: app)
 
-        app.buttons["reader.settings"].tap()
-        let modePicker = app.segmentedControls["reader.settings.mode"]
-        XCTAssertTrue(modePicker.waitForExistence(timeout: 5))
-        selectMode("连续模式", picker: modePicker, app: app)
+        ReaderSettingsUIHelpers.open(in: app)
+        selectMode("连续模式", in: app)
         chooseDirection("topToBottom", in: app)
+        XCTAssertTrue(app.buttons["reader.settings.direction.topToBottom"].isSelected)
         finishSettings(app)
         XCTAssertEqual(app.buttons["reader.page"].label, "2 / 3")
-        XCTAssertTrue(app.buttons["reader.direction"].label.contains("↓"))
 
         let pageNumber = app.buttons["reader.page"]
-        let window = app.windows.firstMatch
-        XCTAssertTrue(window.exists)
-        XCTAssertLessThanOrEqual(abs(pageNumber.frame.midX - window.frame.midX), 2.0, "Page count must remain screen-centered")
-        for button in [app.buttons["reader.mode"], app.buttons["reader.direction"], app.buttons["reader.settings"], app.buttons["reader.bookmark"]] {
+        let progress = app.sliders["reader.progress"]
+        let settings = app.buttons["reader.settings"]
+        XCTAssertLessThan(progress.frame.midX, pageNumber.frame.midX)
+        XCTAssertLessThan(pageNumber.frame.midX, settings.frame.midX)
+        for button in [pageNumber, settings] {
             XCTAssertGreaterThanOrEqual(button.frame.width, 44)
             XCTAssertGreaterThanOrEqual(button.frame.height, 44)
         }
@@ -168,9 +234,11 @@ final class ReaderV8UITests: XCTestCase {
         gallery.tap()
         app.buttons["在线阅读"].tap()
         XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.buttons["reader.direction"].label.contains("↓"))
         XCTAssertEqual(app.buttons["reader.page"].label, "1 / 3")
-        assertMode("连续模式", selected: true, in: app)
+        ReaderSettingsUIHelpers.open(in: app)
+        XCTAssertTrue(app.buttons["连续模式"].isSelected)
+        XCTAssertTrue(app.buttons["reader.settings.direction.topToBottom"].isSelected)
+        finishSettings(app)
     }
 
     func testContinuousZoomPanDoesNotScrollPageOrTriggerEdgeActionsAndUsesImagePixels() {
@@ -219,6 +287,16 @@ final class ReaderV8UITests: XCTestCase {
         start.press(forDuration: 0.25, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 2.0)
         waitForPage("3 / 3", in: app, timeout: 12)
         XCTAssertFalse(app.descendants(matching: .any)["reader.progress.hud"].exists, "HUD should dismiss after release and seek completion")
+
+        app.buttons["reader.page"].tap()
+        let jump = app.alerts["跳转到页码"]
+        let input = jump.textFields["页码"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        XCTAssertEqual(input.value as? String, "3")
+        input.tap()
+        input.typeText(XCUIKeyboardKey.delete.rawValue + "2")
+        jump.buttons["跳转"].tap()
+        waitForPage("2 / 3", in: app)
     }
 
     func testReverseContinuousLoadMoreKeepsPageAndCanSeekNewLastPage() {

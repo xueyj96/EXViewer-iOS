@@ -21,9 +21,9 @@ final class FeedCacheV13UITests: XCTestCase {
 
     private func openFavorites(_ app: XCUIApplication) {
         app.buttons["main.tab.library"].tap()
-        let scope = app.segmentedControls["library.scope"]
+        let scope = app.buttons["library.scope.1"]
         XCTAssertTrue(scope.waitForExistence(timeout: 8))
-        scope.buttons["站点收藏"].tap()
+        scope.tap()
         XCTAssertTrue(app.staticTexts["QA Feed Favorites 01"].waitForExistence(timeout: 12))
     }
 

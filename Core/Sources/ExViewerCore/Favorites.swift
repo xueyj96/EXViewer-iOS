@@ -9,12 +9,13 @@ public enum FavoriteAction: Equatable, Sendable {
 
 /// Explicit same-site form payload for the site's fixed bulk favorites protocol.
 public struct FavoritesBatchRequest: Sendable {
+    public static let maxItemCount = 25
     public let url: URL
     public let body: Data
 
     public init(url: URL, site: GallerySite, gids: [Int64], action: FavoriteAction) throws {
         guard URLPolicy.account(url), url.host?.lowercased() == site.host, url.path == "/favorites.php" else { throw ViewerError.restricted }
-        guard !gids.isEmpty, gids.count <= 25, Set(gids).count == gids.count, gids.allSatisfy({ $0 > 0 }) else {
+        guard !gids.isEmpty, gids.count <= Self.maxItemCount, Set(gids).count == gids.count, gids.allSatisfy({ $0 > 0 }) else {
             throw ViewerError.invalidQuery("每批请选择 1 至 25 个有效收藏。")
         }
         if case .move(let index) = action, !(0...9).contains(index) { throw ViewerError.invalidQuery("收藏分组无效。") }
@@ -77,7 +78,7 @@ public struct FavoritesForm: Sendable {
         return Self(url: destination, actions: values, hidden: fields)
     }
     public func body(gids: [Int64], action: FavoriteAction) throws -> Data {
-        guard !gids.isEmpty, gids.count <= 25, Set(gids).count == gids.count, gids.allSatisfy({ $0 > 0 }), actions.contains(action.value) else { throw ViewerError.invalidQuery("每批请选择 1 至 25 个有效收藏。") }
+        guard !gids.isEmpty, gids.count <= FavoritesBatchRequest.maxItemCount, Set(gids).count == gids.count, gids.allSatisfy({ $0 > 0 }), actions.contains(action.value) else { throw ViewerError.invalidQuery("每批请选择 1 至 25 个有效收藏。") }
         if case .move(let index) = action, !(0...9).contains(index) { throw ViewerError.invalidQuery("收藏分组无效。") }
         let pairs = hidden + [("ddact", action.value)] + gids.map { ("modifygids[]", String($0)) } + [("apply", "Apply")]
         let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._*"))

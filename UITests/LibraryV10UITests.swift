@@ -6,6 +6,7 @@ final class LibraryV10UITests: XCTestCase {
         app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--qa-library-large-selection"] + extraArguments
         app.launch()
         app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap()
         let normal = app.buttons["favorites.gallery.10000"]
         XCTAssertTrue(normal.waitForExistence(timeout: 12))
         normal.press(forDuration: 0.8)
@@ -75,12 +76,13 @@ final class LibraryV10UITests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         first.tap(); second.tap()
         waitForCount(2, in: app)
+        app.buttons["favorites.manage"].tap()
         app.buttons["favorites.remove"].tap()
         let confirmation = app.buttons["移除所选收藏"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.tap()
 
-        let unknown = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "本批 2 项可能已生效，结果待核实")).firstMatch
+        let unknown = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "本批 2 项结果待确认")).firstMatch
         XCTAssertTrue(unknown.waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["正在处理 2 项…"].exists, "The working indicator must end when the mutation fails")
         waitForCount(2, in: app)

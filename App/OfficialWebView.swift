@@ -12,7 +12,6 @@ struct WebDestination: Identifiable {
 struct OfficialWebView: View {
     var destination: WebDestination
     @EnvironmentObject private var session: SiteSession
-    @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @State private var ready = false
     @State private var loading = false
@@ -22,7 +21,10 @@ struct OfficialWebView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                HStack(spacing: 5) { Image(systemName: "lock.fill"); Text(destination.url.host ?? "").textSelection(.enabled); Spacer(); if loading { ProgressView() } }.font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 10).background(FloatingChrome.background)
+                HStack(spacing: 5) { Image(systemName: "lock.fill"); Text(destination.url.host ?? "").textSelection(.enabled); Spacer(); if loading { ProgressView() } }
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, FeedChrome.contentInset).padding(.vertical, FeedChrome.contentTopGap)
+                    .background(FloatingChrome.background)
                 if let error { Text(error).font(.caption).foregroundStyle(.red).padding() }
                 if ready { SiteWebSurface(url: destination.url, store: session.webStore, loading: $loading, error: $error) }
                 else { Spacer(); ProgressView(); Spacer() }
@@ -33,16 +35,27 @@ struct OfficialWebView: View {
                         Button(verifying ? "验证中…" : "完成登录") {
                             verifying = true
                             Task {
-                                do { guard let operation else { throw ViewerError.stale }; try await session.captureWebSession(operation: operation); library.load(owner: session.owner); await session.verify(); dismiss() }
+                                do {
+                                    guard let operation else { throw ViewerError.stale }
+                                    try await session.captureWebSession(operation: operation)
+                                    await session.verify()
+                                    dismiss()
+                                }
                                 catch { self.error = (error as? ViewerError)?.localizedDescription ?? "会话保存失败" }
                                 verifying = false
                             }
                         }.buttonStyle(AppActionButtonStyle(tone: .accent)).disabled(verifying)
                     }.padding().background(FloatingChrome.background)
                 }
-            }.navigationTitle(destination.title).navigationBarTitleDisplayMode(.inline).appNavigationChrome()
-                .toolbar { AppToolbarItem(placement: .cancellationAction) { Button("关闭") { if let operation { session.endWebOperation(operation) }; dismiss() } } }
+            }
+                .floatingPageHeader(destination.title, identifier: "official-web") {
+                    Button("关闭") { if let operation { session.endWebOperation(operation) }; dismiss() }
+                        .buttonStyle(FeedHeaderButtonStyle()).accessibilityIdentifier("official-web.close")
+                } trailing: {
+                    EmptyView()
+                }
                 .task {
+                    if AppMode.qa { ready = true; return }
                     do { let operation = try session.beginWebOperation(); self.operation = operation; try await session.prepareWebSession(operation: operation); try Task.checkCancellation(); ready = true }
                     catch { self.error = (error as? ViewerError)?.localizedDescription ?? "网页会话准备未完成，请重新打开。" }
                 }
@@ -57,13 +70,14 @@ struct SiteWebSurface: UIViewRepresentable {
     @Binding var error: String?
     func makeCoordinator() -> Coordinator { Coordinator(loading: $loading, error: $error) }
     func makeUIView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = store
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = AppMode.qa ? .nonPersistent() : store
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator; view.uiDelegate = context.coordinator
-        if AppMode.qa && AppMode.screen == "web-compat" {
-            view.loadHTMLString(WebCompatibilityQA.html, baseURL: GallerySite.eh.baseURL)
+        if AppMode.qa {
+            view.loadHTMLString(WebCompatibilityQA.html, baseURL: nil)
         } else if URLPolicy.account(url) { view.load(URLRequest(url: url)) }
         return view
     }

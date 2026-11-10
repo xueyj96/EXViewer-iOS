@@ -14,7 +14,9 @@ struct DownloadRecord: Codable, Identifiable {
     var completed: [Int: String] = [:]
     var total: Int?
     var error: String?
+    var replaces: GalleryRef? = nil
     var id: String { gallery.id }
+    var requiresRetry: Bool { status == .failed || (status == .paused && error != nil) }
 }
 struct LibrarySnapshot: Codable {
     var version = 1
@@ -62,6 +64,7 @@ private struct RecentSearchFile: Codable {
     @Published private(set) var owner = "guest"
     private let root: URL
     private let ephemeral: Bool
+    private var offlineReaders: [UUID: (owner: String, gallery: GalleryRef)] = [:]
     var directory: URL { root.appendingPathComponent(owner, isDirectory: true) }
     var blockedIDs: Set<String> { Set(snapshot.blockedTags.map(\.id)) }
     static let searchHistoryLimit = 100
@@ -85,7 +88,9 @@ private struct RecentSearchFile: Codable {
                 let value = try JSONDecoder().decode(LibrarySnapshot.self, from: data)
                 guard value.version == 1 else { throw ViewerError.storage }
                 snapshot = value
-                for i in snapshot.downloads.indices where snapshot.downloads[i].status == .downloading { snapshot.downloads[i].status = .paused }
+                for i in snapshot.downloads.indices where snapshot.downloads[i].status == .downloading {
+                    snapshot.downloads[i].status = .waiting
+                }
             }
             let offline = directory.appendingPathComponent("Offline", isDirectory: true)
             if FileManager.default.fileExists(atPath: offline.path) {
@@ -109,6 +114,7 @@ private struct RecentSearchFile: Codable {
         if ephemeral && ProcessInfo.processInfo.arguments.contains("--qa-library-sort") {
             snapshot = QASamples.sortingLibrary
         }
+        retireReplacedDownloads()
     }
 
     private func loadSearchHistory() {
@@ -193,7 +199,10 @@ private struct RecentSearchFile: Codable {
         guard reordered.map(\.id) != snapshot.saved.map(\.id) else { return true }
         return commit { $0.saved = reordered }
     }
-    func deleteSearch(_ id: UUID) { commit { $0.saved.removeAll { $0.id == id } } }
+    @discardableResult func deleteSearch(_ id: UUID) -> Bool {
+        guard snapshot.saved.contains(where: { $0.id == id }) else { return false }
+        return commit { $0.saved.removeAll { $0.id == id } }
+    }
     func pin(_ tag: GalleryTag) { pin([tag]) }
     @discardableResult func pin(_ tags: [GalleryTag]) -> Bool {
         var seen = Set(snapshot.favoriteTags.map(\.id))
@@ -216,15 +225,18 @@ private struct RecentSearchFile: Codable {
         return commit { $0.blockedTags.removeAll { ids.contains($0.id) } }
     }
     func containsReadLater(_ gallery: Gallery) -> Bool { snapshot.readLater.contains { $0.id == gallery.id } }
+    @discardableResult func addReadLater(_ galleries: [Gallery]) -> Int? {
+        guard error == nil else { return nil }
+        var existing = Set(snapshot.readLater.map(\.id))
+        let additions = galleries.filter { existing.insert($0.id).inserted }.map(\.stored)
+        guard !additions.isEmpty else { return 0 }
+        return commit { $0.readLater.insert(contentsOf: additions, at: 0) } ? additions.count : nil
+    }
     @discardableResult func toggleReadLater(_ gallery: Gallery) -> Bool {
         setReadLater(gallery, included: !containsReadLater(gallery))
     }
     @discardableResult func setReadLater(_ gallery: Gallery, included: Bool) -> Bool {
-        let saved = commit { value in
-            if included {
-                if !value.readLater.contains(where: { $0.id == gallery.id }) { value.readLater.insert(gallery.stored, at: 0) }
-            } else { value.readLater.removeAll { $0.id == gallery.id } }
-        }
+        let saved = included ? addReadLater([gallery]) != nil : commit { $0.readLater.removeAll { $0.id == gallery.id } }
         readLaterNotice = .init(text: saved ? (included ? "已加入稍后再读" : "已移出稍后再读") : "稍后再读未能保存，请重试")
         return saved
     }
@@ -240,28 +252,118 @@ private struct RecentSearchFile: Codable {
         guard page > 0 else { return }
         commit { value in value.history.removeAll { $0.id == gallery.id }; value.history.insert(.init(gallery: gallery.stored, page: page, date: Date()), at: 0); value.history = Array(value.history.prefix(500)) }
     }
-    func updateDownload(_ record: DownloadRecord) { commit { value in if let i = value.downloads.firstIndex(where: { $0.id == record.id }) { value.downloads[i] = record } else { value.downloads.append(record) } } }
-    func offlineDirectory(_ gallery: Gallery) -> URL { directory.appendingPathComponent("Offline/" + gallery.id.replacingOccurrences(of: ":", with: "-"), isDirectory: true) }
-    func removeDownload(_ record: DownloadRecord) {
-        guard error == nil else { return }
-        let path = offlineDirectory(record.gallery)
-        let staged = path.deletingLastPathComponent().appendingPathComponent("." + path.lastPathComponent + ".pending-removal")
-        do {
-            let exists = FileManager.default.fileExists(atPath: path.path)
-            if exists { try FileManager.default.moveItem(at: path, to: staged) }
-            guard commit({ $0.downloads.removeAll { $0.id == record.id } }) else {
-                if exists { try FileManager.default.moveItem(at: staged, to: path) }
-                return
-            }
-            if exists { try FileManager.default.removeItem(at: staged) }
+    func updateDownload(_ incoming: DownloadRecord, checkpoint: Bool = true) {
+        var record = incoming
+        if let old = record.replaces, download(for: old)?.status != .complete { record.replaces = nil }
+        if !checkpoint {
+            // The files are already durable. Keep the live count responsive
+            // while leaving the next atomic snapshot write to the checkpoint.
+            guard error == nil, let index = snapshot.downloads.firstIndex(where: { $0.id == record.id }) else { return }
+            snapshot.downloads[index] = record
+            return
         }
-        catch { self.error = "本机副本未能移除，请重试。" }
+        commit { value in
+            if let index = value.downloads.firstIndex(where: { $0.id == record.id }) {
+                value.downloads[index] = record
+            } else {
+                value.downloads.append(record)
+            }
+        }
+    }
+    func addDownloadJobs(_ galleries: [Gallery]) -> Int? {
+        guard error == nil else { return nil }
+        var existing = Set(snapshot.downloads.map(\.id))
+        let additions = galleries.filter { existing.insert($0.id).inserted }.map {
+            DownloadRecord(gallery: $0.stored, status: .waiting, total: $0.pages)
+        }
+        guard !additions.isEmpty else { return 0 }
+        return commit { $0.downloads.append(contentsOf: additions) } ? additions.count : nil
+    }
+    func offlineDirectory(_ gallery: Gallery) -> URL { directory.appendingPathComponent("Offline/" + gallery.id.replacingOccurrences(of: ":", with: "-"), isDirectory: true) }
+    func download(for reference: GalleryRef) -> DownloadRecord? {
+        snapshot.downloads.first { $0.gallery.ref == reference }
+    }
+    func readableDownload(for gallery: Gallery) -> DownloadRecord? {
+        guard let record = download(for: gallery.ref), !record.completed.isEmpty else { return nil }
+        let metadata = gallery.tagsComplete ? gallery : record.gallery
+        guard TagFilter.decision(tags: metadata.tags, blocked: blockedIDs, complete: metadata.tagsComplete) == .visible else { return nil }
+        return record
+    }
+    func downloadedPages(_ record: DownloadRecord) -> [GalleryPage] {
+        let directory = offlineDirectory(record.gallery)
+        return record.completed.sorted { $0.key < $1.key }.compactMap { index, name in
+            guard index > 0, name == "page-\(index).media" else { return nil }
+            let url = directory.appendingPathComponent(name)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else { return nil }
+            return GalleryPage(index: index, url: url)
+        }
+    }
+
+    func pinOfflineReader(_ gallery: GalleryRef, context: UUID) {
+        offlineReaders[context] = (owner, gallery)
+    }
+
+    func unpinOfflineReader(context: UUID) {
+        guard offlineReaders.removeValue(forKey: context)?.owner == owner else { return }
+        retireReplacedDownloads()
+    }
+
+    /// Persist the replacement before retiring the old directory. A crash
+    /// between these operations leaves both copies readable until the next load.
+    func retireReplacedDownloads() {
+        guard error == nil else { return }
+        let retired = Set(snapshot.downloads.compactMap { replacement -> String? in
+            guard replacement.status == .complete, let old = replacement.replaces,
+                  old.site == replacement.gallery.ref.site, old.gid < replacement.gallery.ref.gid,
+                  download(for: old)?.status == .complete,
+                  !offlineReaders.values.contains(where: { $0.owner == owner && $0.gallery == old }),
+                  let total = replacement.total, total > 0 else { return nil }
+            let pages = downloadedPages(replacement)
+            guard pages.count == total, pages.first?.index == 1, pages.last?.index == total else { return nil }
+            return old.id
+        })
+        if !retired.isEmpty { _ = removeDownloads(retired) }
+    }
+
+    func removeDownloads(_ ids: Set<String>) -> Bool {
+        guard error == nil else { return false }
+        guard !ids.isEmpty else { return true }
+        let manager = FileManager.default
+        var moves: [(original: URL, staged: URL)] = []
+        do {
+            for record in snapshot.downloads where ids.contains(record.id) {
+                let path = offlineDirectory(record.gallery)
+                guard manager.fileExists(atPath: path.path) else { continue }
+                let staged = path.deletingLastPathComponent().appendingPathComponent("." + path.lastPathComponent + ".pending-removal")
+                try manager.moveItem(at: path, to: staged)
+                moves.append((path, staged))
+            }
+            guard commit({ value in
+                let refs = Set(value.downloads.filter { ids.contains($0.id) }.map(\.gallery.ref))
+                value.downloads.removeAll { ids.contains($0.id) }
+                for index in value.downloads.indices where value.downloads[index].replaces.map(refs.contains) == true {
+                    value.downloads[index].replaces = nil
+                }
+            }) else { throw ViewerError.storage }
+        } catch {
+            for move in moves.reversed() { try? manager.moveItem(at: move.staged, to: move.original) }
+            self.error = "本机副本未能移除，请重试。"
+            return false
+        }
+        do {
+            for move in moves { try manager.removeItem(at: move.staged) }
+        } catch {
+            self.error = "下载记录已移除，文件清理将在重试时完成。"
+        }
+        return true
     }
 }
 
 
 enum SearchPresentation {
-    private static let headerCatalog = TagTranslationCatalog.load()
+    private static let headerCatalog = TagTranslationCatalog.bundled
 
     static func headerTitle(_ query: SearchQuery, savedName: String?) -> String {
         if !query.hasSettings { return "关键词、标签与条件" }
@@ -271,26 +373,21 @@ enum SearchPresentation {
         return "筛选结果"
     }
 
+    /// Compact previews and their counters share the same filter items.
+    /// Keywords have their own input/title and are excluded from filter badges.
     static func headerDetails(_ query: SearchQuery) -> String {
-        var values: [String] = []
-        if !query.text.isEmpty && query.titleOnly { values.append("仅标题") }
-        if !query.text.isEmpty && query.matchPhrase { values.append("完整短语") }
-        if !query.artist.isEmpty { values.append("作者 \(query.artist)") }
-        for rule in query.rules {
-            let translated = headerCatalog?.translation(for: rule.tag)
-            let name = translated.flatMap { $0.isEmpty ? nil : $0 } ?? rule.tag.label
-            values.append(rule.match == .all ? name : "\(rule.match.name) \(name)")
-        }
-        if !query.excludedCategories.isEmpty { values.append("\(GalleryCategory.all.count - query.excludedCategories.count) 类画廊") }
-        if let rating = query.minRating { values.append("\(rating) 星起") }
-        if query.minPages != nil || query.maxPages != nil {
-            values.append("\(query.minPages.map(String.init) ?? "0") 至 \(query.maxPages.map(String.init) ?? "不限") 页")
-        }
-        if !query.uploader.isEmpty { values.append("上传者 \(query.uploader)") }
-        if query.requireTorrent { values.append("含 torrent") }
-        guard !values.isEmpty else { return query.text.isEmpty ? "全部画廊" : "关键词搜索" }
-        let summary = values.prefix(2).joined(separator: " · ")
-        return values.count > 2 ? "\(summary) +\(values.count - 2)" : summary
+        let value = compactConditions(query)
+        return value.isEmpty ? (query.text.isEmpty ? "全部画廊" : "关键词搜索") : value
+    }
+
+    static func compactConditions(_ query: SearchQuery) -> String {
+        let values = conditionItems(query, includeText: false, translatedTags: true)
+        let preview = values.prefix(2).joined(separator: " · ")
+        return values.count > 2 ? "\(preview) · 另\(values.count - 2)项条件" : preview
+    }
+
+    static func conditionCount(_ query: SearchQuery, includeText: Bool = false) -> Int {
+        conditionItems(query, includeText: includeText).count
     }
 
     static func summary(_ query: SearchQuery, site: GallerySite) -> String {
@@ -306,22 +403,33 @@ enum SearchPresentation {
         return "筛选搜索"
     }
 
-    static func conditions(_ query: SearchQuery) -> String {
+    static func conditions(_ query: SearchQuery, includeText: Bool = true) -> String {
+        conditionItems(query, includeText: includeText).joined(separator: " · ")
+    }
+
+    private static func conditionItems(_ query: SearchQuery, includeText: Bool,
+                                       translatedTags: Bool = false) -> [String] {
         var values: [String] = []
-        if !query.text.isEmpty { values.append(query.text) }
+        if includeText && !query.text.isEmpty { values.append(query.text) }
         if query.titleOnly { values.append("仅标题") }
         if query.matchPhrase { values.append("完整短语") }
         if !query.artist.isEmpty { values.append("作者 \(query.artist)") }
-        for match in [TagMatch.all, .any, .exclude] {
-            let tags = query.rules.filter { $0.match == match }.map { $0.tag.label }
-            if !tags.isEmpty { values.append("\(match.name) \(tags.joined(separator: "、"))") }
+        for rule in query.rules {
+            let translated = translatedTags ? headerCatalog?.translation(for: rule.tag) : nil
+            let name = translated.flatMap { $0.isEmpty ? nil : $0 } ?? rule.tag.label
+            values.append("\(rule.match.name) \(name)")
         }
         let categories = GalleryCategory.all.filter { query.excludedCategories.contains($0.id) }.map(\.name)
         if !categories.isEmpty { values.append("排除分类 \(categories.joined(separator: "、"))") }
         if let rating = query.minRating { values.append("≥\(rating)星") }
-        if query.minPages != nil || query.maxPages != nil { values.append("\(query.minPages.map { String($0) } ?? "0")–\(query.maxPages.map { String($0) } ?? "不限")页") }
+        switch (query.minPages, query.maxPages) {
+        case let (minimum?, maximum?): values.append("\(minimum)–\(maximum) 页")
+        case let (minimum?, nil): values.append("至少 \(minimum) 页")
+        case let (nil, maximum?): values.append("最多 \(maximum) 页")
+        case (nil, nil): break
+        }
         if !query.uploader.isEmpty { values.append("上传者 \(query.uploader)") }
         if query.requireTorrent { values.append("torrent") }
-        return values.joined(separator: " · ")
+        return values
     }
 }

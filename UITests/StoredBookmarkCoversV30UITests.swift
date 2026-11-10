@@ -26,7 +26,7 @@ final class StoredBookmarkCoversV30UITests: XCTestCase {
         XCTAssertTrue(cover.label.contains("封面已载入"))
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "stored-bookmarks.restored-covers"; shot.lifetime = .keepAlways; add(shot)
         app.buttons["main.tab.discover"].tap(); app.buttons["discover.history"].tap()
-        XCTAssertTrue(app.navigationBars["阅读历史"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["阅读历史"].waitForExistence(timeout: 5))
         let historyShot = XCTAttachment(screenshot: app.screenshot()); historyShot.name = "stored-history.restored-cover"; historyShot.lifetime = .keepAlways; add(historyShot)
     }
 

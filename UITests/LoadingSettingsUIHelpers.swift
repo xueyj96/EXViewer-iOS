@@ -1,11 +1,38 @@
 import XCTest
 
+enum ReaderSettingsUIHelpers {
+    static func open(in app: XCUIApplication) {
+        let settings = app.buttons["reader.settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 6))
+        settings.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.waitForExistence(timeout: 5))
+    }
+
+    static func close(in app: XCUIApplication) {
+        let settings = app.descendants(matching: .any)["reader.settings-page.header"].firstMatch
+        settings.buttons["完成"].tap()
+        XCTAssertTrue(settings.waitForNonExistence(timeout: 5))
+    }
+
+    static func setMode(_ title: String, in app: XCUIApplication) {
+        open(in: app)
+        app.buttons[title].tap()
+        close(in: app)
+    }
+
+    static func setDirection(_ direction: String, in app: XCUIApplication) {
+        open(in: app)
+        app.buttons["reader.settings.direction.\(direction)"].tap()
+        close(in: app)
+    }
+}
+
 enum LoadingSettingsUIHelpers {
     static func open(in app: XCUIApplication) {
         let existingPrefetchSlider = app.sliders["account.loading.prefetch"]
         if existingPrefetchSlider.exists { return }
 
-        let readerSettingsDone = app.navigationBars["阅读设置"].buttons["完成"]
+        let readerSettingsDone = app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.buttons["完成"]
         if readerSettingsDone.exists { readerSettingsDone.tap() }
 
         let readerClose = app.buttons["reader.close"]
@@ -26,7 +53,7 @@ enum LoadingSettingsUIHelpers {
     }
 
     static func returnToReader(in app: XCUIApplication) {
-        let storageBack = app.navigationBars["阅读与存储"].buttons.element(boundBy: 0)
+        let storageBack = app.descendants(matching: .any)["account.storage-page.header"].buttons["BackButton"]
         if storageBack.exists { storageBack.tap() }
 
         let discoverTab = app.buttons["main.tab.discover"]
@@ -56,13 +83,11 @@ enum LoadingSettingsUIHelpers {
         XCTAssertTrue(slider.isHittable, "Account prefetch slider should be reachable")
         let previous = prefetchCount(in: app)
         if let previous, abs(previous - count) >= 16 {
-            slider.adjust(toNormalizedSliderPosition: CGFloat(count) / 128.0)
+            drag(slider, from: CGFloat(previous) / 128, to: CGFloat(count) / 128)
             XCTAssertNotEqual(prefetchCount(in: app), previous, "Dragging the slider must update its image count")
         }
         if prefetchCount(in: app) != count {
-            // LabeledContent merges the label and trailing button into one AX
-            // frame. Hit the visible trailing count, rather than the row center.
-            app.buttons["account.loading.prefetch-edit"].coordinate(withNormalizedOffset: .init(dx: 0.94, dy: 0.5)).tap()
+            app.buttons["account.storage-page.action"].tap()
             let alert = app.alerts.firstMatch
             XCTAssertTrue(alert.waitForExistence(timeout: 3))
             XCTAssertTrue(alert.staticTexts["预加载数量"].exists)
@@ -72,7 +97,12 @@ enum LoadingSettingsUIHelpers {
             // intercept synthesized typing. Wait for the keyboard first.
             if !app.keyboards.firstMatch.exists { field.tap() }
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 3))
-            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5) + String(count))
+            let replacement = String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5) + String(count)
+            field.typeText(replacement)
+            if field.value as? String != String(count) {
+                field.tap()
+                field.typeText(replacement)
+            }
             XCTAssertEqual(field.value as? String, String(count))
             alert.buttons["保存"].tap()
             // The number-pad dismissal can relocate this native alert during
@@ -84,40 +114,44 @@ enum LoadingSettingsUIHelpers {
     }
 
     static func prefetchCount(in app: XCUIApplication) -> Int? {
-        // Preserve the slider's native percentage value for platform adjustment;
-        // its accessibility label announces the actual count in image units.
-        Int(app.sliders["account.loading.prefetch"].label.filter(\.isNumber))
+        sliderCount(app.sliders["account.loading.prefetch"])
     }
 
     static func chooseImageConcurrency(_ count: Int, in app: XCUIApplication) {
-        XCTAssertTrue([2, 4, 8, 16].contains(count), "Unsupported image concurrency choice")
-        open(in: app)
-        let picker = app.segmentedControls["account.loading.concurrency"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        let option = picker.buttons["\(count)"]
-        XCTAssertTrue(option.waitForExistence(timeout: 3))
-        for _ in 0..<5 {
-            if option.isHittable { break }
-            app.swipeUp()
-        }
-        XCTAssertTrue(option.isHittable, "Image concurrency choice should be reachable")
-        option.tap()
-        XCTAssertEqual(picker.value as? String, String(count))
+        chooseConcurrency(count, choices: [2, 4, 8, 16], identifier: "account.loading.concurrency", in: app)
     }
 
     static func chooseSitePageConcurrency(_ count: Int, in app: XCUIApplication) {
-        XCTAssertTrue([1, 2, 4].contains(count), "Unsupported site page concurrency choice")
+        chooseConcurrency(count, choices: [1, 2, 4], identifier: "account.loading.site-concurrency", in: app)
+    }
+
+    private static func chooseConcurrency(_ count: Int, choices: [Int], identifier: String, in app: XCUIApplication) {
         open(in: app)
-        let picker = app.segmentedControls["account.loading.site-concurrency"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        let option = picker.buttons["\(count)"]
-        XCTAssertTrue(option.waitForExistence(timeout: 3))
+        let slider = app.sliders[identifier]
+        XCTAssertTrue(slider.waitForExistence(timeout: 5))
         for _ in 0..<5 {
-            if option.isHittable { break }
+            if slider.isHittable { break }
             app.swipeUp()
         }
-        XCTAssertTrue(option.isHittable, "Site page concurrency choice should be reachable")
-        option.tap()
-        XCTAssertEqual(picker.value as? String, String(count))
+        XCTAssertTrue(slider.isHittable)
+        guard let current = sliderCount(slider), let from = choices.firstIndex(of: current),
+              let to = choices.firstIndex(of: count) else {
+            return XCTFail("Concurrency slider must expose a supported choice")
+        }
+        if from != to {
+            let last = CGFloat(choices.count - 1)
+            drag(slider, from: CGFloat(from) / last, to: CGFloat(to) / last)
+        }
+        XCTAssertEqual(sliderCount(slider), count)
+    }
+
+    private static func sliderCount(_ slider: XCUIElement) -> Int? {
+        Int((slider.value as? String ?? "").filter(\.isNumber))
+    }
+
+    private static func drag(_ slider: XCUIElement, from: CGFloat, to: CGFloat) {
+        let start = slider.coordinate(withNormalizedOffset: .init(dx: 0.04 + from * 0.92, dy: 0.5))
+        let end = slider.coordinate(withNormalizedOffset: .init(dx: 0.02 + to * 0.96, dy: 0.5))
+        start.press(forDuration: 0.1, thenDragTo: end)
     }
 }

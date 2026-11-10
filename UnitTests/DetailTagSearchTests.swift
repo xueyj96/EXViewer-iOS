@@ -44,6 +44,30 @@ import ExViewerCore
         XCTAssertEqual(base.rules.count, 1); XCTAssertEqual(base.rules.first?.match, .exclude)
     }
 
+    func testAnOpenDraftCannotUpdateADifferentExecutedSearch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = SiteSession(qa: true)
+        let library = LibraryStore(qa: true, storageRoot: root)
+        var first = SearchQuery()
+        first.text = "coast"
+        let navigation = DiscoveryNavigation(query: first)
+        try navigation.startCurrent(session: session, qa: true)
+        var shown = false
+        let target = try XCTUnwrap(DetailSearchTarget(navigation: navigation, generation: session.generation, origin: .currentSearch) { _ in
+            shown = true
+        })
+        var second = SearchQuery()
+        second.text = "mountain"
+        try navigation.submit(query: second, site: .ex, lane: 0, savedID: nil, session: session, qa: true)
+        let current = navigation.current
+        let draft = DetailTagSearchDraft.adding(tags: [chinese], to: target.search)
+        XCTAssertThrowsError(try target.update(query: draft.query, site: draft.site, savedID: nil, session: session, library: library))
+        XCTAssertTrue(navigation.current === current)
+        XCTAssertFalse(shown)
+        XCTAssertTrue(library.recentSearches.isEmpty)
+    }
+
     func testBulkTagUpdatesRoundTripAndKeepSavedQueriesAndUnrelatedBlocks() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

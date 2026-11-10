@@ -18,8 +18,8 @@ final class LoadingSettingsV18UITests: XCTestCase {
         app.launch()
         LoadingSettingsUIHelpers.open(in: app)
         XCTAssertEqual(LoadingSettingsUIHelpers.prefetchCount(in: app), 64)
-        XCTAssertEqual(app.segmentedControls["account.loading.concurrency"].value as? String, "4")
-        XCTAssertEqual(app.segmentedControls["account.loading.site-concurrency"].value as? String, "1")
+        XCTAssertEqual(app.sliders["account.loading.concurrency"].value as? String, "4 路")
+        XCTAssertEqual(app.sliders["account.loading.site-concurrency"].value as? String, "1 路")
 
         LoadingSettingsUIHelpers.returnToReader(in: app)
         let state = app.descendants(matching: .any)["reader.cache.qa"].firstMatch

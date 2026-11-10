@@ -40,18 +40,18 @@ final class ReaderTapZonesV33UITests: XCTestCase {
         let app = openReader()
         let canvas = app.descendants(matching: .any)["reader.single.canvas"].firstMatch
         let directions: [(String, Bool, Bool)] = [
-            ("从左到右 →", true, false), ("从右到左 ←", true, true),
-            ("从上到下 ↓", false, false), ("从下到上 ↑", false, true)
+            ("leftToRight", true, false), ("rightToLeft", true, true),
+            ("topToBottom", false, false), ("bottomToTop", false, true)
         ]
         for (title, horizontal, reverse) in directions {
-            app.buttons["reader.direction"].tap(); app.buttons[title].tap()
+            ReaderSettingsUIHelpers.setDirection(title, in: app)
             let forward: CGFloat = reverse ? 0.18 : 0.82
             let backward: CGFloat = 1 - forward
             tap(app, x: horizontal ? backward : 0.36, y: horizontal ? 0.36 : backward)
             page(1, in: app)
             tap(app, x: horizontal ? forward : 0.64, y: horizontal ? 0.64 : forward)
             page(2, in: app)
-            XCTAssertFalse(app.navigationBars["阅读设置"].exists)
+            XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
             tap(app, x: horizontal ? backward : 0.36, y: horizontal ? 0.36 : backward)
             page(1, in: app)
         }
@@ -64,7 +64,7 @@ final class ReaderTapZonesV33UITests: XCTestCase {
         XCTAssertFalse(app.navigationBars["海岸线 · 插画与速写"].exists, "Reader uses floating controls without a native navigation background")
         capture(app, "reader33.transparent-header")
 
-        app.buttons["reader.direction"].tap(); app.buttons["从左到右 →"].tap()
+        ReaderSettingsUIHelpers.setDirection("leftToRight", in: app)
         let image = app.otherElements.matching(identifier: "media.static").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 5))
         image.doubleTap()
@@ -73,7 +73,7 @@ final class ReaderTapZonesV33UITests: XCTestCase {
         capture(app, "reader33.image-behind-header")
         tap(app, x: 0.82, y: 0.36)
         page(1, in: app)
-        XCTAssertFalse(app.navigationBars["阅读设置"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
         image.doubleTap()
         expectation(for: NSPredicate { _, _ in (image.value as? String ?? "").contains("fit") }, evaluatedWith: image)
         waitForExpectations(timeout: 5)
@@ -82,38 +82,35 @@ final class ReaderTapZonesV33UITests: XCTestCase {
         tap(app, x: 0.82, y: 0.36)
         page(12, in: app)
         tap(app, x: 0.5, y: 0.5)
-        XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.waitForExistence(timeout: 4))
         capture(app, "reader33.center-settings")
         app.buttons["完成"].tap()
         page(12, in: app)
     }
 
-    func testLoadingAndMissingMetadataTapsKeepWorkingWithoutTriggeringRetryOrSettings() {
-        let app = openReader(["--qa-prefetch=0", "--qa-reader-paging", "--qa-reader-metadata-stall", "--qa-transfer-ms=15000"])
+    func testMissingMetadataRetryAndEdgeTapsStayOnTheVisiblePage() {
+        let app = openReader(["--qa-prefetch=0", "--qa-reader-paging", "--qa-reader-metadata-stall"])
         tap(app, x: 0.82, y: 0.36)
         page(2, in: app)
-        XCTAssertTrue(app.otherElements["reader.page.loading.2"].firstMatch.waitForExistence(timeout: 3))
         tap(app, x: 0.82, y: 0.64)
-        page(3, in: app)
         let retry = app.buttons["reader.page.retry.3"]
         XCTAssertTrue(retry.waitForExistence(timeout: 4))
+        page(2, in: app)
         retry.tap()
-        page(3, in: app)
-        XCTAssertFalse(app.navigationBars["阅读设置"].exists, "Retry should not also open reader settings")
+        page(2, in: app)
         let diagnostic = app.descendants(matching: .any)["reader.cache.qa"].firstMatch
         expectation(for: NSPredicate { _, _ in (diagnostic.value as? String ?? "").contains("metadataCalls=2;") }, evaluatedWith: diagnostic)
         waitForExpectations(timeout: 4)
-        tap(app, x: 0.82, y: 0.36)
-        page(4, in: app)
+        XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
+
         tap(app, x: 0.18, y: 0.64)
-        page(3, in: app)
-        app.buttons["reader.direction"].tap(); app.buttons["从上到下 ↓"].tap()
+        page(1, in: app)
+        XCTAssertFalse(retry.exists)
+        ReaderSettingsUIHelpers.setDirection("topToBottom", in: app)
         tap(app, x: 0.64, y: 0.82)
-        page(4, in: app)
+        page(2, in: app)
         tap(app, x: 0.36, y: 0.18)
-        page(3, in: app)
-        tap(app, x: 0.64, y: 0.5)
-        XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 4))
-        capture(app, "reader33.loading-page-settings")
+        page(1, in: app)
+        capture(app, "reader33.retry-and-edge-taps")
     }
 }

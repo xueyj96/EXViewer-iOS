@@ -115,11 +115,11 @@ final class ReaderPositionV35UITests: XCTestCase {
 
     func testContinuousLongPageKeepsItsScrolledPositionWhenChromeToggles() {
         let app = openReader(transition: false)
-        app.buttons["reader.mode"].tap(); app.buttons["单页模式"].tap()
-        app.buttons["reader.direction"].tap(); app.buttons["从上到下 ↓"].tap()
+        ReaderSettingsUIHelpers.setMode("单页模式", in: app)
+        ReaderSettingsUIHelpers.setDirection("topToBottom", in: app)
         point(app, 0.64, 0.82).tap()
         _ = media(app, file: "reader-v9-long-2.png")
-        app.buttons["reader.mode"].tap(); app.buttons["连续模式"].tap()
+        ReaderSettingsUIHelpers.setMode("连续模式", in: app)
         // Mode changes create a new canvas. Resolve it again and enter the
         // long page using visible gestures before measuring position.
         for attempt in 1...4 {

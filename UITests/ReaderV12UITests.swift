@@ -86,7 +86,8 @@ final class ReaderV12UITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
     }
 
-    func testSlowCachedReleasesUseTheFingerExtentInEveryDirectionAndCenterTapOpensSettings() {
+    func testSlowCachedReleasesFollowTheFingerAndSettingsOpenFromControls() {
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--qa", "--qa-reader-transition", "--qa-reader-many", "--qa-reset-reader-preferences", "--qa-prefetch=2"]
         app.launch()
@@ -95,14 +96,14 @@ final class ReaderV12UITests: XCTestCase {
         XCTAssertTrue(app.buttons["在线阅读"].waitForExistence(timeout: 8)); app.buttons["在线阅读"].tap()
         waitForCachedAndPresentedNeighbor(app)
         let canvas = app.descendants(matching: .any)["reader.single.canvas"].firstMatch
-        let directions: [(String, CGVector, CGVector, Double, Bool)] = [
-            ("从左到右 →", .init(dx: 0.68, dy: 0.5), .init(dx: 0.36, dy: 0.5), 402, false),
-            ("从右到左 ←", .init(dx: 0.32, dy: 0.5), .init(dx: 0.64, dy: 0.5), 402, true),
-            ("从上到下 ↓", .init(dx: 0.5, dy: 0.62), .init(dx: 0.5, dy: 0.36), 634, false),
-            ("从下到上 ↑", .init(dx: 0.5, dy: 0.36), .init(dx: 0.5, dy: 0.62), 634, true)
+        let directions: [(String, CGVector, CGVector, Bool)] = [
+            ("leftToRight", .init(dx: 0.68, dy: 0.5), .init(dx: 0.36, dy: 0.5), true),
+            ("rightToLeft", .init(dx: 0.32, dy: 0.5), .init(dx: 0.64, dy: 0.5), true),
+            ("topToBottom", .init(dx: 0.5, dy: 0.62), .init(dx: 0.5, dy: 0.36), false),
+            ("bottomToTop", .init(dx: 0.5, dy: 0.36), .init(dx: 0.5, dy: 0.62), false)
         ]
-        for (title, start, end, extent, reverse) in directions {
-            app.buttons["reader.direction"].tap(); app.buttons[title].tap()
+        for (title, start, end, horizontal) in directions {
+            ReaderSettingsUIHelpers.setDirection(title, in: app)
             RunLoop.current.run(until: Date().addingTimeInterval(0.4))
             let identity = presentation(2, from: cacheValue(app))
             let a = app.coordinate(withNormalizedOffset: start)
@@ -110,8 +111,12 @@ final class ReaderV12UITests: XCTestCase {
             a.press(forDuration: 0.03, thenDragTo: b, withVelocity: .slow, thenHoldForDuration: 0.6)
             waitForPageTwo(app)
             let state = canvas.value as? String ?? ""
-            XCTAssertTrue(state.contains("ready=true,extent=\(extent),"), state)
-            XCTAssertTrue(state.contains("destination=\(reverse ? extent : -extent)"), state)
+            let extent = horizontal ? app.frame.width : app.frame.height
+            let gestureFraction = horizontal ? end.dx - start.dx : end.dy - start.dy
+            XCTAssertTrue(state.contains("release=commit=true,target=2,extent=\(Double(extent)),"), state)
+            XCTAssertTrue(state.contains("fileReady=true"), state)
+            let fingerOffset = state.components(separatedBy: ",from=").last?.split(separator: ",").first
+            XCTAssertEqual(Double(fingerOffset ?? "") ?? 0, Double(extent * gestureFraction), accuracy: 4, state)
             XCTAssertEqual(presentation(2, from: cacheValue(app)), identity)
             print("READER12_DIRECTION_RELEASE \(title); \(state)")
             capture(app, named: "reader12.slow-release.\(title)")
@@ -120,7 +125,9 @@ final class ReaderV12UITests: XCTestCase {
             expectation(for: NSPredicate { _, _ in page.label == "1 / 12" }, evaluatedWith: page)
             waitForExpectations(timeout: 8)
         }
-        app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 5))
+        if !app.buttons["reader.settings"].exists {
+            app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5)).tap()
+        }
+        ReaderSettingsUIHelpers.open(in: app)
     }
 }

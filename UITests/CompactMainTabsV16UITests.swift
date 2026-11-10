@@ -1,6 +1,50 @@
 import XCTest
+import UIKit
 
 final class CompactMainTabsV16UITests: XCTestCase {
+    func testRootTabsAndSearchDraftSurvivePortraitLandscapeRoundTrips() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        app.launchArguments = ["--qa"]
+        app.launch()
+
+        func roundTrip(_ anchor: XCUIElement, name: String) {
+            for (step, orientation) in [UIDeviceOrientation.landscapeLeft, .portrait, .landscapeRight, .portrait].enumerated() {
+                XCUIDevice.shared.orientation = orientation
+                let stable = NSPredicate { _, _ in
+                    (app.frame.width > app.frame.height) == orientation.isLandscape && anchor.isHittable
+                }
+                expectation(for: stable, evaluatedWith: anchor)
+                waitForExpectations(timeout: 8)
+                let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+                screenshot.name = "rotation-\(name)-\(step)-\(orientation.rawValue)"
+                screenshot.lifetime = .keepAlways
+                add(screenshot)
+            }
+        }
+
+        for (name, id) in [("discover", "main.tab.discover"), ("library", "main.tab.library"), ("account", "main.tab.account")] {
+            let tab = app.buttons[id]
+            XCTAssertTrue(tab.waitForExistence(timeout: 10))
+            tab.tap()
+            roundTrip(tab, name: name)
+            XCTAssertTrue(tab.isSelected)
+        }
+
+        app.buttons["main.tab.discover"].tap()
+        app.buttons["discover.search-entry"].tap()
+        let draft = app.textFields["compose.text"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 6))
+        draft.tap()
+        draft.typeText("rotation draft")
+        roundTrip(draft, name: "search")
+        XCTAssertEqual(draft.value as? String, "rotation draft")
+        app.buttons["compose.cancel"].tap()
+        XCTAssertTrue(app.buttons["main.tab.discover"].isSelected)
+    }
+
     func testCompactBarSwitchesAllRootTabsWithoutShowingNativeBar() {
         let app = XCUIApplication()
         app.launchArguments = ["--qa"]

@@ -61,6 +61,18 @@ enum QASamples {
                 if index == 1 { gallery.title = "这是一条需要换行并且超过两行的中性画廊标题用于验证标题自然高度与截断" }
                 if index == 2 { gallery.title = "缺少元数据"; gallery.category = ""; gallery.pages = nil }
             }
+            if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-detail-missing-credits") {
+                gallery.tags.removeAll { $0.namespace == "artist" }
+                gallery.uploader = ""
+            }
+            if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-detail-long-tag") {
+                gallery.tags.append(.init(namespace: "character", name: "a deliberately long character name to test the first tag wrapping beside its group"))
+            }
+            if AppMode.qa && index == 0 && ProcessInfo.processInfo.arguments.contains("--qa-detail-design-preview") {
+                gallery.category = "Western"
+                gallery.pages = 6
+                gallery.rating = 2.8
+            }
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-reader-many") { gallery.pages = 12 }
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-stored-bookmark-covers") { gallery.cover = cover(seed: index + 1) }
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-rating-filter") { gallery.rating = [2.8, 2.9, 3.0, 4.75][index] }

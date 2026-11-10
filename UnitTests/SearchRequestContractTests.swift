@@ -3,6 +3,50 @@ import ExViewerCore
 @testable import ExViewer
 
 @MainActor final class SearchRequestContractTests: XCTestCase {
+    func testDraftKeepsLiteralKeywordsAfterParsingAndAfterLoadingStoredQuery() throws {
+        for input in [#""-forest""#, #""language:chinese""#, #"title:"language:chinese""#, #"title:"sea  view""#] {
+            var draft = SearchDraft(query: SearchQuery(), site: .ex)
+            draft.inputText = input
+            let applied = try draft.validatedQuery()
+            let expected = try applied.url(site: .ex)
+            XCTAssertTrue(applied.rules.isEmpty)
+
+            try draft.parseInlineFilters()
+            XCTAssertEqual(try draft.validatedQuery().url(site: .ex), expected)
+
+            var reloaded = SearchDraft(query: applied, site: .ex)
+            XCTAssertEqual(reloaded.inputText, applied.text)
+            try reloaded.parseInlineFilters()
+            XCTAssertEqual(try reloaded.validatedQuery().url(site: .ex), expected)
+            reloaded.inputText += " temporary edit"
+            reloaded.inputText = applied.text
+            XCTAssertEqual(try reloaded.validatedQuery().url(site: .ex), expected)
+            reloaded.query.matchPhrase = false
+            try reloaded.parseInlineFilters()
+            let changed = try reloaded.validatedQuery()
+            XCTAssertFalse(changed.matchPhrase)
+            XCTAssertEqual(changed.text, applied.text)
+            XCTAssertTrue(changed.rules.isEmpty)
+        }
+    }
+
+    func testDraftUsesOnlyRawPageFieldsAfterLoadingAndClearingAStoredRange() throws {
+        var query = SearchQuery()
+        query.minPages = 40
+        query.maxPages = 100
+        var draft = SearchDraft(query: query, site: .eh)
+        XCTAssertTrue(draft.hasConditions)
+        draft.minimumPagesText = ""
+        draft.maximumPagesText = ""
+        XCTAssertFalse(draft.hasConditions)
+        XCTAssertEqual(try draft.validatedQuery(), SearchQuery())
+
+        draft.minimumPagesText = "-"
+        XCTAssertTrue(draft.hasConditions)
+        XCTAssertThrowsError(try draft.validatedQuery())
+        XCTAssertEqual(draft.minimumPagesText, "-")
+    }
+
     private func legacyQuery(_ query: SearchQuery, order: String) throws -> SearchQuery {
         var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(query)) as? [String: Any])
         fields["sortOrder"] = order
@@ -32,7 +76,8 @@ import ExViewerCore
         query.uploader = "Preview"; query.excludedCategories = [1, 32]
         let original = query, url = try query.url(site: .ex)
         let summary = SearchPresentation.headerDetails(query)
-        XCTAssertTrue(summary.contains("排除")); XCTAssertTrue(summary.hasSuffix("+5"))
+        XCTAssertTrue(summary.contains("排除")); XCTAssertTrue(summary.hasSuffix("另5项条件"))
+        XCTAssertEqual(SearchPresentation.conditionCount(query), 7)
         XCTAssertFalse(summary.contains("language:")); XCTAssertFalse(summary.contains("\n"))
         XCTAssertEqual(SearchPresentation.headerTitle(query, savedName: "常用画集"), "常用画集")
         XCTAssertEqual(query, original); XCTAssertEqual(try query.url(site: .ex), url)
@@ -41,6 +86,36 @@ import ExViewerCore
         query.text = "coast"
         XCTAssertEqual(SearchPresentation.headerTitle(query, savedName: "常用画集"), "coast")
         XCTAssertEqual(SearchPresentation.headerTitle(SearchQuery(), savedName: nil), "关键词、标签与条件")
+    }
+
+    func testFilterPreviewAndBadgeUseTheSameFiveItemsAndExposeEveryCondition() throws {
+        var query = SearchQuery()
+        query.rules = ["chinese", "english", "japanese", "spanish", "french"].map {
+            .init(tag: .init(namespace: "language", name: $0))
+        }
+        let original = query, request = try query.url(site: .ex)
+        XCTAssertEqual(SearchPresentation.conditionCount(query), 5)
+        XCTAssertTrue(SearchPresentation.headerDetails(query).hasSuffix("另3项条件"))
+        let full = SearchPresentation.conditions(query, includeText: false)
+        for rule in query.rules { XCTAssertTrue(full.contains(rule.tag.label)) }
+        XCTAssertFalse(full.contains("另3项")); XCTAssertFalse(full.contains("+3"))
+        XCTAssertEqual(query, original); XCTAssertEqual(try query.url(site: .ex), request)
+    }
+
+    func testFilterCountersSeparateKeywordsAndCountEachSelectedOption() {
+        var query = SearchQuery(); query.text = "coast"
+        XCTAssertEqual(SearchPresentation.conditionCount(query), 0)
+        XCTAssertEqual(SearchPresentation.conditionCount(query, includeText: true), 1)
+        XCTAssertEqual(SearchPresentation.headerDetails(query), "关键词搜索")
+        query.titleOnly = true; query.matchPhrase = true
+        query.artist = "Example"; query.uploader = "Uploader"; query.requireTorrent = true
+        query.minPages = 24; query.maxPages = 400; query.minRating = 3
+        query.excludedCategories = [1, 32]
+        XCTAssertEqual(SearchPresentation.conditionCount(query), 8)
+        XCTAssertEqual(SearchPresentation.conditionCount(query, includeText: true), 9)
+        XCTAssertTrue(SearchPresentation.conditions(query).contains("coast"))
+        XCTAssertFalse(SearchPresentation.conditions(query, includeText: false).contains("coast"))
+        XCTAssertEqual(SearchPresentation.conditionCount(SearchQuery()), 0)
     }
 
     func testSavedCombinationMoveAndEditKeepIdentityPositionConditionsAndAccountScopedPersistence() throws {
@@ -79,6 +154,7 @@ import ExViewerCore
         let otherIDs = reopened.snapshot.saved.map(\.id)
         XCTAssertFalse(reopened.moveSavedSearches(from: IndexSet(integer: 0), to: 2, expectedOwner: "guest"))
         XCTAssertNil(reopened.saveSearch(name: "Stale editor", site: .ex, query: updated, replacing: other, expectedOwner: "guest"))
+        XCTAssertNil(reopened.saveSearch(name: "Stale new draft", site: .ex, query: updated, expectedOwner: "guest"))
         XCTAssertEqual(reopened.snapshot.saved.map(\.id), otherIDs)
         XCTAssertEqual(reopened.snapshot.saved[0].name, "Other")
         reopened.load(owner: "guest"); XCTAssertEqual(reopened.snapshot.saved.map(\.id), order)

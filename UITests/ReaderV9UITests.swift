@@ -19,14 +19,12 @@ final class ReaderV9UITests: XCTestCase {
         XCTAssertEqual(control.label, label)
     }
     private func settings(_ app: XCUIApplication, single: Bool? = nil) {
-        app.buttons["reader.settings"].tap()
-        let picker = app.segmentedControls["reader.settings.mode"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        if let single { picker.buttons[single ? "单页模式" : "连续模式"].tap() }
+        ReaderSettingsUIHelpers.open(in: app)
+        if let single { app.buttons[single ? "单页模式" : "连续模式"].tap() }
     }
-    private func done(_ app: XCUIApplication) { app.navigationBars["阅读设置"].buttons["完成"].tap() }
+    private func done(_ app: XCUIApplication) { app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.buttons["完成"].tap() }
     private func direction(_ title: String, _ app: XCUIApplication) {
-        app.buttons["reader.direction"].tap(); app.buttons[title].tap()
+        ReaderSettingsUIHelpers.setDirection(title, in: app)
     }
     private func capture(_ app: XCUIApplication, _ title: String) {
         let image = XCTAttachment(screenshot: app.screenshot()); image.name = title; image.lifetime = .keepAlways; add(image)
@@ -39,7 +37,7 @@ final class ReaderV9UITests: XCTestCase {
     func testSingleTurnsRapidReverseCancelAndJumpKeepImageIdentity() {
         let app = launchReader(["--qa-reader-many"])
         settings(app, single: true); done(app)
-        for (menu, name) in [("从左到右 →", "从左到右"), ("从右到左 ←", "从右到左"), ("从上到下 ↓", "从上到下"), ("从下到上 ↑", "从下到上")] {
+        for (menu, name) in [("leftToRight", "从左到右"), ("rightToLeft", "从右到左"), ("topToBottom", "从上到下"), ("bottomToTop", "从下到上")] {
             direction(menu, app)
             app.buttons["下一页，\(name)"].tap(); page("2 / 12", app)
             let images = app.otherElements.matching(identifier: "media.static")
@@ -56,7 +54,7 @@ final class ReaderV9UITests: XCTestCase {
             XCTAssertEqual(app.buttons["reader.page"].label, "2 / 12", "A cancelled small drag keeps the current page")
             app.buttons["上一页，\(name)"].tap(); page("1 / 12", app)
         }
-        direction("从左到右 →", app)
+        direction("leftToRight", app)
         app.buttons["下一页，从左到右"].tap(withNumberOfTaps: 3, numberOfTouches: 1)
         page("4 / 12", app)
         app.buttons["上一页，从左到右"].tap(withNumberOfTaps: 2, numberOfTouches: 1)
@@ -93,7 +91,7 @@ final class ReaderV9UITests: XCTestCase {
 
     func testLongImageInteriorDoesNotSnapBackAndZoomRemainsIndependent() {
         let app = launchReader(["--qa-reader-long-page"])
-        direction("从上到下 ↓", app)
+        direction("topToBottom", app)
         app.buttons["下一页，从上到下"].tap(); page("2 / 3", app)
         let frames = app.descendants(matching: .any).matching(identifier: "reader.page.frame")
         let long = frames.allElementsBoundByIndex.first { ($0.value as? String) == "page 2" }
@@ -117,7 +115,7 @@ final class ReaderV9UITests: XCTestCase {
 
     func testPendingMetadataAppendCannotCancelANewerUnloadedJump() {
         let app = launchReader(["--qa-reader-paging", "--qa-reader-delay"])
-        direction("从下到上 ↑", app)
+        direction("bottomToTop", app)
         app.swipeDown(); page("2 / 3", app)
         app.buttons["reader.load-more"].tap()
         app.sliders["reader.progress"].adjust(toNormalizedSliderPosition: 1)

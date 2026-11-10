@@ -37,12 +37,40 @@ import ExViewerCore
     @Published private(set) var current: DiscoveryEntry
     @Published private(set) var history: [DiscoveryEntry] = []
     @Published private(set) var forwardHistory: [DiscoveryEntry] = []
+    @Published var submissionError: String?
     var canGoBack: Bool { !history.isEmpty }
     var canGoForward: Bool { !forwardHistory.isEmpty }
 
     init(query: SearchQuery = SearchQuery(), site: GallerySite = .ex, lane: Int = 0, savedID: UUID? = nil) {
+        current = Self.initialEntry(query: query, site: site, lane: lane, savedID: savedID)
+    }
+
+    private static func initialEntry(query: SearchQuery, site: GallerySite, lane: Int, savedID: UUID?) -> DiscoveryEntry {
         let url = (try? Self.requestURL(query: query, site: site, lane: lane)) ?? (try! SearchQuery().url(site: site))
-        current = DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url)
+        return DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url)
+    }
+
+    func reset(query: SearchQuery = SearchQuery(), site: GallerySite, savedID: UUID? = nil) {
+        cancelLoading()
+        history.removeAll()
+        forwardHistory.removeAll()
+        submissionError = nil
+        current = Self.initialEntry(query: query, site: site, lane: 0, savedID: savedID)
+    }
+
+    func cancelLoading() {
+        current.pager.cancel()
+        for entry in history + forwardHistory { entry.pager.cancel() }
+    }
+
+    func execute(query: SearchQuery, site: GallerySite, lane: Int? = nil, savedID: UUID?, session: SiteSession, library: LibraryStore) throws {
+        try submit(query: query, site: site, lane: lane ?? current.lane, savedID: savedID, session: session, qa: AppMode.qa)
+        library.recordSearch(query: current.query, site: current.site)
+        submissionError = nil
+    }
+
+    func report(_ error: Error) {
+        submissionError = (error as? LocalizedError)?.errorDescription ?? "搜索条件无效"
     }
 
     func startCurrent(session: SiteSession, qa: Bool) throws {

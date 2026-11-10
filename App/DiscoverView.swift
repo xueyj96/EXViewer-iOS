@@ -2,29 +2,19 @@ import SwiftUI
 import ExViewerCore
 
 struct DiscoverView: View {
-    @Binding var query: SearchQuery
-    @Binding var site: GallerySite
-    @Binding var editingSaved: UUID?
-    var onSearchQuery: (SearchQuery, GallerySite) -> Void
-    var runRevision: UUID? = nil
+    @ObservedObject var navigation: DiscoveryNavigation
+    var onSiteChange: (GallerySite) -> Void = { _ in }
+    var onOpenHistory: (() -> Void)? = nil
+    var onClose: (() -> Void)? = nil
 
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dynamicTypeSize) private var typeSize
-    @StateObject private var navigation: DiscoveryNavigation
     @State private var started = false
-    @State private var composing = false
-    @State private var composerStart: SearchComposerStart = .main
-    @State private var historyShowing = false
-    @State private var error: String?
+    @State private var composerStart: SearchComposerStart?
     @State private var web: WebDestination?
-
-    init(query: Binding<SearchQuery>, site: Binding<GallerySite>, editingSaved: Binding<UUID?>, runRevision: UUID? = nil,
-         onSearchQuery: @escaping (SearchQuery, GallerySite) -> Void = { _, _ in }) {
-        _query = query; _site = site; _editingSaved = editingSaved; self.runRevision = runRevision
-        self.onSearchQuery = onSearchQuery
-        _navigation = StateObject(wrappedValue: DiscoveryNavigation(query: query.wrappedValue, site: site.wrappedValue, lane: 0, savedID: editingSaved.wrappedValue))
-    }
+    @StateObject private var batchSelection = LibrarySelectionStore()
+    @State private var selecting = false
 
     private var entry: DiscoveryEntry { navigation.current }
     private var hasActiveConditions: Bool { entry.query.hasSettings }
@@ -32,18 +22,17 @@ struct DiscoverView: View {
         library.snapshot.saved.first { $0.id == entry.savedID && $0.query == entry.query && $0.site == entry.site }
     }
     private var headerDetails: String { SearchPresentation.headerDetails(entry.query) }
+    private var filterConditionCount: Int { SearchPresentation.conditionCount(entry.query) }
 
     var body: some View {
         FloatingFeedLayout { headerHeight in
             Group {
-                if !session.hasCredentials && !AppMode.qa && !started {
+                if !session.hasCredentials && !AppMode.qa && !started && !entry.didStart {
                     VStack {
                         Spacer()
                         VStack(alignment: .leading, spacing: 18) {
                             Image(systemName: "books.vertical").font(.system(size: 40, weight: .ultraLight)).foregroundStyle(Palette.accent)
                             Text("发现画廊").font(.title2.weight(.medium))
-                            Text("登录自己的站点账号，或以访客身份开始浏览。")
-                                .font(.subheadline).foregroundStyle(.secondary)
                             Button("登录站点账号") { web = .login }.buttonStyle(AppActionButtonStyle(tone: .accent))
                             Button("开始浏览") { startCurrent() }.font(.subheadline)
                         }
@@ -51,144 +40,199 @@ struct DiscoverView: View {
                         Spacer()
                     }
                 } else {
-                    DiscoveryFeedView(entry: entry, topInset: headerHeight, onRefresh: { [id = entry.id] in
+                    DiscoveryFeedView(entry: entry, topInset: headerHeight, selectionStore: batchSelection, isSelecting: selecting,
+                                      onLongPressSelect: beginSelection, onRefresh: { [id = entry.id] in
                         guard navigation.current.id == id else { return }; refreshCurrent()
                     }, isCurrent: { [id = entry.id] in navigation.current.id == id })
                         .id(entry.id)
                         .environmentObject(session)
                         .environmentObject(library)
                         .modifier(DiscoveryHistoryGesture(topInset: headerHeight,
-                                                         canGoBack: navigation.canGoBack, canGoForward: navigation.canGoForward,
+                                                         canGoBack: !selecting && navigation.canGoBack,
+                                                         canGoForward: !selecting && navigation.canGoForward,
                                                          onBack: goBack, onForward: goForward))
                 }
             }
         } header: {
             discoverFloatingHeader
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if selecting {
+                LibraryBatchToolbar(source: .discover, summary: batchSelection.summary, galleries: {
+                    entry.pager.items.filter { batchSelection.selectedIDs.contains($0.id) }
+                })
+            }
+        }
         .toolbar(.hidden, for: .navigationBar)
         .sheet(item: $web) { OfficialWebView(destination: $0) }
-        .sheet(isPresented: $historyShowing) {
-            NavigationStack {
-                ReadingHistoryView().navigationDestination(for: Gallery.self) { gallery in
-                    GalleryDetailView(gallery: gallery, currentSearch: entry.query.hasSettings ? .init(query: entry.query, site: entry.site) : nil) { query, site in
-                        historyShowing = false; onSearchQuery(query, site)
-                    }
-                }
-            }
-        }
-        .onChange(of: runRevision) { oldValue, newValue in
-            guard oldValue != newValue else { return }
-            do {
-                _ = try navigation.submit(query: query, site: site, lane: entry.lane, savedID: editingSaved, session: session, qa: AppMode.qa)
-                started = true
-                publish(navigation.current)
-                library.recordSearch(query: navigation.current.query, site: navigation.current.site)
-                error = nil
-            } catch { self.error = message(for: error) }
-        }
+        .navigationDestination(item: $composerStart) { composerSheet(startAt: $0) }
         .onChange(of: session.hasCredentials) { _, value in if value { startCurrent() } }
-        .task {
-            guard !started && (AppMode.qa || session.hasCredentials || query.count > 0) else { return }
-            if query == entry.query && site == entry.site && editingSaved == entry.savedID { startCurrent() }
-            else {
-                do {
-                    _ = try navigation.submit(query: query, site: site, lane: entry.lane, savedID: editingSaved, session: session, qa: AppMode.qa)
-                    started = true; publish(navigation.current)
-                    library.recordSearch(query: navigation.current.query, site: navigation.current.site)
-                } catch { self.error = message(for: error) }
-            }
+        .onChange(of: entry.id) { _, _ in endSelection(resume: false) }
+        .onChange(of: library.blockedIDs) { _, _ in endSelection() }
+        .task(id: entry.id) {
+            if !entry.didStart && (AppMode.qa || session.hasCredentials || hasActiveConditions) { startCurrent() }
         }
     }
 
     private var discoverFloatingHeader: some View {
-        FloatingHeaderPanel {
-            VStack(spacing: 0) {
-                if let error { StatusMessage(title: error) }
-                searchEntryRow
-                HStack(spacing: 8) {
-                    if hasActiveConditions { conditionSummary }
-                    else { lanePicker }
-                    commonSearchControl
+        FloatingHeaderPanel(identifier: "discover.header.floating", twoRows: true) {
+            VStack(spacing: FeedChrome.rowSpacing(for: typeSize)) {
+                if let error = navigation.submissionError { StatusMessage(title: error) }
+                FeedHeaderRows {
+                    searchEntryRow
+                } secondary: {
+                    if selecting {
+                        LibraryBatchSelectionHeader(source: .discover, store: batchSelection, summary: batchSelection.summary) {
+                            endSelection()
+                        }
+                    } else {
+                        let layout = typeSize.isAccessibilitySize
+                            ? AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
+                            : AnyLayout(FeedHeaderGrid(spans: [3, 1]))
+                        layout {
+                            if hasActiveConditions { conditionSummary }
+                            else { lanePicker }
+                            commonSearchControl
+                        }
+                    }
                 }
             }
-            .floatingHeaderSurface()
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("discover.header.floating")
+    }
+
+    private func beginSelection(_ gallery: Gallery) {
+        guard !selecting else { return }
+        let visible = LibrarySelectionPolicy.filtered(entry.pager.items, blocked: library.blockedIDs).visible
+        batchSelection.updateLoadedIDs(Set(visible.map(\.id)))
+        guard batchSelection.beginSelecting(gallery.id) else { return }
+        entry.pager.pauseForSelection()
+        selecting = true
+    }
+
+    private func endSelection(resume: Bool = true) {
+        guard selecting else { return }
+        selecting = false
+        batchSelection.clear()
+        if resume, entry.pager.interrupted { entry.pager.retry(session: session) }
     }
 
     private var searchEntryRow: some View {
-        HStack(spacing: 0) {
+        let layout = !typeSize.isAccessibilitySize
+            ? AnyLayout(FeedHeaderGrid(spans: [3, 1]))
+            : AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
+        return layout {
+            searchInputControls.disabled(selecting)
+            if let onClose {
+                Button(action: onClose) {
+                    shortcutLabel("关闭", symbol: "xmark")
+                }
+                .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
+                .accessibilityLabel("关闭搜索结果").accessibilityIdentifier("search.results.close")
+            } else if let onOpenHistory {
+                Button(action: onOpenHistory) {
+                    shortcutLabel("历史", symbol: "clock")
+                }
+                .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
+                .disabled(selecting)
+                .accessibilityLabel("阅读历史").accessibilityIdentifier("discover.history")
+            }
+        }
+    }
+
+    private func shortcutLabel(_ title: String, symbol: String) -> some View {
+        ViewThatFits(in: .horizontal) {
+            if !typeSize.isAccessibilitySize {
+                HStack(spacing: 4) {
+                    shortcutIcon(symbol)
+                    Text(title).font(FeedChrome.labelFont)
+                }
+                .fixedSize()
+            }
+            shortcutIcon(symbol)
+        }
+        .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
+    }
+
+    private func shortcutIcon(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(FeedChrome.labelFont)
+            .imageScale(.medium)
+            .frame(width: 16)
+    }
+
+    private var searchInputControls: some View {
+        let insets = FeedChrome.surfaceInsets(for: typeSize, row: .primary)
+        let contentOffset = FeedChrome.contentOffset(for: insets)
+        return HStack(spacing: 0) {
             if navigation.canGoBack {
                 Button(action: goBack) {
                     Image(systemName: "chevron.left")
-                        .font(.body.weight(.medium))
-                        .frame(width: 44, height: 44)
+                        .offset(y: contentOffset)
+                        .frame(minWidth: FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("返回")
+                .accessibilityLabel(onClose == nil ? "返回" : "上一组搜索条件")
                 .accessibilityIdentifier("discover.back")
                 .contextMenu {
                     if navigation.canGoForward { Button("前进", systemImage: "chevron.right", action: goForward) }
                 }
             }
-            Button { composerStart = .main; composing = true } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "magnifyingglass").font(.body).foregroundStyle(.secondary)
+            Button { composerStart = .main } label: {
+                HStack(spacing: FeedChrome.controlSpacing) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     Text(SearchPresentation.headerTitle(entry.query, savedName: currentSaved?.name))
-                        .font(.subheadline).lineLimit(1).foregroundStyle(hasActiveConditions ? .primary : .secondary)
+                        .lineLimit(1).foregroundStyle(hasActiveConditions ? .primary : .secondary)
                     Spacer(minLength: 0)
-                }.padding(.leading, 12).padding(.trailing, 8).frame(minHeight: 44).contentShape(Rectangle())
+                }.padding(.horizontal, FeedChrome.controlSpacing)
+                    .offset(y: contentOffset)
+                    .frame(minHeight: FeedChrome.rowHeight).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(hasActiveConditions ? "编辑搜索条件" : "搜索关键词、标签与条件")
             .accessibilityValue(hasActiveConditions ? SearchPresentation.conditions(entry.query) : "")
             .accessibilityIdentifier("discover.search-entry")
-            Divider().frame(height: 18)
-            Button { composerStart = .filters; composing = true } label: {
-                Image(systemName: "slider.horizontal.3").font(.body)
-                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            Divider().frame(height: 18).offset(y: contentOffset)
+            Button { composerStart = .filters } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .offset(y: contentOffset)
+                    .frame(minWidth: FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight).contentShape(Rectangle())
                     .overlay(alignment: .topTrailing) {
-                        if entry.query.count > 0 {
-                            Text(String(entry.query.count)).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
-                                .padding(2).background(Color.accentColor, in: Circle()).offset(x: -3, y: 5)
+                        if filterConditionCount > 0 {
+                            Text(String(filterConditionCount)).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
+                                .padding(2).background(Color.accentColor, in: Circle()).offset(x: -3, y: 5 + contentOffset)
                         }
                     }
             }.buttonStyle(.plain)
             .accessibilityLabel("搜索筛选条件")
-            .accessibilityValue("\(entry.query.count) 项条件")
+            .accessibilityValue("\(filterConditionCount) 项筛选条件，不含关键词")
             .accessibilityIdentifier("discover.filters")
-            Button { historyShowing = true } label: {
-                Image(systemName: "clock").font(.body).frame(width: 44, height: 44).contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("阅读历史").accessibilityIdentifier("discover.history")
         }
-        .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 5)
-        .sheet(isPresented: $composing) { composerSheet }
+        .font(FeedChrome.labelFont)
+        .appControlSurface(insets: insets)
     }
 
     private var commonSearchControl: some View {
-        Button { composerStart = .favorites; composing = true } label: {
-            Label("常用", systemImage: "bookmark").labelStyle(.titleAndIcon)
+        Button { composerStart = .favorites } label: {
+            shortcutLabel("常用", symbol: "bookmark")
         }
-        .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
         .accessibilityLabel("常用组合").accessibilityIdentifier("discover.saved-menu")
     }
 
     private var conditionSummary: some View {
-        Button { composerStart = .filters; composing = true } label: {
+        Button { composerStart = .filters } label: {
             HStack(spacing: 5) {
-                Image(systemName: "line.3.horizontal.decrease").font(.subheadline).accessibilityHidden(true)
-                Text(headerDetails).font(.subheadline.weight(.medium)).lineLimit(1)
+                Text(headerDetails).lineLimit(1)
                 Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).accessibilityHidden(true)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-            .appControlSurface(verticalInset: typeSize.isAccessibilitySize ? 0 : 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .feedHeaderControl(typeSize: typeSize)
         }
         .buttonStyle(.plain).foregroundStyle(.primary)
-        .accessibilityLabel("当前筛选条件").accessibilityValue(SearchPresentation.conditions(entry.query))
+        .accessibilityLabel("当前筛选条件").accessibilityValue(SearchPresentation.conditions(entry.query, includeText: false))
+        .accessibilityHint("展开查看全部筛选条件")
         .accessibilityIdentifier("discover.condition-summary")
     }
 
@@ -200,14 +244,13 @@ struct DiscoverView: View {
         Binding(get: { entry.lane }, set: { lane in submit(entry.query, site: entry.site, lane: lane, savedID: entry.savedID) })
     }
 
-    private var composerSheet: some View {
-        return DiscoveryComposerView(query: entry.query, site: entry.site, savedID: currentSaved?.id,
-                                     startAt: composerStart, loadedPreset: currentSaved) { query, site, savedID in
-            _ = try navigation.submit(query: query, site: site, lane: entry.lane, savedID: savedID, session: session, qa: AppMode.qa)
+    private func composerSheet(startAt: SearchComposerStart) -> some View {
+        DiscoveryComposerView(query: entry.query, site: entry.site, savedID: currentSaved?.id,
+                              startAt: startAt, loadedPreset: currentSaved, updatesResults: hasActiveConditions || onClose != nil,
+                              usesParentNavigation: true) { query, site, savedID in
+            try navigation.execute(query: query, site: site, savedID: savedID, session: session, library: library)
             started = true
-            publish(navigation.current)
-            library.recordSearch(query: navigation.current.query, site: navigation.current.site)
-            error = nil
+            onSiteChange(navigation.current.site)
         }
         .environmentObject(library)
         .dynamicTypeSize(typeSize)
@@ -218,16 +261,17 @@ struct DiscoverView: View {
             let isFirstExecution = !entry.didStart
             try navigation.startCurrent(session: session, qa: AppMode.qa)
             if isFirstExecution { library.recordSearch(query: entry.query, site: entry.site) }
-            started = true; error = nil
-        } catch { self.error = message(for: error) }
+            started = true
+            navigation.submissionError = nil
+        } catch { navigation.report(error) }
     }
 
     private func submit(_ query: SearchQuery, site: GallerySite, lane: Int, savedID: UUID?) {
         do {
-            _ = try navigation.submit(query: query, site: site, lane: lane, savedID: savedID, session: session, qa: AppMode.qa)
-            started = true; publish(navigation.current); error = nil
-            library.recordSearch(query: navigation.current.query, site: navigation.current.site)
-        } catch { self.error = message(for: error) }
+            try navigation.execute(query: query, site: site, lane: lane, savedID: savedID, session: session, library: library)
+            started = true
+            onSiteChange(navigation.current.site)
+        } catch { navigation.report(error) }
     }
 
     private func goBack() {
@@ -241,21 +285,13 @@ struct DiscoverView: View {
     }
 
     private func resumeHistoryEntry() {
-        publish(navigation.current)
+        onSiteChange(navigation.current.site)
         startCurrent()
         if entry.pager.interrupted { entry.pager.retry(session: session) }
     }
 
-    private func publish(_ value: DiscoveryEntry) {
-        query = value.query; site = value.site; editingSaved = value.savedID
-    }
-
     private func refreshCurrent() {
         entry.pager.reset(url: entry.requestURL, session: session, qa: AppMode.qa)
-    }
-
-    private func message(for error: Error) -> String {
-        (error as? LocalizedError)?.errorDescription ?? (error as? ViewerError)?.localizedDescription ?? "搜索条件无效"
     }
 
 }
@@ -309,6 +345,9 @@ private struct DiscoveryHistoryGesture: ViewModifier {
 private struct DiscoveryFeedView: View {
     @ObservedObject var entry: DiscoveryEntry
     var topInset: CGFloat
+    var selectionStore: LibrarySelectionStore
+    var isSelecting: Bool
+    var onLongPressSelect: (Gallery) -> Void
     var onRefresh: () -> Void
     var isCurrent: () -> Bool
     @EnvironmentObject private var session: SiteSession
@@ -316,8 +355,11 @@ private struct DiscoveryFeedView: View {
     @ObservedObject private var pager: GalleryPager
     @State private var restoring = true
 
-    init(entry: DiscoveryEntry, topInset: CGFloat, onRefresh: @escaping () -> Void, isCurrent: @escaping () -> Bool) {
-        self.entry = entry; self.topInset = topInset; self.onRefresh = onRefresh; self.isCurrent = isCurrent
+    init(entry: DiscoveryEntry, topInset: CGFloat, selectionStore: LibrarySelectionStore, isSelecting: Bool,
+         onLongPressSelect: @escaping (Gallery) -> Void, onRefresh: @escaping () -> Void, isCurrent: @escaping () -> Bool) {
+        self.entry = entry; self.topInset = topInset; self.selectionStore = selectionStore
+        self.isSelecting = isSelecting
+        self.onLongPressSelect = onLongPressSelect; self.onRefresh = onRefresh; self.isCurrent = isCurrent
         _pager = ObservedObject(wrappedValue: entry.pager)
     }
 
@@ -326,15 +368,17 @@ private struct DiscoveryFeedView: View {
           ScrollViewReader { proxy in
            ScrollView {
             LazyVStack(spacing: 0) {
-                if pager.interrupted {
+                if pager.interrupted && !isSelecting {
                     StatusMessage(title: "已暂停之前的加载，可重试继续。") { pager.retry(session: session) }
                 }
-                GalleryRows(galleries: pager.items, layout: .grid, sourceIdentity: entry.id.uuidString,
-                            onNearEnd: { if !restoring && isCurrent() && pager.failure == nil && !pager.interrupted { pager.more(session: session, prefetch: true) } },
+                GalleryRows(galleries: pager.items, layout: .grid,
+                            sourceIdentity: entry.id.uuidString, selectionStore: selectionStore, isSelecting: isSelecting,
+                            selectionIdentifier: "discover.select", onLongPressSelect: onLongPressSelect,
+                            onNearEnd: { if !isSelecting && !restoring && isCurrent() && pager.failure == nil && !pager.interrupted { pager.more(session: session, prefetch: true) } },
                             viewport: .init(space: entry.id.uuidString, height: viewport.size.height, topOcclusion: topInset),
                             onVisibleAnchor: { if !restoring && isCurrent() { entry.updateVisibleAnchor($0) } })
                     .scrollTargetLayout()
-                GalleryContinuationFooter(pager: pager)
+                if !isSelecting { GalleryContinuationFooter(pager: pager) }
                 if !pager.loading && pager.failure == nil && pager.items.isEmpty && !pager.interrupted {
                     StatusMessage(title: entry.query.count > 0 ? "当前组合没有结果，可调整筛选条件。" : "当前范围没有结果。", symbol: entry.query.count > 0 ? "magnifyingglass" : "tray")
                 }
@@ -343,10 +387,10 @@ private struct DiscoveryFeedView: View {
         }
         .coordinateSpace(name: entry.id.uuidString)
         .accessibilityIdentifier("discover.feed")
-        .refreshable(action: onRefresh)
+        .refreshable { if !isSelecting { onRefresh() } }
         .contentMargins(.top, topInset, for: .scrollIndicators)
         .task(id: topInset) {
-            restoring = true
+            guard restoring, topInset > 0 else { return }
             // A new feed must finish its initial placement before viewport
             // callbacks can save anchors or request another batch. Appends keep
             // the server's existing order and do not restart this restoration.

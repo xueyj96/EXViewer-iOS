@@ -42,6 +42,33 @@ final class ExtremeCoverV49UITests: XCTestCase {
         assertBoundedColumns(app, first: "gallery.open.1", second: "gallery.open.2")
     }
 
+    func testDetailKeepsTheSameCoverFrameForDecodedTallAndWideImages() {
+        let app = launch()
+        var metadataOffsets: [CGFloat] = []
+        for id in [1, 2] {
+            app.buttons["gallery.open.\(id)"].tap()
+            let info = app.descendants(matching: .any)["detail.info-card"].firstMatch
+            let cover = info.images["cover.decoded-image"]
+            XCTAssertTrue(cover.waitForExistence(timeout: 8))
+            if id == 1 {
+                XCTAssertEqual(cover.frame.height, 126, accuracy: 1)
+                XCTAssertLessThan(cover.frame.width, 5)
+            } else {
+                XCTAssertEqual(cover.frame.width, 84, accuracy: 1)
+                XCTAssertLessThan(cover.frame.height, 5)
+            }
+            let rating = info.descendants(matching: .any)["detail.info.rating"].firstMatch
+            XCTAssertTrue(rating.exists)
+            metadataOffsets.append(rating.frame.minX - info.frame.minX)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "detail-extreme-cover-\(id)"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            app.buttons["BackButton"].tap()
+        }
+        XCTAssertEqual(metadataOffsets[0], metadataOffsets[1], accuracy: 1)
+    }
+
     func testLibraryUsesTheSameBoundedCoverGeometryDuringSelection() {
         let app = launch()
         app.buttons["main.tab.library"].tap()

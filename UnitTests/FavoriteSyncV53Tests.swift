@@ -78,6 +78,45 @@ import ExViewerCore
         let done = await wait { cache.entry(s)?.phase == nil }; XCTAssertTrue(done)
         XCTAssertEqual(server.posts, 1); XCTAssertEqual(cache.entry(s)?.state, .favorited("待阅读"))
     }
+    func testBatchAdditionReadsFreshMembershipAndPreservesExistingGroupAndNote() async throws {
+        let cache = SiteFavoriteCache(), existingScope = scope(), existing = Server(ref)
+        let newReference = GalleryRef(site: .eh, gid: 84, token: "newFixture")
+        let newScope = scope(existingScope.generation, reference: newReference), fresh = Server(newReference)
+        cache.put(.notFavorited, form: try existing.form(), scope: existingScope)
+        existing.group = 2
+        existing.note = "Keep this note"
+        let additions: [SiteFavoriteCache.BatchAddition] = [
+            .init(scope: existingScope, client: existing.client, title: "Existing", groupName: "待阅读"),
+            .init(scope: newScope, client: fresh.client, title: "New", groupName: "待阅读"),
+        ]
+        XCTAssertEqual(try cache.enqueueAdditions(additions, group: 1), 2)
+        XCTAssertEqual(try cache.enqueueAdditions(additions, group: 3), 0, "A repeated batch must respect pending changes")
+        XCTAssertEqual(cache.entry(newScope)?.state, .unknown)
+        XCTAssertEqual(cache.entry(newScope)?.phase, .queued)
+        XCTAssertEqual(existing.posts + fresh.posts, 0)
+        let done = await wait { cache.entry(existingScope)?.phase == nil && cache.entry(newScope)?.phase == nil }
+        XCTAssertTrue(done)
+        XCTAssertEqual(existing.reads, 1)
+        XCTAssertEqual(existing.posts, 0)
+        XCTAssertEqual(existing.group, 2)
+        XCTAssertEqual(existing.note, "Keep this note")
+        XCTAssertEqual(cache.entry(existingScope)?.state, .favorited(QASamples.favoriteGroupName))
+        XCTAssertEqual(fresh.posts, 1)
+        XCTAssertEqual(fresh.group, 1)
+        XCTAssertEqual(cache.entry(newScope)?.state, .favorited("待阅读"))
+    }
+
+    func testBatchOverCapacityDoesNotPartiallyQueue() throws {
+        let cache = SiteFavoriteCache(), base = scope()
+        cache.activate(owner: base.owner, generation: base.generation)
+        let additions = (1...65).map { gid in
+            let reference = GalleryRef(site: .eh, gid: Int64(gid), token: "fixture")
+            return SiteFavoriteCache.BatchAddition(scope: scope(base.generation, reference: reference),
+                                                   client: Server(reference).client, title: "Fixture", groupName: "待阅读")
+        }
+        XCTAssertThrowsError(try cache.enqueueAdditions(additions, group: 1))
+        XCTAssertTrue(cache.changes.isEmpty)
+    }
     func testSeveralSelectionsBeforeDispatchCoalesceToOnePost() async throws {
         let cache = SiteFavoriteCache(), s = scope(), server = Server(ref)
         cache.put(.notFavorited, scope: s)
@@ -107,6 +146,26 @@ import ExViewerCore
         XCTAssertEqual(cache.entry(s)?.phase, .uncertain); XCTAssertEqual(server.posts, 1)
         cache.check(ref.id)
         let done = await wait { cache.entry(s)?.phase == nil }; XCTAssertTrue(done); XCTAssertEqual(server.posts, 1)
+    }
+    func testRemovalBecomesVisibleToTheListOnlyAfterServerConfirmation() async throws {
+        let cache = SiteFavoriteCache(), favoriteScope = scope(), server = Server(ref)
+        server.group = 2
+        server.failures = [1]
+        let form = try server.form()
+        cache.put(form.state, form: form, scope: favoriteScope)
+        try enqueue(cache, server, favoriteScope, .remove)
+
+        let uncertain = await wait { cache.entry(favoriteScope)?.phase == .uncertain }
+        XCTAssertTrue(uncertain)
+        XCTAssertEqual(server.posts, 1)
+        XCTAssertTrue(cache.confirmedRemovals.isEmpty)
+        cache.check(ref.id)
+        let confirmed = await wait { cache.confirmedRemovals[ref.id] != nil }
+        XCTAssertTrue(confirmed)
+        XCTAssertEqual(cache.entry(favoriteScope)?.state, .notFavorited)
+        XCTAssertEqual(server.posts, 1)
+        cache.activate(owner: "bb", generation: UUID())
+        XCTAssertTrue(cache.confirmedRemovals.isEmpty)
     }
     func testRestoredInFlightIntentIsReadBeforeAnyResubmission() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString); defer { try? FileManager.default.removeItem(at: root) }
@@ -255,14 +314,18 @@ import ExViewerCore
         XCTAssertEqual(restored.entry(s)?.phase,.queued);XCTAssertEqual(restored.changes.count,1)
         cache.activate(owner:"bb",generation:UUID())
     }
-    func testKnownUnsentChangeWaitsAndResumesOnForegroundAfterNetworkRecovers() async throws {
+    func testKnownUnsentChangeResumesOnForegroundAfterNetworkRecoversWithDetailClosed() async throws {
         final class Clock { var date = Date() }
         let clock = Clock(), cache = SiteFavoriteCache(now:{clock.date}), s = scope(), server = Server(ref)
-        cache.put(.notFavorited,scope:s);try enqueue(cache,server,s,.move(2))
+        let observer = UUID()
+        cache.put(.notFavorited,scope:s)
+        cache.register(observer, scope: s, client: server.client)
+        try enqueue(cache,server,s,.move(2))
+        cache.unregister(observer)
         clock.date.addTimeInterval(601);server.failures=[1]
         let waiting = await wait { server.reads == 1 && cache.entry(s)?.message != nil };XCTAssertTrue(waiting)
         XCTAssertEqual(cache.entry(s)?.phase,.queued);XCTAssertEqual(server.posts,0)
-        server.failures=[];cache.register(UUID(),scope:s,client:server.client);cache.refreshActive()
+        server.failures=[];cache.refreshActive()
         let done = await wait { cache.entry(s)?.phase == nil };XCTAssertTrue(done);XCTAssertEqual(server.posts,1)
     }
 }

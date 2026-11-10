@@ -23,6 +23,54 @@ enum LibrarySortSection: String, CaseIterable {
     var defaultOrder: LibrarySortOrder { self == .history ? .recent : .original }
 }
 
+enum SiteFavoriteOrder: String, CaseIterable, Identifiable {
+    case siteDefault, favorited, posted
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .siteDefault: return "跟随站点"
+        case .favorited: return "收藏时间"
+        case .posted: return "发布时间"
+        }
+    }
+    private var inlineSetting: String? {
+        switch self {
+        case .siteDefault: return nil
+        case .favorited: return "fs_f"
+        case .posted: return "fs_p"
+        }
+    }
+
+    func url(site: GallerySite, category: String) -> URL? {
+        guard let base = try? SearchQuery().url(site: site, favorites: true),
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = components.queryItems?.map { item in
+            switch item.name {
+            case "favcat": return .init(name: item.name, value: category)
+            case "inline_set": return .init(name: item.name, value: inlineSetting ?? item.value)
+            default: return item
+            }
+        }
+        return components.url
+    }
+
+    static func continuation(_ url: URL, from root: URL) -> URL? {
+        guard URLPolicy.continuation(url, from: root) else { return nil }
+        guard root.path == "/favorites.php",
+              let original = URLComponents(url: root, resolvingAgainstBaseURL: false)?.percentEncodedQueryItems,
+              var next = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        // Keep the cursor opaque and keep its scope consistent with the first page.
+        let scope = original.filter { item in
+            item.name == "favcat" || (item.name == "inline_set" && (item.value == "fs_f" || item.value == "fs_p"))
+        }
+        guard !scope.isEmpty else { return url }
+        let names = Set(scope.map(\.name))
+        next.percentEncodedQueryItems = (next.percentEncodedQueryItems ?? []).filter { !names.contains($0.name) } + scope
+        return next.url
+    }
+}
+
 /// Separate preferences only. Sorting never rewrites library.json or timestamps.
 struct LibrarySortPreferences {
     static let qaSuite = "ExViewer.LibrarySort.QA"
@@ -40,6 +88,13 @@ struct LibrarySortPreferences {
     }
     func load() -> [LibrarySortSection: LibrarySortOrder] {
         Dictionary(uniqueKeysWithValues: LibrarySortSection.allCases.map { ($0, order(for: $0)) })
+    }
+    private func favoriteKey(_ site: GallerySite) -> String { "library.sort.v1.\(owner).favorites.\(site.rawValue)" }
+    func favoriteOrder(for site: GallerySite) -> SiteFavoriteOrder {
+        defaults.string(forKey: favoriteKey(site)).flatMap(SiteFavoriteOrder.init(rawValue:)) ?? .siteDefault
+    }
+    func set(_ order: SiteFavoriteOrder, for site: GallerySite) {
+        defaults.set(order.rawValue, forKey: favoriteKey(site))
     }
 }
 

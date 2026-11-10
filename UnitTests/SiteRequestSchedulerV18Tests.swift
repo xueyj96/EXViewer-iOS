@@ -13,11 +13,11 @@ import XCTest
 
     func testBackgroundCannotTakeReservedForegroundSlotAndForegroundJumpsQueue() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), search: false, limit: 2)
-        let background = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .thumbnail), search: false, limit: 2) }
+        let first = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), pacing: nil, limit: 2)
+        let background = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .thumbnail), pacing: nil, limit: 2) }
         let queued = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queued)
-        let foreground = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .foreground), search: false, limit: 2) }
+        let foreground = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .foreground), pacing: nil, limit: 2) }
         let foregroundLease = try await foreground.value
         XCTAssertEqual(scheduler.activeCount, 2)
         scheduler.release(foregroundLease)
@@ -30,13 +30,13 @@ import XCTest
 
     func testQueuedDemandPromotionKeepsSingleWaiterAndMovesItAhead() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1)
+        let first = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1)
         let prefetchDemand = MediaRequestDemand(priority: .prefetch)
-        let prefetch = Task { try await scheduler.acquire(request: prefetchDemand, search: false, limit: 1) }
+        let prefetch = Task { try await scheduler.acquire(request: prefetchDemand, pacing: nil, limit: 1) }
         let queuedPrefetch = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queuedPrefetch)
         let foregroundDemand = MediaRequestDemand(priority: .thumbnail)
-        let promoted = Task { try await scheduler.acquire(request: foregroundDemand, search: false, limit: 1) }
+        let promoted = Task { try await scheduler.acquire(request: foregroundDemand, pacing: nil, limit: 1) }
         let bothQueued = await waitUntil { scheduler.queuedCount == 2 }
         XCTAssertTrue(bothQueued)
         foregroundDemand.setPriority(.foreground)
@@ -49,10 +49,26 @@ import XCTest
         XCTAssertEqual(scheduler.queuedCount, 0)
     }
 
+    func testReaderJoiningAnOfflineRequestBypassesItsPacingWait() async throws {
+        let scheduler = SiteRequestScheduler(searchInterval: 0)
+        let download = MediaRequestDemand(priority: .download)
+        let first = try await scheduler.acquire(request: download, pacing: .download, limit: 2)
+        scheduler.release(first)
+        let demand = MediaRequestDemand(priority: .download)
+        let waiting = Task { try await scheduler.acquire(request: demand, pacing: .download, limit: 2) }
+        let queued = await waitUntil { scheduler.queuedCount == 1 }
+        XCTAssertTrue(queued)
+        let promotedAt = ProcessInfo.processInfo.systemUptime
+        demand.setPriority(.foreground)
+        let lease = try await waiting.value
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - promotedAt, 0.4)
+        scheduler.release(lease)
+    }
+
     func testCanceledQueuedRequestLeavesNoWaiterOrLease() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1)
-        let pending = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), search: false, limit: 1) }
+        let first = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1)
+        let pending = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), pacing: nil, limit: 1) }
         let queued = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queued)
         pending.cancel()
@@ -66,13 +82,13 @@ import XCTest
 
     func testLimitOneAllowsSerialBackground() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), search: false, limit: 1)
-        let second = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .thumbnail), search: false, limit: 1) }
+        let first = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), pacing: nil, limit: 1)
+        let second = Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .thumbnail), pacing: nil, limit: 1) }
         let queued = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queued)
         scheduler.release(first)
         let secondLease = try await second.value
-        let third = Task { try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1) }
+        let third = Task { try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1) }
         let queuedAgain = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queuedAgain)
         XCTAssertEqual(scheduler.activeCount, 1)
@@ -84,12 +100,12 @@ import XCTest
     func testSearchStartsAreSpacedAndNonSearchCanUseAvailableSlot() async throws {
         let interval = 0.18
         let scheduler = SiteRequestScheduler(searchInterval: interval)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 2)
+        let first = try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 2)
         let firstStart = ProcessInfo.processInfo.systemUptime
-        let nextSearch = Task { try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 2) }
+        let nextSearch = Task { try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 2) }
         let queued = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queued)
-        let nonSearch = Task { try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 2) }
+        let nonSearch = Task { try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 2) }
         let nonSearchLease = try await nonSearch.value
         XCTAssertEqual(scheduler.activeCount, 2)
         scheduler.release(nonSearchLease)
@@ -102,8 +118,8 @@ import XCTest
 
     func testCanceledPacedSearchDoesNotDelayNextSearch() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0.15)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 1)
-        let canceled = Task { try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 1) }
+        let first = try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 1)
+        let canceled = Task { try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 1) }
         let queued = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queued)
         canceled.cancel()
@@ -111,7 +127,7 @@ import XCTest
         catch is CancellationError { }
         scheduler.release(first)
         let start = ProcessInfo.processInfo.systemUptime
-        let next = try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 1)
+        let next = try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 1)
         let waitAfterPreviousDispatch = ProcessInfo.processInfo.systemUptime - start
         XCTAssertGreaterThanOrEqual(waitAfterPreviousDispatch, 0.08)
         XCTAssertLessThan(waitAfterPreviousDispatch, 0.25)
@@ -120,14 +136,14 @@ import XCTest
 
     func testQueueIsBoundedAtSixtyFourWaiters() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let first = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1)
+        let first = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1)
         let tasks = (0..<64).map { _ in
-            Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), search: false, limit: 1) }
+            Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), pacing: nil, limit: 1) }
         }
         let full = await waitUntil { scheduler.queuedCount == 64 }
         XCTAssertTrue(full)
         do {
-            _ = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1)
+            _ = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1)
             XCTFail("Expected bounded queue rejection")
         } catch let failure as RequestFailure {
             XCTAssertEqual(failure, .pageQueueFull)
@@ -158,11 +174,11 @@ import XCTest
 
     func testReducingLimitDoesNotCancelAlreadyActiveLeases() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let one = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 2)
-        let two = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 2)
+        let one = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 2)
+        let two = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 2)
         scheduler.setLimit(1)
         XCTAssertEqual(scheduler.activeCount, 2)
-        let pending = Task { try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1) }
+        let pending = Task { try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1) }
         let queued = await waitUntil { scheduler.queuedCount == 1 }
         XCTAssertTrue(queued)
         XCTAssertEqual(scheduler.activeCount, 2)
@@ -178,14 +194,14 @@ import XCTest
 
     func testForegroundCanUseReservedSlotWhenBackgroundQueueIsFull() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
-        let activeBackground = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), search: false, limit: 2)
+        let activeBackground = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), pacing: nil, limit: 2)
         let queuedTasks = (0..<64).map { _ in
-            Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .thumbnail), search: false, limit: 2) }
+            Task { try await scheduler.acquire(request: MediaRequestDemand(priority: .thumbnail), pacing: nil, limit: 2) }
         }
         let full = await waitUntil { scheduler.queuedCount == 64 }
         XCTAssertTrue(full)
 
-        let foreground = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 2)
+        let foreground = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 2)
         XCTAssertEqual(scheduler.activeCount, 2)
         XCTAssertEqual(scheduler.queuedCount, 64)
         scheduler.release(foreground)
@@ -199,13 +215,13 @@ import XCTest
     func testQueuedSearchesRemainSpacedAfterConcurrencyGateOpens() async throws {
         let interval = 0.16
         let scheduler = SiteRequestScheduler(searchInterval: interval)
-        let blocker = try await scheduler.acquire(request: MediaRequestDemand(), search: false, limit: 1)
+        let blocker = try await scheduler.acquire(request: MediaRequestDemand(), pacing: nil, limit: 1)
         let first = Task {
-            let lease = try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 1)
+            let lease = try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 1)
             return (lease, ProcessInfo.processInfo.systemUptime)
         }
         let second = Task {
-            let lease = try await scheduler.acquire(request: MediaRequestDemand(), search: true, limit: 1)
+            let lease = try await scheduler.acquire(request: MediaRequestDemand(), pacing: .search, limit: 1)
             return (lease, ProcessInfo.processInfo.systemUptime)
         }
         let queued = await waitUntil { scheduler.queuedCount == 2 }

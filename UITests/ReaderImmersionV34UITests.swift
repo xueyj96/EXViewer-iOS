@@ -3,6 +3,7 @@ import XCTest
 final class ReaderImmersionV34UITests: XCTestCase {
     private func openReader(_ arguments: [String] = []) -> XCUIApplication {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         let prefetch = arguments.contains(where: { $0.hasPrefix("--qa-prefetch=") }) ? [] : ["--qa-prefetch=2"]
         app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--qa-reader-many", "--qa-reader-transition"] + prefetch + arguments
@@ -11,7 +12,11 @@ final class ReaderImmersionV34UITests: XCTestCase {
         XCTAssertTrue(gallery.waitForExistence(timeout: 12)); gallery.tap()
         let read = app.buttons["在线阅读"]
         XCTAssertTrue(read.waitForExistence(timeout: 8)); read.tap()
-        XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 10))
+        if arguments.contains("--qa-automatic-immersion") {
+            XCTAssertTrue(app.descendants(matching: .any)["reader.cache.qa"].firstMatch.waitForExistence(timeout: 10))
+        } else {
+            XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 10))
+        }
         XCTAssertFalse(app.buttons["reader.previous"].exists)
         XCTAssertFalse(app.buttons["reader.next"].exists)
         return app
@@ -40,7 +45,7 @@ final class ReaderImmersionV34UITests: XCTestCase {
 
     private func detailsAndReturn(_ app: XCUIApplication) {
         coordinate(app).doubleTap()
-        XCTAssertTrue(app.navigationBars["画廊详情"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["detail.site-favorite"].exists)
         let read = app.buttons["返回阅读"]
         XCTAssertTrue(read.exists); read.tap()
@@ -52,13 +57,32 @@ final class ReaderImmersionV34UITests: XCTestCase {
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
 
+    func testReaderStartsImmersiveResetsIdleAndReturnsFromTheLeftEdge() {
+        let app = openReader(["--qa-automatic-immersion"])
+        chrome(false, in: app)
+        coordinate(app).tap()
+        let header = app.descendants(matching: .any)["reader.header"].firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 3))
+        XCTAssertFalse(header.waitForNonExistence(timeout: 2))
+        coordinate(app).tap()
+        XCTAssertFalse(header.waitForNonExistence(timeout: 2))
+        XCTAssertTrue(header.waitForNonExistence(timeout: 5))
+
+        coordinate(app, x: 0.75).press(forDuration: 0.05, thenDragTo: coordinate(app, x: 0.30),
+                                       withVelocity: .fast, thenHoldForDuration: 0.05)
+        page(2, in: app)
+        coordinate(app, x: 0.008).press(forDuration: 0.05, thenDragTo: coordinate(app, x: 0.61),
+                                        withVelocity: .fast, thenHoldForDuration: 0.05)
+        XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5))
+    }
+
     func testLoadedImageDoubleTapDetailsAndLongPressImmersionPreservePageAndZoom() {
         let app = openReader()
         let image = app.otherElements.matching(identifier: "media.static").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 6))
         coordinate(app).tap()
         page(1, in: app)
-        XCTAssertFalse(app.navigationBars["阅读设置"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
         XCTAssertFalse(app.descendants(matching: .any)["reader.details"].firstMatch.exists)
         detailsAndReturn(app)
         page(1, in: app)
@@ -89,40 +113,38 @@ final class ReaderImmersionV34UITests: XCTestCase {
         expectation(for: NSPredicate { _, _ in (image.value as? String ?? "").contains("fit") }, evaluatedWith: image)
         waitForExpectations(timeout: 5)
         app.buttons["reader.settings"].tap()
-        XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.waitForExistence(timeout: 4))
         app.buttons["完成"].tap()
         page(1, in: app)
     }
 
     func testMissingMetadataDoubleTapLongPressAndRetryRemainIndependent() {
-        let app = openReader(["--qa-prefetch=0", "--qa-reader-paging", "--qa-reader-metadata-stall", "--qa-transfer-ms=15000"])
-        coordinate(app, x: 0.82, y: 0.36).tap(); page(2, in: app)
-        coordinate(app, x: 0.82, y: 0.64).tap(); page(3, in: app)
+        let app = openReader(["--qa-prefetch=0", "--qa-reader-paging", "--qa-reader-metadata-stall"])
+        coordinate(app, x: 0.82, y: 0.36).tap()
+        page(2, in: app)
+        coordinate(app, x: 0.82, y: 0.64).tap()
         let retry = app.buttons["reader.page.retry.3"]
         XCTAssertTrue(retry.waitForExistence(timeout: 4))
+        page(2, in: app)
         retry.tap()
-        page(3, in: app)
+        page(2, in: app)
         chrome(true, in: app)
         XCTAssertFalse(app.descendants(matching: .any)["reader.details"].firstMatch.exists)
         detailsAndReturn(app)
-        page(3, in: app)
+        page(2, in: app)
+        XCTAssertFalse(retry.exists)
         coordinate(app, y: 0.45).press(forDuration: 0.7)
         chrome(false, in: app)
-        page(3, in: app)
+        page(2, in: app)
         capture(app, "reader34.loading-immersive")
-        coordinate(app, x: 0.82, y: 0.36).tap(); page(4, in: app)
-        coordinate(app, x: 0.18, y: 0.64).tap(); page(3, in: app)
-        coordinate(app, y: 0.45).press(forDuration: 0.7)
-        chrome(true, in: app)
-        app.buttons["reader.direction"].tap(); app.buttons["从上到下 ↓"].tap()
-        coordinate(app, x: 0.64, y: 0.82).tap(); page(4, in: app)
-        coordinate(app, x: 0.36, y: 0.18).tap(); page(3, in: app)
+        coordinate(app, x: 0.18, y: 0.64).tap()
+        page(1, in: app)
         XCTAssertFalse(app.buttons["reader.next"].exists)
     }
 
     func testContinuousReaderCanHideAndRestoreChromeWithoutChangingItsPage() {
         let app = openReader()
-        app.buttons["reader.mode"].tap(); app.buttons["连续模式"].tap()
+        ReaderSettingsUIHelpers.setMode("连续模式", in: app)
         page(1, in: app)
         coordinate(app).press(forDuration: 0.7)
         chrome(false, in: app)
@@ -133,5 +155,30 @@ final class ReaderImmersionV34UITests: XCTestCase {
         page(1, in: app)
         XCTAssertFalse(app.buttons["reader.next"].exists)
         XCTAssertFalse(app.buttons["reader.previous"].exists)
+
+    }
+
+    func testContinuousHorizontalEdgeBackPreservesResumePage() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--qa-stored-bookmark-covers"]
+        app.launch()
+        let gallery = app.buttons["gallery.open.1"]
+        XCTAssertTrue(gallery.waitForExistence(timeout: 12))
+        gallery.tap()
+        let read = app.buttons["detail.read"]
+        XCTAssertTrue(read.waitForExistence(timeout: 8))
+        read.tap()
+        page(2, in: app)
+        ReaderSettingsUIHelpers.setMode("连续模式", in: app)
+        ReaderSettingsUIHelpers.setDirection("leftToRight", in: app)
+        page(2, in: app)
+
+        coordinate(app, x: 0.008).press(forDuration: 0.05, thenDragTo: coordinate(app, x: 0.88),
+                                        withVelocity: .fast, thenHoldForDuration: 0.05)
+        XCTAssertTrue(read.waitForExistence(timeout: 5))
+        read.tap()
+        page(2, in: app)
     }
 }

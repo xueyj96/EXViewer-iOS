@@ -67,6 +67,30 @@ enum ErrorMessages {
 }
 
 enum PageMediaLoader {
+    @MainActor static func readerFile(_ page: GalleryPage, session: SiteSession, owner: String,
+                                      request: MediaRequestDemand, repository: MediaRepository = .shared,
+                                      isCurrent: () -> Bool) async throws -> URL {
+        try Task.checkCancellation()
+        let scope = session.pageReadScope
+        guard isCurrent(), scope.owner == owner else { throw ViewerError.stale }
+        if let cached = await repository.cachedPage(page.url, scope: scope),
+           session.pageReadScope == scope {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw ViewerError.stale }
+            request.reportProgress(MediaLoadProgress(phase: .ready))
+            ReaderNetworkMetrics.record(request.id, phase: "cache-hit")
+            return cached
+        }
+        return try await file(resolvePage: {
+            request.reportProgress(MediaLoadProgress(phase: .resolvingPage))
+            return try await ReaderNetworkMetrics.measure(request.id, phase: "image-page", page: page.index) {
+                try await session.imageSource(page.url, request: request, recoverConnection: false)
+            }
+        }, loadMedia: { image in
+            try await repository.pageFile(for: image, page: page.url, scope: scope, request: request)
+        }, isCurrent: isCurrent)
+    }
+
     /// Retries the page/image pipeline once for a recoverable page or media
     /// transport failure. It never forces nl=1 or purchases a fallback.
     @MainActor static func file(resolvePage: () async throws -> ImageSource,

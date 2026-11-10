@@ -4,6 +4,7 @@ import ImageIO
 import ExViewerCore
 
 actor TransferGate {
+    private let browsingLimit: Int
     private var permits: Int
     private let prefetchLimit: Int
     private let thumbnailLimit: Int
@@ -11,12 +12,14 @@ actor TransferGate {
     private var foregroundInUse = 0
     private var prefetchInUse = 0
     private var thumbnailsInUse = 0
-    init(limit: Int = 3, prefetchLimit: Int = 1, allowFullWithForeground: Bool = false) {
-        permits = max(1, limit)
+    init(limit: Int = 3, prefetchLimit: Int = 1, allowFullWithForeground: Bool = false, totalLimit: Int? = nil) {
+        browsingLimit = max(1, limit)
+        permits = max(browsingLimit, totalLimit ?? browsingLimit)
         self.prefetchLimit = min(max(1, prefetchLimit), max(1, limit - 1))
         thumbnailLimit = min(2, max(0, limit - 1))
         self.allowFullWithForeground = allowFullWithForeground
     }
+    private var browsingPermits: Int { min(permits, browsingLimit - foregroundInUse - prefetchInUse - thumbnailsInUse) }
     private struct Waiter {
         let id: UUID
         let request: MediaRequestDemand
@@ -32,7 +35,7 @@ actor TransferGate {
     /// scheduling, never how an already-acquired permit must be released.
     func acquire(request: MediaRequestDemand) async throws -> MediaRequestPriority {
         try Task.checkCancellation()
-        if request.priority == .foreground, permits > 0,
+        if request.priority == .foreground, browsingPermits > 0,
            !waiting.contains(where: { $0.request.priority == .foreground }) {
             permits -= 1
             foregroundInUse += 1
@@ -64,18 +67,26 @@ actor TransferGate {
         switch priority {
         case .foreground: foregroundInUse -= 1
         case .prefetch: prefetchInUse -= 1
-        case .thumbnail: thumbnailsInUse -= 1
+        case .thumbnail, .thumbnailPrefetch: thumbnailsInUse -= 1
+        case .download: break
         }
         resumeWaiting()
     }
     private func resumeWaiting() {
         while permits > 0 {
             let selected: (Int, MediaRequestPriority)?
-            if let foreground = waiting.firstIndex(where: { $0.request.priority == .foreground }) { selected = (foreground, .foreground) }
-            else if (permits > 1 || (allowFullWithForeground && foregroundInUse > 0)), prefetchInUse < prefetchLimit,
+            let browse = browsingPermits
+            let allowsBackgroundBrowse = browse > 1 || (browse > 0 && allowFullWithForeground && foregroundInUse > 0)
+            if browse > 0, let foreground = waiting.firstIndex(where: { $0.request.priority == .foreground }) { selected = (foreground, .foreground) }
+            else if allowsBackgroundBrowse, prefetchInUse < prefetchLimit,
                     let prefetch = waiting.firstIndex(where: { $0.request.priority == .prefetch }) { selected = (prefetch, .prefetch) }
-            else if (permits > 1 || (allowFullWithForeground && foregroundInUse > 0)), thumbnailsInUse < thumbnailLimit,
+            else if allowsBackgroundBrowse, thumbnailsInUse < thumbnailLimit,
                     let thumbnail = waiting.firstIndex(where: { $0.request.priority == .thumbnail }) { selected = (thumbnail, .thumbnail) }
+            else if allowsBackgroundBrowse, thumbnailLimit > 0, thumbnailsInUse == 0,
+                    let upcoming = waiting.firstIndex(where: { $0.request.priority == .thumbnailPrefetch }) {
+                selected = (upcoming, .thumbnailPrefetch)
+            }
+            else if permits > 1, let download = waiting.firstIndex(where: { $0.request.priority == .download }) { selected = (download, .download) }
             else { selected = nil }
             guard let (index, lease) = selected else { return }
             let waiter = waiting.remove(at: index)
@@ -83,7 +94,8 @@ actor TransferGate {
             switch lease {
             case .foreground: foregroundInUse += 1
             case .prefetch: prefetchInUse += 1
-            case .thumbnail: thumbnailsInUse += 1
+            case .thumbnail, .thumbnailPrefetch: thumbnailsInUse += 1
+            case .download: break
             }
             waiter.request.removeObserver(waiter.observer)
             waiter.continuation.resume(returning: lease)
@@ -216,8 +228,9 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
 
 actor MediaRepository {
     static let shared = MediaRepository()
-    private let gate = TransferGate(limit: 16, prefetchLimit: 15, allowFullWithForeground: true)
-    private let manualGate = TransferGate(limit: 1)
+    private let gate = TransferGate(limit: ReaderLoadPolicy.maxConcurrency,
+                                    prefetchLimit: ReaderLoadPolicy.maxConcurrency - 1,
+                                    allowFullWithForeground: true, totalLimit: MediaTransferClient.maxConnections)
     nonisolated let root: URL
     private nonisolated let browseCachePins = BrowseCachePinRegistry()
     private let transferClient: MediaTransferClient
@@ -241,7 +254,7 @@ actor MediaRepository {
         init(priority: MediaRequestPriority) { demand = MediaRequestDemand(priority: priority) }
     }
     private var flights: [FlightKey: Flight] = [:]
-    private struct PageCacheKey: Hashable { let owner: String; let page: URL }
+    private struct PageCacheKey: Hashable { let scope: PageReadScope; let page: URL }
     private struct PageSource { let image: URL; let epoch: UUID; let date: Date }
     private var pageSources: [PageCacheKey: PageSource] = [:]
     init(root: URL? = nil, configuration: URLSessionConfiguration? = nil, browseCacheBudget: Int64 = 2_000_000_000) {
@@ -339,6 +352,16 @@ actor MediaRepository {
         guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return false }
         return CGImageSourceGetCount(source) > 0
     }
+
+    func discardUndecodableBrowseFile(_ file: URL, owner: String) {
+        let file = file.standardizedFileURL
+        guard file.deletingLastPathComponent() == directory(owner: owner).standardizedFileURL,
+              StaticCoverImageCache.decodeThumbnail(file: file, maxPixelSize: 64) == nil,
+              let result = try? browseCachePins.removeIfUnpinned(file, owner: owner, root: root),
+              case .removed = result else { return }
+        cacheIndexes[owner]?.confirmRemoved(file)
+        pendingCacheTouches[owner]?.removeValue(forKey: file.path)
+    }
     private func touch(_ file: URL, owner: String) {
         let now = Date()
         if let index = cacheIndexes[owner], index.isBootstrapped, index.contains(file) {
@@ -383,9 +406,10 @@ actor MediaRepository {
         }
         let temporary = try await FileTransfer(limit: 64_000_000, client: transferClient).fetch(url, request: request)
         defer { try? FileManager.default.removeItem(at: temporary) }
+        let preview = await StaticCoverImageCache.decode(file: temporary, maxPixelSize: 64)
         try Task.checkCancellation()
         guard epochs[owner] == epoch else { throw CancellationError() }
-        guard let source = CGImageSourceCreateWithURL(temporary as CFURL, nil), CGImageSourceGetCount(source) > 0 else { throw ViewerError.unsupported }
+        guard preview != nil else { throw ViewerError.unsupported }
         try commitBrowseFile(temporary, target: target, directory: directory, owner: owner)
         request.reportProgress(request.progress.replacingPhase(.ready))
         return target
@@ -435,11 +459,12 @@ actor MediaRepository {
 
     /// Associate the page with its completed image for cache-to-offline promotion.
     /// This bounded hint stays in memory; a miss uses the normal page resolver.
-    func pageFile(for image: URL, page: URL, owner: String, request: MediaRequestDemand) async throws -> URL {
+    func pageFile(for image: URL, page: URL, scope: PageReadScope, request: MediaRequestDemand) async throws -> URL {
+        let owner = scope.owner
         let epoch = epochs[owner] ?? UUID(); epochs[owner] = epoch
         let file = try await self.file(for: image, owner: owner, request: request)
         if epochs[owner] == epoch {
-            pageSources[PageCacheKey(owner: owner, page: page)] = PageSource(image: image, epoch: epoch, date: Date())
+            pageSources[PageCacheKey(scope: scope, page: page)] = PageSource(image: image, epoch: epoch, date: Date())
             if pageSources.count > 1_024, let oldest = pageSources.min(by: { $0.value.date < $1.value.date })?.key {
                 pageSources.removeValue(forKey: oldest)
             }
@@ -447,41 +472,53 @@ actor MediaRepository {
         return file
     }
 
+    private func cachedPagePath(_ page: URL, scope: PageReadScope) -> URL? {
+        let key = PageCacheKey(scope: scope, page: page)
+        guard let source = pageSources[key], epochs[scope.owner] == source.epoch else { return nil }
+        return target(for: source.image, owner: scope.owner)
+    }
+
+    func cachedPage(_ page: URL, scope: PageReadScope) -> URL? {
+        guard let cached = cachedPagePath(page, scope: scope), Self.cachedImageExists(at: cached) else { return nil }
+        touch(cached, owner: scope.owner)
+        return cached
+    }
+
     /// Only copies existing bytes. A missing hint/file never starts a request.
-    func copyCachedPage(_ page: URL, owner: String, destination: URL) async throws -> Bool {
-        guard let source = pageSources[PageCacheKey(owner: owner, page: page)], epochs[owner] == source.epoch else { return false }
-        try await manualGate.acquire()
-        defer { Task { await manualGate.release() } }
+    func copyCachedPage(_ page: URL, scope: PageReadScope, destination: URL) throws -> Bool {
         try Task.checkCancellation()
         if Self.isDecodableImage(at: destination) { return true }
-        guard epochs[owner] == source.epoch else { return false }
-        let cached = target(for: source.image, owner: owner)
-        guard Self.isDecodableImage(at: cached) else { return false }
+        guard let cached = cachedPagePath(page, scope: scope), Self.isDecodableImage(at: cached) else { return false }
         try persistManualFile(cached, destination: destination, copying: true)
-        touch(cached, owner: owner)
+        touch(cached, owner: scope.owner)
         return true
     }
 
     /// Copies a valid owner-scoped browse file first; otherwise streams to a
     /// durable destination with no browsing-cache size or storage cap.
-    func saveManual(url: URL, owner: String, destination: URL, allowNetwork: Bool = true) async throws -> URL {
+    func saveManual(url: URL, owner: String, destination: URL, allowNetwork: Bool = true,
+                    request: MediaRequestDemand = MediaRequestDemand(priority: .download)) async throws -> URL {
         let paidPaths = Set(["archiver.php", "fullimg.php", "hathdl.php", "home.php"])
         guard URLPolicy.media(url), !url.path.lowercased().split(separator: "/").contains(where: { paidPaths.contains(String($0)) }) else { throw ViewerError.restricted }
-        if Self.isDecodableImage(at: destination) { return destination }
-        try await manualGate.acquire()
-        defer { Task { await manualGate.release() } }
         try Task.checkCancellation()
-        if Self.isDecodableImage(at: destination) { return destination }
         let cached = target(for: url, owner: owner)
-        if Self.isDecodableImage(at: cached) {
+        func useLocalFile() throws -> Bool {
+            if Self.isDecodableImage(at: destination) { return true }
+            guard Self.isDecodableImage(at: cached) else { return false }
             try persistManualFile(cached, destination: destination, copying: true)
             touch(cached, owner: owner)
-        } else {
-            guard allowNetwork else { throw ViewerError.imageLimit }
-            let temporary = try await FileTransfer(limit: nil, client: transferClient).fetch(url)
-            defer { try? FileManager.default.removeItem(at: temporary) }
-            try Task.checkCancellation()
-            guard Self.isDecodableImage(at: temporary) else { throw ViewerError.unsupported }
+            return true
+        }
+        if try useLocalFile() { return destination }
+        guard allowNetwork else { throw ViewerError.imageLimit }
+        let lease = try await gate.acquire(request: request)
+        defer { Task { await gate.release(priority: lease) } }
+        if try useLocalFile() { return destination }
+        let temporary = try await FileTransfer(limit: nil, client: transferClient).fetch(url, request: request)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try Task.checkCancellation()
+        guard Self.isDecodableImage(at: temporary) else { throw ViewerError.unsupported }
+        if !Self.isDecodableImage(at: destination) {
             try persistManualFile(temporary, destination: destination, copying: false)
         }
         return destination
@@ -511,13 +548,21 @@ actor MediaRepository {
 
     func hasValidManualFile(at url: URL) -> Bool { Self.isDecodableImage(at: url) }
 
+    func copyOfflinePage(_ source: URL, to destination: URL) throws -> Bool {
+        try Task.checkCancellation()
+        if Self.isDecodableImage(at: destination) { return true }
+        guard Self.isDecodableImage(at: source) else { return false }
+        try persistManualFile(source, destination: destination, copying: true)
+        return true
+    }
+
     private static func isDecodableImage(at url: URL) -> Bool {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else { return false }
         return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
     }
     func clear(owner: String) throws {
         epochs[owner] = UUID()
-        pageSources = pageSources.filter { $0.key.owner != owner }
+        pageSources = pageSources.filter { $0.key.scope.owner != owner }
         for (key, flight) in flights.filter({ $0.key.owner == owner }) {
             flights.removeValue(forKey: key); flight.task?.cancel()
             for consumer in flight.consumers.values {

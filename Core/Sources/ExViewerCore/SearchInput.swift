@@ -70,6 +70,13 @@ public enum SearchInputParser {
         var parsedRules: [TagRule] = []
 
         for token in tokens {
+            if token.first == "\"" {
+                let value = try parseValue(token, scope: "关键词", allowTerminator: false)
+                keywords.append(value.text)
+                unscopedKeywordCount += 1
+                quotedKeywordCount += 1
+                continue
+            }
             if token.lowercased().hasPrefix("title:") {
                 let raw = String(token.dropFirst("title:".count))
                 let value = try parseValue(raw, scope: "标题", allowTerminator: false)
@@ -109,13 +116,6 @@ public enum SearchInputParser {
                 continue
             }
             if token.first == "-" || token.first == "~" { throw SearchInputError.invalidTag(token) }
-            if token.first == "\"" {
-                let value = try parseValue(token, scope: "关键词", allowTerminator: false)
-                keywords.append(value.text)
-                unscopedKeywordCount += 1
-                if value.quoted { quotedKeywordCount += 1 }
-                continue
-            }
             guard !token.contains("\"") else { throw SearchInputError.invalidQuotedValue(token) }
             guard !token.isEmpty else { continue }
             keywords.append(token)

@@ -15,6 +15,7 @@ final class LibraryInteractionV9UITests: XCTestCase {
         let library = app.buttons["main.tab.library"]
         XCTAssertTrue(library.waitForExistence(timeout: 12))
         library.tap()
+        app.buttons["library.scope.1"].tap()
         let first = app.buttons["favorites.gallery.1"]
         XCTAssertTrue(first.waitForExistence(timeout: 10))
         first.press(forDuration: 0.8)
@@ -89,9 +90,9 @@ final class LibraryInteractionV9UITests: XCTestCase {
         XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 12))
         capture(app, "build9.reader")
         app.buttons["reader.settings"].tap()
-        XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.waitForExistence(timeout: 5))
         capture(app, "build9.reader-settings")
-        app.navigationBars["阅读设置"].buttons["完成"].tap()
+        app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.buttons["完成"].tap()
         LoadingSettingsUIHelpers.setPrefetch(3, in: app)
         XCTAssertEqual(LoadingSettingsUIHelpers.prefetchCount(in: app), 3)
         capture(app, "build9.account-loading-settings-prefetch")
@@ -101,7 +102,7 @@ final class LibraryInteractionV9UITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 8))
         app.buttons["discover.search-entry"].tap()
-        XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         capture(app, "build9.search-composer")
         let addTag = app.buttons["compose.add-tag"]
         for _ in 0..<5 { if addTag.isHittable { break }; app.swipeUp() }
@@ -148,6 +149,7 @@ final class LibraryInteractionV9UITests: XCTestCase {
 
         first.tap(); second.tap()
         assertSelectedTileCount(2, in: app)
+        app.buttons["favorites.manage"].tap()
         app.buttons["favorites.remove"].tap()
         XCTAssertTrue(app.buttons["移除所选收藏"].waitForExistence(timeout: 5))
         app.buttons["取消"].tap()
@@ -175,6 +177,7 @@ final class LibraryInteractionV9UITests: XCTestCase {
         app.swipeDown()
         app.buttons["favorites.select.1"].tap()
         assertSelectedTileCount(1, in: app)
+        app.buttons["favorites.manage"].tap()
         app.buttons["favorites.remove"].tap()
         XCTAssertTrue(app.buttons["移除所选收藏"].waitForExistence(timeout: 5))
         app.buttons["取消"].tap()

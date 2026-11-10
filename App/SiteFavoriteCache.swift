@@ -19,6 +19,7 @@ enum FavoriteSyncPhase: String, Codable {
 @MainActor final class SiteFavoriteCache: ObservableObject {
     static let refreshInterval: TimeInterval = 600
     static let capacity = 5_000
+    private static let pendingLimit = 64
     struct Entry {
         let state: GalleryFavoriteState
         let form: GalleryFavoriteForm?
@@ -35,6 +36,12 @@ enum FavoriteSyncPhase: String, Codable {
         let phase: FavoriteSyncPhase
         let message: String?
         let canCheck: Bool
+    }
+    struct BatchAddition {
+        let scope: GalleryFavoriteScope
+        let client: GalleryFavoriteClient
+        let title: String
+        let groupName: String
     }
     private struct Value: Codable {
         var known: Bool
@@ -53,6 +60,7 @@ enum FavoriteSyncPhase: String, Codable {
         var title: String
         var phase = FavoriteSyncPhase.queued
         var message: String?
+        var addIfMissing: Bool?
         var action: FavoriteAction { group.map(FavoriteAction.move) ?? .remove }
         var state: GalleryFavoriteState { groupName.map(GalleryFavoriteState.favorited) ?? .notFavorited }
     }
@@ -68,6 +76,7 @@ enum FavoriteSyncPhase: String, Codable {
     private struct File: Codable { var version = 1; var records: [Record] }
     private struct Runtime { let scope: GalleryFavoriteScope; let client: GalleryFavoriteClient }
     @Published private(set) var revision = UUID()
+    @Published private(set) var confirmedRemovals: [String: UUID] = [:]
     private var records: [String: Record] = [:]
     private var forms: [String: (value: GalleryFavoriteForm, date: Date)] = [:]
     private var runtimes: [String: Runtime] = [:]
@@ -102,13 +111,15 @@ enum FavoriteSyncPhase: String, Codable {
         self.owner = owner; self.generation = generation
         forms = [:]; runtimes = [:]; observers = [:]; queue = []; checks = []; lastChecks = [:]; mutationEpochs = [:]; activeKey = nil; storageUnreadable = false
         if !sameOwner { records = [:]; restore() } else { storageUnreadable = wasUnreadable }
+        confirmedRemovals = [:]
         revision = UUID()
     }
     private func valid(_ scope: GalleryFavoriteScope) -> Bool { scope.owner == owner && scope.generation == generation }
     private func ensureInitialScope(_ scope: GalleryFavoriteScope) { if generation == nil { activate(owner: scope.owner, generation: scope.generation) } }
     func entry(_ scope: GalleryFavoriteScope) -> Entry? {
         guard valid(scope), let r = records[scope.reference.id] else { return nil }
-        return .init(state: r.pending?.state ?? r.confirmed.state, form: forms[r.id]?.value, date: r.date, version: r.version,
+        let state = r.pending?.addIfMissing == true ? r.confirmed.state : r.pending?.state ?? r.confirmed.state
+        return .init(state: state, form: forms[r.id]?.value, date: r.date, version: r.version,
                      phase: r.pending?.phase, message: r.pending?.message, pendingGroup: r.pending?.group, pendingNote: r.pending?.note)
     }
     func recent(_ scope: GalleryFavoriteScope, now: Date = Date()) -> Entry? {
@@ -146,7 +157,9 @@ enum FavoriteSyncPhase: String, Codable {
         if let key = observers.removeValue(forKey: id), !observers.values.contains(key), records[key]?.pending == nil { runtimes.removeValue(forKey: key) }
     }
     func refreshActive() {
-        for key in Set(observers.values) {
+        // Unsent edits keep their client after the detail view closes.
+        let queued = runtimes.keys.filter { records[$0]?.pending?.phase == .queued }
+        for key in Set(observers.values).union(queued) where key != activeKey {
             guard let record = records[key] else { continue }
             if record.pending != nil || clock().timeIntervalSince(record.date) >= Self.refreshInterval {
                 schedule(key, checkOnly: record.pending?.phase != .queued, force: record.pending?.phase == .queued)
@@ -171,7 +184,7 @@ enum FavoriteSyncPhase: String, Codable {
                  action: FavoriteAction, note: String, title: String) throws {
         guard valid(scope), client.isCurrent(), form.reference == scope.reference else { throw ViewerError.stale }
         _ = try form.request(action: action, note: note)
-        guard records.values.filter({ $0.pending != nil }).count < 64 || records[scope.reference.id]?.pending != nil else { throw ViewerError.invalidQuery("待同步操作较多，请稍后再试。") }
+        guard records.values.filter({ $0.pending != nil }).count < Self.pendingLimit || records[scope.reference.id]?.pending != nil else { throw ViewerError.invalidQuery("待同步操作较多，请稍后再试。") }
         let group: Int?
         if case let .move(index) = action { group = index } else { group = nil }
         let key = scope.reference.id
@@ -184,6 +197,43 @@ enum FavoriteSyncPhase: String, Codable {
         records = copy; if forms[key] == nil { remember(form, key: key) }; runtimes[key] = .init(scope: scope, client: client)
         mutationEpochs[key] = UUID()
         revision = UUID(); schedule(key, checkOnly: false)
+    }
+
+    /// Store the whole selection before scheduling any requests. The worker
+    /// reads each current form and only submits for a gallery without a group.
+    func enqueueAdditions(_ additions: [BatchAddition], group: Int) throws -> Int {
+        guard (0...9).contains(group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组。") }
+        var seen = Set<String>()
+        let eligible = try additions.filter { addition in
+            guard valid(addition.scope), addition.client.isCurrent() else { throw ViewerError.stale }
+            _ = try GalleryFavoriteForm.endpoint(for: addition.scope.reference)
+            let key = addition.scope.reference.id
+            return seen.insert(key).inserted && records[key]?.pending == nil
+        }
+        guard !eligible.isEmpty else { return 0 }
+        let available = max(0, Self.pendingLimit - records.values.filter { $0.pending != nil }.count)
+        guard eligible.count <= available else {
+            throw ViewerError.invalidQuery(available > 0 ? "本次可排队 \(available) 项，请减少选择或等候同步。" : "收藏同步队列已满，请稍后再试。")
+        }
+        var copy = records
+        for addition in eligible {
+            let ref = addition.scope.reference
+            var record = copy[ref.id] ?? .init(site: ref.site, gid: ref.gid, confirmed: Value(.unknown), date: clock())
+            record.pending = Intent(group: group, groupName: addition.groupName, title: String(addition.title.prefix(300)), addIfMissing: true)
+            record.version = UUID()
+            copy[ref.id] = record
+        }
+        trim(&copy)
+        try persist(copy)
+        records = copy
+        for addition in eligible {
+            let key = addition.scope.reference.id
+            runtimes[key] = .init(scope: addition.scope, client: addition.client)
+            mutationEpochs[key] = UUID()
+            schedule(key, checkOnly: false)
+        }
+        revision = UUID()
+        return eligible.count
     }
     func invalidate(_ refs: [GalleryRef], scopeOwner: String, generation: UUID) {
         guard owner == scopeOwner, self.generation == generation else { return }
@@ -232,46 +282,63 @@ enum FavoriteSyncPhase: String, Codable {
         func current() -> Bool { self.workerID == workerID && valid(runtime.scope) && runtime.client.isCurrent() && !Task.isCancelled }
         do {
             var form: GalleryFavoriteForm
-            if !checkOnly, formIsFresh(runtime.scope, now: clock()), let memo = forms[key]?.value { form = memo }
+            if !checkOnly, target?.addIfMissing != true, formIsFresh(runtime.scope, now: clock()), let memo = forms[key]?.value { form = memo }
             else { lastChecks[key] = clock(); form = try await runtime.client.read() }
             guard current() else { return }
+            guard form.reference == runtime.scope.reference else { throw ViewerError.restricted }
             if let target, !checkOnly {
                 guard records[key]?.pending?.id == target.id else { schedule(key, checkOnly: false); return }
                 let note = target.note ?? form.note
-                if !form.confirms(target.action, note: note) {
+                if !satisfies(target, form: form) {
                     let request = try form.request(action: target.action, note: note)
                     records[key]?.pending?.phase = .sending
                     try persist(records); revision = UUID()
                     await runtime.client.willSubmit()
                     guard current() else { return }
+                    guard records[key]?.pending?.id == target.id else { schedule(key, checkOnly: false); return }
                     var postError: Error?
                     do { try await runtime.client.submit(request) } catch { postError = error }
                     guard current() else { return }
                     if records[key]?.pending?.id == target.id { records[key]?.pending?.phase = .checking; changed() }
                     lastChecks[key] = clock()
-                    do { form = try await runtime.client.read() }
+                    do {
+                        form = try await runtime.client.read()
+                        guard form.reference == runtime.scope.reference else { throw ViewerError.restricted }
+                    }
                     catch {
                         guard current() else { return }
                         if records[key]?.pending?.id == target.id {
                             records[key]?.pending?.phase = (postError as? ViewerError) == .authentication || (error as? ViewerError) == .authentication ? .login : .uncertain
                             records[key]?.pending?.message = "暂时无法确认是否已生效，请检查结果。"
                         }
-                        forms.removeValue(forKey: key); changed(); runtime.client.didSubmit(); return
+                        forms.removeValue(forKey: key); changed()
+                        if target.action != .remove { runtime.client.didSubmit() }
+                        return
                     }
-                    runtime.client.didSubmit()
+                    if target.action != .remove { runtime.client.didSubmit() }
                 }
             }
             guard current() else { return }
             remember(form, key: key)
             if var record = records[key] {
+                var removal: UUID?
                 record.confirmed = Value(form.state); record.date = clock(); record.version = UUID()
                 if let target, record.pending?.id == targetID {
-                    if form.confirms(target.action, note: target.note ?? form.note) { record.pending = nil }
+                    if satisfies(target, form: form) {
+                        if target.action == .remove { removal = target.id }
+                        record.pending = nil
+                    }
                     else { record.pending?.phase = .failed; record.pending?.message = "未能同步，已保留本次更改。" }
                 }
                 records[key] = record
                 if target != nil { mutationEpochs[key] = UUID() }
                 changed()
+                if let removal {
+                    var confirmed = confirmedRemovals
+                    confirmed[key] = removal
+                    if confirmed.count > limit { confirmed = confirmed.filter { records[$0.key] != nil } }
+                    confirmedRemovals = confirmed
+                }
                 if record.pending != nil && record.pending?.id != targetID { schedule(key, checkOnly: false) }
             }
         } catch {
@@ -285,6 +352,10 @@ enum FavoriteSyncPhase: String, Codable {
                 changed()
             }
         }
+    }
+    private func satisfies(_ intent: Intent, form: GalleryFavoriteForm) -> Bool {
+        if intent.addIfMissing == true { return form.selectedGroup != nil }
+        return form.confirms(intent.action, note: intent.note ?? form.note)
     }
     private func remember(_ form: GalleryFavoriteForm, key: String) {
         forms[key] = (form, clock())

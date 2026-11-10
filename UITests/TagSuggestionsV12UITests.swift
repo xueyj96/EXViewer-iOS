@@ -7,35 +7,18 @@ final class TagSuggestionsV12UITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 12))
         app.buttons["discover.search-entry"].tap()
-        XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
+        app.buttons["compose.filters"].tap()
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         let add = app.buttons["compose.add-tag"]
         for _ in 0..<5 { if add.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(add.isHittable)
         add.tap()
-        XCTAssertTrue(app.navigationBars["添加标签"].waitForExistence(timeout: 5))
-        selectNamespace(app, "parody")
+        XCTAssertTrue(app.staticTexts["添加标签"].waitForExistence(timeout: 5))
+        app.selectTagNamespace("parody")
         return app
     }
 
-    private func selectNamespace(_ app: XCUIApplication, _ namespace: String) {
-        let target = app.buttons["tag.namespace.\(namespace)"]
-        XCTAssertTrue(target.waitForExistence(timeout: 5))
-        let chips = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tag.namespace."))
-        for leftward in [true, false] {
-            for _ in 0..<6 {
-                if target.isHittable { target.tap(); return }
-                guard let chip = chips.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) else {
-                    app.swipeDown(); continue
-                }
-                let y = (chip.frame.midY - app.frame.minY) / app.frame.height
-                let start = app.coordinate(withNormalizedOffset: CGVector(dx: leftward ? 0.82 : 0.18, dy: y))
-                let end = app.coordinate(withNormalizedOffset: CGVector(dx: leftward ? 0.18 : 0.82, dy: y))
-                start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
-            }
-        }
-        XCTAssertTrue(target.isHittable, "Namespace must be visible after actual scrolling")
-        target.tap()
-    }
 
     private func typePrefix(_ app: XCUIApplication) {
         let input = app.textFields["tag.name"]
@@ -57,24 +40,28 @@ final class TagSuggestionsV12UITests: XCTestCase {
         XCTAssertTrue((candidate.value as? String ?? "").contains("词库匹配，站点未验证"))
         candidate.tap()
         XCTAssertTrue((candidate.value as? String ?? "").contains("已加入待添加"))
-        XCTAssertTrue(app.navigationBars["添加标签"].exists)
+        XCTAssertTrue(app.staticTexts["添加标签"].exists)
     }
 
     func testSamePrefixCanSelectTwoCandidatesThenCompleteToComposerDraft() {
         let app = openComposer()
         typePrefix(app)
         tapCandidate(app, id: "parody:pretty cure")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "tag-suggestion-cards-light"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
 
-        let mode = app.segmentedControls["tag.match"]
+        let mode = app.buttons["tag.match.1"]
         for _ in 0..<8 { if mode.exists && mode.isHittable { break }; app.swipeDown() }
         XCTAssertTrue(mode.isHittable)
         XCTAssertEqual(app.textFields["tag.name"].value as? String, "pre", "Candidate selection must retain the original prefix")
-        mode.buttons["任一"].tap()
+        mode.tap()
         tapCandidate(app, id: "parody:pretty rhythm")
-        XCTAssertEqual(app.buttons["tag.confirm"].label, "完成，2 个标签")
+        XCTAssertEqual(app.buttons["tag.confirm"].label, "完成")
 
         app.buttons["tag.confirm"].tap()
-        XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["parody:pretty cure"].exists)
         XCTAssertTrue(app.staticTexts["parody:pretty rhythm"].exists)
         XCTAssertTrue(app.staticTexts["包含"].exists)
@@ -89,9 +76,10 @@ final class TagSuggestionsV12UITests: XCTestCase {
         tapCandidate(app, id: "parody:pretty rhythm")
         app.buttons["tag.cancel"].tap()
 
-        XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["parody:pretty cure"].exists)
         XCTAssertFalse(app.staticTexts["parody:pretty rhythm"].exists)
+        app.buttons["BackButton"].tap()
         app.buttons["compose.cancel"].tap()
     }
 
@@ -102,9 +90,9 @@ final class TagSuggestionsV12UITests: XCTestCase {
         input.typeText("eTtY cU\n")
         tapCandidate(app, id: "parody:pretty cure")
         XCTAssertEqual(input.value as? String, "eTtY cU")
-        XCTAssertEqual(app.buttons["tag.confirm"].label, "完成，1 个标签")
+        XCTAssertEqual(app.buttons["tag.confirm"].label, "完成")
         app.buttons["tag.confirm"].tap()
-        XCTAssertTrue(app.navigationBars["组合搜索"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["parody:pretty cure"].exists)
     }
 }

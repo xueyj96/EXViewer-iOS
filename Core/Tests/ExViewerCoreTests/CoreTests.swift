@@ -161,6 +161,19 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(merged[1].tagsComplete); XCTAssertEqual(merged[1].title, "Keep"); XCTAssertEqual(merged[1].ref, b.ref)
         XCTAssertThrowsError(try GalleryMetadata.request(Array(repeating: a, count: 26)))
     }
+    func testMetadataVersionChecksTheExactGalleryAndIgnoresInvalidVersionFields() throws {
+        let old = GalleryRef(site: .ex, gid: 10, token: "old")
+        let good = #"{"gmetadata":[{"gid":10,"token":"old","current_gid":11,"current_key":"new","parent_gid":"9","parent_key":"parent","first_gid":"8","first_key":"first"}]}"#
+        let metadata = try GalleryMetadata(Data(good.utf8))
+        XCTAssertEqual(metadata.currentVersion(of: old), GalleryRef(site: .ex, gid: 11, token: "new"))
+        XCTAssertEqual(metadata.versionLinks(of: old)?.earlier, [.init(site: .ex, gid: 9, token: "parent"), .init(site: .ex, gid: 8, token: "first")])
+        XCTAssertNil(metadata.currentVersion(of: .init(site: .ex, gid: 10, token: "other")))
+
+        let bad = #"{"gmetadata":[{"gid":10,"title":"Existing title","token":"old","current_gid":"11","current_key":15}]}"#
+        let invalid = try GalleryMetadata(Data(bad.utf8))
+        XCTAssertNil(invalid.currentVersion(of: old))
+        XCTAssertEqual(invalid.merging(into: [Gallery(ref: old, title: "Fallback")]).first?.title, "Existing title")
+    }
     func testReaderNeverMixesAnotherGalleryPages() throws {
         let ref = GalleryRef(site: .ex, gid: 42, token: "abc123")
         let html = "<h1 id='gn'>Neutral test</h1><div id='gdt'><a href='/s/abc/99-1'>Wrong gallery</a><a href='/s/abc/42-2'>Correct gallery</a></div>"

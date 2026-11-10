@@ -12,6 +12,7 @@ final class LibraryV12UITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 15))
         app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap()
         let workload = app.descendants(matching: .any)["library.qa.workload"].firstMatch
         XCTAssertTrue(workload.waitForExistence(timeout: 15))
         XCTAssertEqual(workload.value as? String, "galleries=600;blocked=250")

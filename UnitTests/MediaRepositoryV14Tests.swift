@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import ImageIO
+import ExViewerCore
 @testable import ExViewer
 
 final class MediaRepositoryV14Tests: XCTestCase {
@@ -16,7 +17,7 @@ final class MediaRepositoryV14Tests: XCTestCase {
         private var stopped = false
         private var delivered = false
 
-        private static let png = Data(base64Encoded:
+        static let png = Data(base64Encoded:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
 
         override class func canInit(with request: URLRequest) -> Bool {
@@ -52,7 +53,7 @@ final class MediaRepositoryV14Tests: XCTestCase {
             Self.lock.unlock()
         }
 
-        private func deliver() {
+        private func deliver(_ bytes: Data? = nil) {
             instanceLock.lock()
             guard !delivered, !stopped,
                   let clientSnapshot, let url = request.url else {
@@ -65,7 +66,7 @@ final class MediaRepositoryV14Tests: XCTestCase {
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                                            headerFields: ["Content-Type": "image/png"])!
             clientSnapshot.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            clientSnapshot.urlProtocol(self, didLoad: Self.png)
+            clientSnapshot.urlProtocol(self, didLoad: bytes ?? Self.png)
             clientSnapshot.urlProtocolDidFinishLoading(self)
         }
 
@@ -95,13 +96,13 @@ final class MediaRepositoryV14Tests: XCTestCase {
             }.count
         }
 
-        static func releaseOne(for url: URL) {
+        static func releaseOne(for url: URL, bytes: Data? = nil) {
             lock.lock()
             let candidate = instances.sorted(by: { $0.key < $1.key }).first {
                 $0.value.request.url == url && $0.value.isPending()
             }
             lock.unlock()
-            candidate?.value.deliver()
+            candidate?.value.deliver(bytes)
         }
 
         static func releaseAll() {
@@ -136,6 +137,42 @@ final class MediaRepositoryV14Tests: XCTestCase {
             return
         }
         XCTAssertGreaterThan(CGImageSourceGetCount(source), 0, file: file, line: line)
+    }
+
+    func testTruncatedBrowseImageIsRejectedAndRetryCanReplaceAnOlderBadCacheEntry() async throws {
+        ControlledURLProtocol.reset()
+        let (repository, root) = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: root); ControlledURLProtocol.releaseAll() }
+        let url = fixtureURL("truncated")
+        let owner = "owner-a"
+        let truncated = Data(ControlledURLProtocol.png.prefix(10))
+        let first = Task { try await repository.file(for: url, owner: owner) }
+        defer { first.cancel() }
+        let started = await waitUntil { ControlledURLProtocol.startedCount(for: url) == 1 }
+        XCTAssertTrue(started)
+        ControlledURLProtocol.releaseOne(for: url, bytes: truncated)
+        do {
+            _ = try await first.value
+            XCTFail("A recognized but truncated header must not enter the browse cache")
+        } catch { XCTAssertEqual(error as? ViewerError, .unsupported) }
+
+        let retry = Task { try await repository.file(for: url, owner: owner) }
+        defer { retry.cancel() }
+        let restarted = await waitUntil { ControlledURLProtocol.startedCount(for: url) == 2 }
+        XCTAssertTrue(restarted)
+        ControlledURLProtocol.releaseOne(for: url)
+        let cache = try await retry.value
+        XCTAssertNotNil(StaticCoverImageCache.decodeThumbnail(file: cache, maxPixelSize: 64))
+        try truncated.write(to: cache)
+        await repository.discardUndecodableBrowseFile(cache, owner: "other-owner")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cache.path))
+        let context = UUID()
+        repository.setPinnedFiles([cache], owner: owner, context: context)
+        await repository.discardUndecodableBrowseFile(cache, owner: owner)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cache.path))
+        repository.releasePinnedFiles(context: context)
+        await repository.discardUndecodableBrowseFile(cache, owner: owner)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cache.path))
     }
 
     func testSameOwnerURLSharesTransferAndOneCancellationLeavesOtherConsumer() async throws {

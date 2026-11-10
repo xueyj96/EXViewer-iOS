@@ -10,7 +10,7 @@ final class ReaderV10UITests: XCTestCase {
         let read = app.buttons["在线阅读"]
         XCTAssertTrue(read.waitForExistence(timeout: 8)); read.tap()
         XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 12))
-        app.buttons["reader.mode"].tap(); app.buttons["单页模式"].tap()
+        ReaderSettingsUIHelpers.setMode("单页模式", in: app)
         return app
     }
     private func page(_ value: String, in app: XCUIApplication) {
@@ -32,19 +32,19 @@ final class ReaderV10UITests: XCTestCase {
         let app = launchReader()
         cache("files=1,2,3;", in: app)
         let directions: [(String, CGVector, CGVector)] = [
-            ("从左到右 →", .init(dx: 0.70, dy: 0.5), .init(dx: 0.30, dy: 0.5)),
-            ("从右到左 ←", .init(dx: 0.30, dy: 0.5), .init(dx: 0.70, dy: 0.5)),
-            ("从上到下 ↓", .init(dx: 0.50, dy: 0.70), .init(dx: 0.50, dy: 0.30)),
-            ("从下到上 ↑", .init(dx: 0.50, dy: 0.30), .init(dx: 0.50, dy: 0.70))]
+            ("leftToRight", .init(dx: 0.70, dy: 0.5), .init(dx: 0.30, dy: 0.5)),
+            ("rightToLeft", .init(dx: 0.30, dy: 0.5), .init(dx: 0.70, dy: 0.5)),
+            ("topToBottom", .init(dx: 0.50, dy: 0.70), .init(dx: 0.50, dy: 0.30)),
+            ("bottomToTop", .init(dx: 0.50, dy: 0.30), .init(dx: 0.50, dy: 0.70))]
         for (title, start, end) in directions {
-            app.buttons["reader.direction"].tap(); app.buttons[title].tap()
+            ReaderSettingsUIHelpers.setDirection(title, in: app)
             drag(app, from: start, to: end, hold: 1.4)
             page("2 / 12", in: app)
             let canvas = app.descendants(matching: .any)["reader.single.canvas"].firstMatch
             let evidence = canvas.value as? String ?? ""
             XCTAssertTrue(evidence.contains("lastDrag=1+2;offset="), evidence)
             XCTAssertTrue(evidence.contains("neighborFile=true"), evidence)
-            XCTAssertFalse(app.navigationBars["阅读设置"].exists)
+            XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
             let shot = XCTAttachment(screenshot: app.screenshot())
             shot.name = "build10.drag.\(title)"; shot.lifetime = .keepAlways; add(shot)
             drag(app, from: end, to: start)
@@ -59,7 +59,7 @@ final class ReaderV10UITests: XCTestCase {
         cache("prefetch=0;files=1,2;", in: app)
         drag(app, from: .init(dx: 0.5, dy: 0.5), to: .init(dx: 0.55, dy: 0.5))
         page("1 / 12", in: app)
-        XCTAssertFalse(app.navigationBars["阅读设置"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
         drag(app, from: .init(dx: 0.7, dy: 0.5), to: .init(dx: 0.3, dy: 0.5))
         page("2 / 12", in: app)
         cache("prefetch=0;files=1,2;", in: app)

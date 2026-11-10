@@ -22,11 +22,8 @@ enum ReaderDirection: String, CaseIterable, Identifiable {
     var horizontal: Bool { self == .leftToRight || self == .rightToLeft }
     var reverseOrder: Bool { self == .rightToLeft || self == .bottomToTop }
     var axis: Axis.Set { horizontal ? .horizontal : .vertical }
-    var arrow: String { switch self { case .leftToRight: "→"; case .rightToLeft: "←"; case .topToBottom: "↓"; case .bottomToTop: "↑" } }
     var title: String { switch self { case .leftToRight: "从左到右"; case .rightToLeft: "从右到左"; case .topToBottom: "从上到下"; case .bottomToTop: "从下到上" } }
-    var menuTitle: String { "\(title) \(arrow)" }
     var forwardSymbol: String { switch self { case .leftToRight: "arrow.right"; case .rightToLeft: "arrow.left"; case .topToBottom: "arrow.down"; case .bottomToTop: "arrow.up" } }
-    var backwardSymbol: String { switch self { case .leftToRight: "arrow.left"; case .rightToLeft: "arrow.right"; case .topToBottom: "arrow.up"; case .bottomToTop: "arrow.down" } }
 }
 
 enum ReaderPageSizing {
@@ -50,110 +47,22 @@ private struct ReaderPageFrames: PreferenceKey {
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) { value.merge(nextValue(), uniquingKeysWith: { _, new in new }) }
 }
 
-@MainActor final class ReaderModel: ObservableObject {
-    @Published private(set) var pages: [GalleryPage] = []
-    @Published private(set) var total: Int?
-    @Published private(set) var next: URL?
-    @Published private(set) var loading = false
-    @Published private(set) var error: String?
-    private var seen = Set<URL>()
-    private var context = UUID()
-    private var generation: UUID?
-    private var owner: String?
-    private var metadataDemand: MediaRequestDemand?
-    private(set) var qaMetadataCalls = 0
-    func cancel() { context = UUID(); generation = nil; owner = nil; loading = false; metadataDemand = nil }
-    func promotePendingMetadata() { metadataDemand?.setPriority(.foreground) }
-    var hasForegroundMetadataDemand: Bool { metadataDemand?.priority == .foreground }
-    func load(gallery: Gallery, offline: Bool, session: SiteSession, library: LibraryStore) async {
-        cancel(); generation = session.generation; owner = library.owner
-        pages = []; seen = []; total = gallery.pages; error = nil
-        if AppMode.qa {
-            let fixtures: [GalleryPage]
-            if ProcessInfo.processInfo.arguments.contains("--qa-reader-large-window") {
-                fixtures = (1...40).map { GalleryPage(index: $0, url: QASamples.image(index: $0)) }
-            } else {
-                fixtures = QASamples.pages
-            }
-            total = fixtures.count
-            if ProcessInfo.processInfo.arguments.contains("--qa-reader-paging") {
-                pages = Array(fixtures.prefix(2)); next = URL(string: "https://exhentai.org/g/1/preview/?p=1")
-            } else { pages = fixtures; next = nil }
-            return
-        }
-        if offline {
-            guard TagFilter.decision(tags: gallery.tags, blocked: library.blockedIDs, complete: gallery.tagsComplete) == .visible else { error = "此画廊已被标签设置屏蔽，或标签尚未核实。"; return }
-            if let record = library.snapshot.downloads.first(where: { $0.id == gallery.id }) {
-                let directory = library.offlineDirectory(gallery)
-                pages = record.completed.sorted { $0.key < $1.key }.compactMap { index, file in
-                    guard !file.contains("/"), file == "page-\(index).media" else { return nil }
-                    let url = directory.appendingPathComponent(file)
-                    return FileManager.default.fileExists(atPath: url.path) ? GalleryPage(index: index, url: url) : nil
-                }
-                total = record.total
-            }
-            if pages.isEmpty { error = "本机没有可读取的离线副本。" }
-            return
-        }
-        await fetch(url: gallery.ref.url, gallery: gallery, session: session, library: library)
-    }
-    func more(gallery: Gallery, session: SiteSession, library: LibraryStore,
-              priority: MediaRequestPriority = .foreground, beforeAppending: (() -> Void)? = nil) async {
-        guard !loading else { return }
-        if AppMode.qa, next != nil {
-            qaMetadataCalls += 1
-            let expected = context
-            loading = true
-            defer { if expected == context { loading = false } }
-            if ProcessInfo.processInfo.arguments.contains("--qa-reader-metadata-stall") {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                return
-            }
-            if ProcessInfo.processInfo.arguments.contains("--qa-reader-delay") { try? await Task.sleep(nanoseconds: 3_000_000_000) }
-            if let value = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-metadata-ms=") })?.split(separator: "=").last.flatMap({ UInt64($0) }) {
-                try? await Task.sleep(nanoseconds: min(value, 15_000) * 1_000_000)
-            }
-            guard !Task.isCancelled, expected == context, generation == session.generation, owner == library.owner else { return }
-            beforeAppending?()
-            pages = QASamples.pages; next = nil; return
-        }
-        if let next { await fetch(url: next, gallery: gallery, session: session, library: library, priority: priority, beforeAppending: beforeAppending) }
-    }
-    private func fetch(url: URL, gallery: Gallery, session: SiteSession, library: LibraryStore,
-                       priority: MediaRequestPriority = .foreground, beforeAppending: (() -> Void)? = nil) async {
-        guard generation == session.generation, owner == library.owner, !seen.contains(url), seen.count < 100 else { return }
-        let current = context, revision = session.generation
-        let demand = MediaRequestDemand(priority: priority)
-        metadataDemand = demand
-        let favoriteScope = GalleryFavoriteScope(gallery, session)
-        let favoriteVersion = session.favoriteStateCache.entry(favoriteScope)?.version
-        loading = true
-        defer { if current == context { loading = false; if metadataDemand === demand { metadataDemand = nil } } }
-        do {
-            let detail = try EHParser.detail(await session.html(url, request: demand), reference: gallery.ref, pageURL: url)
-            guard current == context, revision == session.generation, owner == library.owner else { return }
-            if detail.favoriteStateKnown { session.favoriteStateCache.put(detail.favoriteState, scope: favoriteScope, expectedVersion: favoriteVersion, conditional: true) }
-            guard TagFilter.decision(tags: detail.gallery.tags, blocked: library.blockedIDs, complete: true) == .visible else { throw ViewerError.invalidQuery("此画廊命中本机屏蔽标签，可到账号的「标签与屏蔽」调整。") }
-            beforeAppending?()
-            seen.insert(url); var indexes = Set(pages.map(\.index)); pages += detail.pages.filter { indexes.insert($0.index).inserted }
-            pages.sort { $0.index < $1.index }; next = detail.next; total = detail.gallery.pages; error = nil
-        } catch is CancellationError { }
-        catch { guard current == context, revision == session.generation, owner == library.owner else { return }; self.error = ErrorMessages.message(error, fallback: ViewerError.network.localizedDescription) }
-    }
-}
-
 struct ReaderView: View {
+    private static var usesAutomaticImmersion: Bool {
+        !AppMode.qa || ProcessInfo.processInfo.arguments.contains("--qa-automatic-immersion")
+    }
     var gallery: Gallery
     var offline = false
-    var currentSearch: ExecutedGallerySearch? = nil
-    var onSearchQuery: ((SearchQuery, GallerySite) -> Void)? = nil
+    var searchTarget: DetailSearchTarget? = nil
+    var openingDetail: ReaderOpeningDetail? = nil
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = ReaderModel()
-    @StateObject private var media = ReaderMediaStore()
+    @StateObject private var media = ReaderMediaStore(backgroundWork: AppMode.qa ? nil : BackgroundWork())
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var current = 1
     @State private var scrollPosition: Int? = 1
     @AppStorage("reader.mode", store: ReaderPreferenceDefaults.store) private var mode = 0
@@ -177,8 +86,9 @@ struct ReaderView: View {
     @State private var pageZoomed = false
     @State private var settings = false
     @State private var detailsShowing = false
-    @State private var immersive = false
-    @State private var pendingSearchQuery: (query: SearchQuery, site: GallerySite)?
+    @State private var immersive = Self.usesAutomaticImmersion
+    @State private var readerTouched = false
+    @State private var controlsIdleRevision = UUID()
     @State private var jump = false
     @State private var jumpText = ""
     @State private var findingPage = false
@@ -197,14 +107,11 @@ struct ReaderView: View {
     @StateObject private var favoriteObservation = GalleryFavoriteObservation()
     @State private var favoriteEditing = false
     @State private var favoriteAfterSettings = false
-    @State private var singleDragActive = false
-    @State private var singleDragFinishing = false
-    @State private var singleDragOffset: CGFloat = 0
-    @State private var singleDragPreview: Int?
+    @State private var singleTurn = ReaderSinglePageTurn()
+    @State private var decodeFailures: [Int: URL] = [:]
+    @State private var decodeRetryIDs: [Int: UUID] = [:]
     @State private var presentations: [Int: ImageCanvasPresentation] = [:]
     @State private var decodedFiles: [Int: URL] = [:]
-    @State private var singleDragExtent: CGFloat = 0
-    @State private var singleDragRevision = UUID()
     @State private var singleMetadataTask: Task<Void, Never>?
     @State private var singleMetadataRevision = UUID()
     @State private var singleMetadataAttemptedTarget: Int?
@@ -223,6 +130,14 @@ struct ReaderView: View {
         var owner: String
     }
     @State private var readingContext: ReadingContext?
+    private var readerGesturesActive: Bool {
+        readingContext != nil && scenePhase == .active && !settings && !detailsShowing && !favoriteEditing && !jump
+    }
+    private var controlsIdleID: UUID? {
+        guard Self.usesAutomaticImmersion, !immersive, !voiceOverEnabled, readerGesturesActive,
+              !readerTouched, !progressHUD, !findingPage, !userScrolling, !draggingCanvas, !singleTurn.isDraggingOrSettling else { return nil }
+        return controlsIdleRevision
+    }
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
@@ -233,6 +148,9 @@ struct ReaderView: View {
                     ZStack {
                         if mode == ReaderMode.continuous.rawValue {
                             continuousPages
+                            if model.pages.isEmpty && immersive {
+                                Color.clear.contentShape(Rectangle()).onTapGesture { immersive = false }
+                            }
                         } else {
                             singlePage.simultaneousGesture(singleDragGesture(size: geometry.size), including: pageZoomed ? .subviews : .all)
                         }
@@ -250,8 +168,10 @@ struct ReaderView: View {
                 .toolbar(.hidden, for: .navigationBar)
                 .preferredColorScheme(.dark)
                 .task {
+                    media.setForeground(scenePhase != .background)
                     let context = ReadingContext(generation: session.generation, owner: library.owner)
                     readingContext = context
+                    library.pinOfflineReader(gallery.ref, context: context.id)
                     let expectedSession = session, expectedLibrary = library, expectedGallery = gallery
                     historyCheckpoint = ReaderHistoryCheckpoint(isCurrent: { [weak expectedSession, weak expectedLibrary] in
                         expectedSession?.generation == context.generation && expectedLibrary?.owner == context.owner
@@ -264,17 +184,23 @@ struct ReaderView: View {
                         if let value = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-prefetch=") })?.split(separator: "=").last.flatMap({ Int($0) }), (0...ReaderLoadPolicy.maxPrefetchCount).contains(value) { prefetchCount = value }
                         if let value = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-concurrency=") })?.split(separator: "=").last.flatMap({ Int($0) }), (2...ReaderLoadPolicy.maxConcurrency).contains(value) { downloadConcurrency = value }
                     }
-                    await model.load(gallery: gallery, offline: offline, session: session, library: library)
+                    await model.load(gallery: gallery, offline: offline, session: session, library: library, openingDetail: openingDetail)
                     guard !Task.isCancelled, isCurrent(context) else { return }
                     let desired = library.snapshot.history.first(where: { $0.id == gallery.id })?.page ?? 1
                     await seek(desired)
                 }
-                .onDisappear { historyCheckpoint?.flush(); historyCheckpoint = nil; if let context = readingContext { MediaRepository.shared.releasePinnedFiles(context: context.id) }; singleDragRevision = UUID(); singleMetadataRevision = UUID(); singleMetadataTask?.cancel(); singleMetadataTask = nil; automaticMetadataTask?.cancel(); automaticMetadataTask = nil; scrollEndTask?.cancel(); scrollEndTask = nil; slideTask?.cancel(); seekRevision = UUID(); media.reset(); presentations = [:]; decodedFiles = [:]; userScrolling = false; draggingCanvas = false; pageZoomed = false; progressHUD = false; readingContext = nil; model.cancel() }
-                .onChange(of: scenePhase) { _, phase in if phase != .active { historyCheckpoint?.flush() } }
+                .onDisappear(perform: closeReading)
+                .onChange(of: scenePhase) { _, phase in
+                    if phase != .active { historyCheckpoint?.flush() }
+                    if phase == .background { media.setForeground(false) }
+                    if phase == .active { media.setForeground(true); updateMedia() }
+                }
                 .onChange(of: current) { _, value in
                     progressTarget = Double(value); pageZoomed = false
                     pageSizes = pageSizes.filter { abs($0.key - value) <= 2 }
                     presentations = presentations.filter { abs($0.key - value) <= 1 }
+                    decodeFailures = decodeFailures.filter { abs($0.key - value) <= 1 }
+                    decodeRetryIDs = decodeRetryIDs.filter { abs($0.key - value) <= 1 }
                     decodedFiles = decodedFiles.filter { abs($0.key - value) <= 1 }
                     updateMedia()
                 }
@@ -282,10 +208,11 @@ struct ReaderView: View {
                 .onChange(of: model.loading) { _, loading in if !loading { updateMedia() } }
                 .onChange(of: media.files) { _, files in
                     presentations = presentations.filter { files[$0.key] == $0.value.file && abs($0.key - current) <= 1 }
+                    decodeFailures = decodeFailures.filter { files[$0.key] == $0.value }
                     if ReaderNetworkMetrics.enabled { decodedFiles = decodedFiles.filter { files[$0.key] == $0.value && abs($0.key - current) <= 1 } }
                     if let context = readingContext, isCurrent(context) { updatePinnedFiles(context) }
-                    if AppMode.qa, singleDragActive, let preview = singleDragPreview {
-                        lastDragEvidence = "\(current)+\(preview);offset=\(Int(abs(singleDragOffset)));neighborFile=\(files[preview] != nil)"
+                    if AppMode.qa, singleTurn.isDraggingOrSettling, let preview = singleTurn.dragPreview {
+                        lastDragEvidence = "\(current)+\(preview);offset=\(Int(abs(singleTurn.dragOffset)));neighborFile=\(files[preview] != nil)"
                     }
                 }
                 .onChange(of: prefetchCount) { _, value in
@@ -319,6 +246,13 @@ struct ReaderView: View {
                     progressHUD = false; pageZoomed = false; cancelPageAnimation()
                     let page = current; Task { await seek(page) }
                 }
+                .onChange(of: readerGesturesActive) { _, active in
+                    if active { finishPendingTurnIfReady() }
+                    else {
+                        readerTouched = false
+                        controlsIdleRevision = UUID()
+                    }
+                }
                 .onChange(of: settings) { _, shown in if shown { progressHUD = false; stopTrackingScroll(); cancelSingleDrag() } }
                 .onChange(of: detailsShowing) { _, shown in if shown { progressHUD = false; stopTrackingScroll(); cancelSingleDrag() } }
                 .onChange(of: singleFingerDown) { _, down in
@@ -326,7 +260,8 @@ struct ReaderView: View {
                         let intent = seekRevision
                         Task {
                             await Task.yield()
-                            if seekRevision == intent && !singleFingerDown && singleDragActive && !singleDragFinishing { finishSingleDrag(commit: false) }
+                            guard seekRevision == intent, !singleFingerDown else { return }
+                            finishSingleDrag(commit: false)
                         }
                     }
                 }
@@ -335,28 +270,42 @@ struct ReaderView: View {
                 .sheet(isPresented: $settings, onDismiss: {
                     if favoriteAfterSettings { favoriteAfterSettings = false; favoriteEditing = true }
                 }) { readerSettings }
-                .sheet(isPresented: $detailsShowing, onDismiss: {
-                    if let pending = pendingSearchQuery {
-                        pendingSearchQuery = nil
-                        onSearchQuery?(pending.query, pending.site)
-                    }
-                }) {
+                .sheet(isPresented: $detailsShowing) {
                     NavigationStack {
-                        GalleryDetailView(gallery: gallery, onResumeReading: { detailsShowing = false },
-                                          allowsTagSearch: onSearchQuery != nil, currentSearch: currentSearch) { query, site in
-                            pendingSearchQuery = (query, site); detailsShowing = false
-                        }
+                        GalleryDetailView(gallery: gallery, onResumeReading: { detailsShowing = false }, searchTarget: searchTarget)
                     }
+                    .galleryDetailPresentations()
                     .statusBarHidden(false)
                     .accessibilityIdentifier("reader.details")
                 }
                 if !immersive { readerHeader }
             }
-            .overlay(alignment: .bottom) { if !immersive { readerControls } }
+            .overlay(alignment: .bottom) {
+                VStack(spacing: FeedChrome.panelSpacing) {
+                    if let target = singleTurn.pendingPage { pendingTurnStatus(target) }
+                    if !immersive { readerControls }
+                }
+            }
         }
         .statusBarHidden(immersive && !settings && !detailsShowing)
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
-        .preference(key: MainTabsHiddenPreference.self, value: offline)
+        .background {
+            ReaderGestureBridge(tracksActivity: Self.usesAutomaticImmersion && readerGesturesActive,
+                                allowsBack: readerGesturesActive && !pageZoomed && !progressHUD,
+                                onActivity: { active in
+                                    guard readerGesturesActive else { return }
+                                    readerTouched = active
+                                    if !active { controlsIdleRevision = UUID() }
+                                }, onBack: { dismiss() })
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+        }
+        .task(id: controlsIdleID) {
+            guard let id = controlsIdleID else { return }
+            do { try await Task.sleep(for: .seconds(4)) } catch { return }
+            guard !Task.isCancelled, controlsIdleID == id else { return }
+            withAnimation(motionReduced ? nil : .easeOut(duration: 0.16)) { immersive = true }
+        }
         .onDisappear { favoriteObservation.cancel() }
         .onAppear(perform: bindFavoriteState)
         .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in bindFavoriteState() }
@@ -369,7 +318,7 @@ struct ReaderView: View {
                 Text("\(Int(progressTarget.rounded())) / \(total)")
                     .font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 9)
-                    .background(.black.opacity(0.76), in: Capsule())
+                    .background(FloatingChrome.readerBackground, in: AppShape.control)
                     .accessibilityIdentifier("reader.progress.hud")
                     .transition(.opacity)
             }
@@ -405,7 +354,16 @@ struct ReaderView: View {
             .coordinateSpace(name: "reader.canvas")
             .scrollPosition(id: $scrollPosition, anchor: readingAnchor)
             .simultaneousGesture(DragGesture(minimumDistance: 5)
-                .onChanged { _ in if !pageZoomed { scrollEndTask?.cancel(); userScrolling = true; draggingCanvas = true } }
+                .onChanged { value in
+                    guard !pageZoomed else { return }
+                    if isEdgeBackDrag(value) {
+                        stopTrackingScroll()
+                        return
+                    }
+                    scrollEndTask?.cancel()
+                    userScrolling = true
+                    draggingCanvas = true
+                }
                 .onEnded { _ in draggingCanvas = false; finishScrollWhenStable() })
             .onPreferenceChange(ReaderContentOrigin.self) { origin in contentOrigin = origin; if userScrolling && !draggingCanvas { finishScrollWhenStable() } }
             .onPreferenceChange(ReaderPageFrames.self) { frames in visiblePageFrames = frames }
@@ -487,7 +445,7 @@ struct ReaderView: View {
     private var singlePage: some View {
         GeometryReader { geometry in
             let travel = ReaderSlidePolicy.travel(direction: direction, forward: slideForward, size: geometry.size)
-            let translation = singleDragActive ? singleDragOffset : (direction.horizontal ? travel.width : travel.height) * (1 - slideProgress)
+            let translation = singleTurn.isDraggingOrSettling ? singleTurn.dragOffset : (direction.horizontal ? travel.width : travel.height) * (1 - slideProgress)
             ZStack {
                 Color.black
                 // A page keeps its Canvas while its role changes from neighboring
@@ -498,14 +456,14 @@ struct ReaderView: View {
                     singlePageContent(index)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .offset(x: offset.width, y: offset.height)
-                        .allowsHitTesting(index == current && !singleDragActive)
+                        .allowsHitTesting(index == current && !singleTurn.isDraggingOrSettling)
                         .accessibilityHidden(index != current)
                 }
             }
             .clipped()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("reader.single.canvas")
-            .accessibilityValue(AppMode.qa ? "page \(current); \(singleDragActive ? "dragging" : (slideProgress < 1 ? "transitioning" : "settled")); reduced=\(motionReduced); lastDrag=\(lastDragEvidence); release=\(lastReleaseEvidence)" : "第 \(current) 页")
+            .accessibilityValue(AppMode.qa ? "page \(current); \(singleTurn.isDraggingOrSettling ? "dragging" : (singleTurn.pendingPage != nil ? "waiting" : (slideProgress < 1 ? "transitioning" : "settled"))); reduced=\(motionReduced); lastDrag=\(lastDragEvidence); release=\(lastReleaseEvidence)" : "第 \(current) 页")
         }
     }
 
@@ -520,7 +478,7 @@ struct ReaderView: View {
         } else {
             ReaderLoadingPage(index: index, metadata: true,
                               failure: offline ? "离线副本中没有这一页。" : (index == current ? singleMetadataError : nil),
-                              retry: offline || model.next == nil ? nil : { singleMetadataAttemptedTarget = nil; singleMetadataError = nil; updateMedia() },
+                              retry: offline || model.next == nil ? nil : retrySinglePageMetadata,
                               interactions: canvasInteractions)
         }
     }
@@ -539,9 +497,16 @@ struct ReaderView: View {
             guard let expected, isCurrent(expected), abs(page.index - current) <= 1,
                   media.files[page.index] == value.file else { return }
             presentations[page.index] = value
+            decodeFailures[page.index] = nil
             recordDecoded(page.index, file: value.file)
+            finishPendingTurnIfReady()
+        }, onDecodeFailure: { file in
+            guard let expected, isCurrent(expected), abs(page.index - current) <= 1,
+                  media.files[page.index] == file else { return }
+            presentations[page.index] = nil
+            decodeFailures[page.index] = file
         })
-        .id("\(page.index):\(storedDirection)")
+        .id("\(page.index):\(storedDirection):\(decodeRetryIDs[page.index]?.uuidString ?? "")")
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(media.files[page.index] == nil ? "reader.page.loading.\(page.index)" : "reader.page.frame")
     }
@@ -582,7 +547,51 @@ struct ReaderView: View {
     }
 
     private var cacheDiagnostic: String {
-        "current=\(current);prefetch=\(media.prefetchCount);files=\(media.files.keys.sorted().map(String.init).joined(separator: ","));tasks=\(media.inflight.count);metadataCalls=\(model.qaMetadataCalls);metadataTask=\(singleMetadataTask != nil);automaticMetadata=\(automaticMetadataTask != nil);metadataLoading=\(model.loading);decoded=\(decodedFiles.keys.sorted().map(String.init).joined(separator: ","));concurrency=\(downloadConcurrency);presentations=\(presentations.keys.sorted().map { "\($0):\(presentations[$0]!.canvasIdentity):\(presentations[$0]!.loadCount)" }.joined(separator: ","))"
+        let readyFiles = media.files.keys.sorted().map(String.init).joined(separator: ",")
+        let decodedPages = decodedFiles.keys.sorted().map(String.init).joined(separator: ",")
+        let canvasIdentities = presentations.sorted { $0.key < $1.key }.map { page, presentation in
+            "\(page):\(presentation.canvasIdentity):\(presentation.loadCount)"
+        }.joined(separator: ",")
+        return [
+            "current=\(current)",
+            "prefetch=\(media.prefetchCount)",
+            "files=\(readyFiles)",
+            "tasks=\(media.inflight.count)",
+            "metadataCalls=\(model.qaMetadataCalls)",
+            "metadataTask=\(singleMetadataTask != nil)",
+            "automaticMetadata=\(automaticMetadataTask != nil)",
+            "metadataLoading=\(model.loading)",
+            "decoded=\(decodedPages)",
+            "concurrency=\(downloadConcurrency)",
+            "presentations=\(canvasIdentities)",
+        ].joined(separator: ";")
+    }
+
+    private func closeReading() {
+        historyCheckpoint?.flush()
+        historyCheckpoint = nil
+        let context = readingContext
+        readingContext = nil
+        cancelSingleDrag(updateDemand: false)
+        singleMetadataRevision = UUID()
+        singleMetadataTask?.cancel(); singleMetadataTask = nil
+        automaticMetadataTask?.cancel(); automaticMetadataTask = nil
+        scrollEndTask?.cancel(); scrollEndTask = nil
+        slideTask?.cancel()
+        seekRevision = UUID()
+        media.reset()
+        presentations = [:]
+        decodedFiles = [:]
+        decodeFailures = [:]
+        decodeRetryIDs = [:]
+        userScrolling = false
+        draggingCanvas = false
+        progressHUD = false
+        model.cancel()
+        if let context {
+            MediaRepository.shared.releasePinnedFiles(context: context.id)
+            library.unpinOfflineReader(context: context.id)
+        }
     }
 
     private func updateMedia() {
@@ -590,40 +599,39 @@ struct ReaderView: View {
         let scope = ReaderMediaScope(galleryID: gallery.id, owner: context.owner,
                                      generation: context.generation, context: context.id)
         media.update(scope: scope, pages: model.pages, current: current,
-                     prefetchCount: prefetchCount, downloadConcurrency: downloadConcurrency, preview: singleDragPreview,
-                     validateCachedFile: { FileManager.default.fileExists(atPath: $0.path) }, demandLoader: { page, demand in
-            if AppMode.qa {
-                if ProcessInfo.processInfo.arguments.contains("--qa-reader-prefetch-timeout"), page.index == 2, demand.priority == .prefetch {
-                    throw RequestFailure.transport(.media, URLError.timedOut.rawValue)
-                }
-                let largeWindowFixture = ProcessInfo.processInfo.arguments.contains("--qa-reader-large-window")
-                if (page.index > 1 || largeWindowFixture), let delay = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-transfer-ms=") })?.split(separator: "=").last.flatMap({ UInt64($0) }) {
-                    if ProcessInfo.processInfo.arguments.contains("--qa-transfer-progress") {
-                        demand.reportProgress(MediaLoadProgress(phase: .transferring, completedBytes: 25_000, totalBytes: 100_000))
-                    }
-                    try await Task.sleep(nanoseconds: min(delay, 15_000) * 1_000_000)
-                }
-                if ProcessInfo.processInfo.arguments.contains("--qa-media-delayed"), demand.priority == .prefetch {
-                    try await Task.sleep(nanoseconds: 350_000_000)
-                }
-                return page.url
-            }
-            if offline { return page.url }
-            return try await ReaderNetworkMetrics.measure(demand.id, phase: "pipeline", page: page.index) {
-                try await PageMediaLoader.file(
-                    resolvePage: {
-                        demand.reportProgress(MediaLoadProgress(phase: .resolvingPage))
-                        return try await ReaderNetworkMetrics.measure(demand.id, phase: "image-page", page: page.index) {
-                            try EHParser.image(await session.html(page.url, recoverConnection: false, request: demand), base: page.url)
-                        }
-                    },
-                    loadMedia: { try await MediaRepository.shared.pageFile(for: $0, page: page.url, owner: context.owner, request: demand) },
-                    isCurrent: { isCurrent(context) })
-            }
+                     prefetchCount: prefetchCount, downloadConcurrency: downloadConcurrency,
+                     preview: singleTurn.requestedNeighbor,
+                     validateCachedFile: { FileManager.default.fileExists(atPath: $0.path) },
+                     demandLoader: { page, demand in
+            try await loadMedia(page, demand: demand, context: context)
         }, isCurrent: { isCurrent(context) })
         updatePinnedFiles(context)
         requestSingleMetadataIfNeeded(context)
         requestNextMetadataIfNeeded(context)
+    }
+
+    private func loadMedia(_ page: GalleryPage, demand: MediaRequestDemand, context: ReadingContext) async throws -> URL {
+        if AppMode.qa {
+            if ProcessInfo.processInfo.arguments.contains("--qa-reader-prefetch-timeout"), page.index == 2, demand.priority == .prefetch {
+                throw RequestFailure.transport(.media, URLError.timedOut.rawValue)
+            }
+            let largeWindowFixture = ProcessInfo.processInfo.arguments.contains("--qa-reader-large-window")
+            if (page.index > 1 || largeWindowFixture), let delay = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-transfer-ms=") })?.split(separator: "=").last.flatMap({ UInt64($0) }) {
+                if ProcessInfo.processInfo.arguments.contains("--qa-transfer-progress") {
+                    demand.reportProgress(MediaLoadProgress(phase: .transferring, completedBytes: 25_000, totalBytes: 100_000))
+                }
+                try await Task.sleep(nanoseconds: min(delay, 15_000) * 1_000_000)
+            }
+            if ProcessInfo.processInfo.arguments.contains("--qa-media-delayed"), demand.priority == .prefetch {
+                try await Task.sleep(nanoseconds: 350_000_000)
+            }
+            return page.url
+        }
+        if page.url.isFileURL { return page.url }
+        return try await ReaderNetworkMetrics.measure(demand.id, phase: "pipeline", page: page.index) {
+            try await PageMediaLoader.readerFile(page, session: session, owner: context.owner, request: demand,
+                                                 isCurrent: { isCurrent(context) })
+        }
     }
 
     private func updatePinnedFiles(_ context: ReadingContext) {
@@ -633,7 +641,7 @@ struct ReaderView: View {
     }
 
     private func requestNextMetadataIfNeeded(_ context: ReadingContext) {
-        guard !offline, prefetchCount > 0, !media.prefetchPaused, !findingPage, !model.loading, model.error == nil,
+        guard scenePhase != .background, !offline, prefetchCount > 0, !media.prefetchPaused, !findingPage, !model.loading, model.error == nil,
               automaticMetadataTask == nil, singleMetadataTask == nil,
               let cursor = model.next, cursor != automaticMetadataCursor,
               let last = model.pages.last?.index, last - current <= prefetchCount + 1 else { return }
@@ -650,7 +658,7 @@ struct ReaderView: View {
     private var neededSingleMetadataTarget: Int? {
         guard mode == ReaderMode.singlePage.rawValue else { return nil }
         if !model.pages.contains(where: { $0.index == current }) { return current }
-        if let target = singleDragPreview, !model.pages.contains(where: { $0.index == target }) { return target }
+        if let target = singleTurn.requestedNeighbor, !model.pages.contains(where: { $0.index == target }) { return target }
         return nil
     }
 
@@ -694,49 +702,79 @@ struct ReaderView: View {
         }
     }
 
-    private var readerControls: some View {
-        ViewThatFits(in: .horizontal) {
-            readerControlRow(includeBookmark: true)
-            readerControlRow(includeBookmark: false)
+    private func pendingTurnStatus(_ target: Int) -> some View {
+        let needsMetadata = neededSingleMetadataTarget == target
+        let failed = media.failures[target] != nil || decodeFailures[target] != nil ||
+            (needsMetadata && (singleMetadataError != nil || offline))
+        let canRetry = failed && (!needsMetadata || (!offline && model.next != nil))
+        return HStack(spacing: FeedChrome.controlSpacing) {
+            if failed {
+                Text("第 \(target) 页加载失败，当前页已保留")
+                if canRetry {
+                    Button("重试") { retryPendingTurn(target) }
+                        .frame(minHeight: FeedChrome.rowHeight)
+                        .accessibilityIdentifier("reader.page.retry.\(target)")
+                }
+            } else {
+                ProgressView().tint(.white)
+                Text("正在加载第 \(target) 页…")
+            }
         }
-        .padding(.horizontal, 8).padding(.vertical, 2)
-        .background(FloatingChrome.background, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08), lineWidth: 0.5))
-        .padding(.horizontal, 12)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("reader.controls.compact")
+        .font(.caption)
+        .padding(.horizontal, FeedChrome.contentSpacing)
+        .frame(minHeight: FeedChrome.compactFormRowHeight)
+        .foregroundStyle(.white)
+        .background(FloatingChrome.readerBackground, in: AppShape.control)
+        .padding(.horizontal, FeedChrome.contentInset)
+        .padding(.bottom, immersive ? FeedChrome.contentSpacing : 0)
+        .allowsHitTesting(canRetry)
     }
 
-    private func readerControlRow(includeBookmark: Bool) -> some View {
-        HStack(spacing: 0) {
-            Menu {
-                Button { mode = ReaderMode.continuous.rawValue; scrollPosition = current } label: {
-                    Label("连续模式", systemImage: mode == ReaderMode.continuous.rawValue ? "checkmark" : "rectangle.split.1x2")
-                }
-                Button { mode = ReaderMode.singlePage.rawValue } label: {
-                    Label("单页模式", systemImage: mode == ReaderMode.singlePage.rawValue ? "checkmark" : "book")
-                }
-            } label: {
-                Image(systemName: mode == ReaderMode.continuous.rawValue ? "rectangle.split.1x2" : "book")
-                    .frame(width: 44, height: 44).contentShape(Rectangle())
-            }
-            .accessibilityLabel("阅读方式").accessibilityIdentifier("reader.mode")
+    private func retryPendingTurn(_ target: Int) {
+        guard singleTurn.pendingPage == target else { return }
+        if decodeFailures.removeValue(forKey: target) != nil {
+            decodeRetryIDs[target] = UUID()
+        } else if media.failures[target] != nil {
+            media.retry(page: target)
+        } else {
+            retrySinglePageMetadata()
+        }
+    }
 
-            Menu {
-                ForEach(ReaderDirection.allCases) { item in
-                    Button { direction = item } label: {
-                        Label(item.menuTitle, systemImage: direction == item ? "checkmark" : item.forwardSymbol)
-                    }
-                }
-            } label: {
-                Image(systemName: direction.forwardSymbol).frame(width: 44, height: 44).contentShape(Rectangle())
-            }
-            .accessibilityLabel("翻页方向，当前 \(direction.menuTitle)").accessibilityIdentifier("reader.direction")
+    private func retrySinglePageMetadata() {
+        singleMetadataAttemptedTarget = nil
+        singleMetadataError = nil
+        updateMedia()
+    }
 
-            if let total = model.total, total > 0 {
-                Slider(value: $progressTarget, in: 1...Double(max(1, total))) { editing in
-                    if editing { progressRevision = UUID(); progressHUD = true }
-                    else {
+    private func isPagePresented(_ page: Int) -> Bool {
+        guard let file = media.files[page] else { return false }
+        return presentations[page]?.file == file
+    }
+
+    private func finishPendingTurnIfReady() {
+        guard let target = singleTurn.pendingPage, !singleTurn.isDraggingOrSettling, !pageZoomed, !progressHUD,
+              readerGesturesActive, mode == ReaderMode.singlePage.rawValue,
+              let context = readingContext, isCurrent(context), isPagePresented(target) else { return }
+        displayPage(target, animatedTurn: true)
+        syncSinglePagePosition()
+        remember()
+    }
+
+    private func syncSinglePagePosition() {
+        scrollPosition = current
+        progressTarget = Double(current)
+    }
+
+    private var readerControls: some View {
+        HStack(spacing: FeedChrome.panelSpacing) {
+            if let total = model.total, total > 1 {
+                Slider(value: $progressTarget, in: 1...Double(total)) { editing in
+                    if editing {
+                        cancelSingleDrag()
+                        progressRevision = UUID()
+                        progressHUD = true
+                    } else {
                         let target = Int(progressTarget.rounded()), token = progressRevision
                         Task { await seek(target); if progressRevision == token { progressHUD = false } }
                     }
@@ -745,65 +783,40 @@ struct ReaderView: View {
                 .accessibilityLabel("阅读进度")
                 .accessibilityValue("第 \(current) 页，共 \(total) 页")
                 .accessibilityIdentifier("reader.progress")
+            } else {
+                Spacer(minLength: 0)
             }
             Button { jumpText = String(current); jump = true } label: {
                 Text("\(current) / \(model.total.map(String.init) ?? "未知")")
                     .font(.caption.weight(.semibold).monospacedDigit()).lineLimit(1).minimumScaleFactor(0.65)
-                    .foregroundStyle(.white).frame(minWidth: 66, maxWidth: 90, minHeight: 44).contentShape(Rectangle())
-            }.accessibilityIdentifier("reader.page")
-            Button { settings = true } label: {
-                Image(systemName: "ellipsis.circle").frame(width: 44, height: 44).contentShape(Rectangle())
-            }.accessibilityLabel("阅读设置").accessibilityIdentifier("reader.settings")
-            if includeBookmark {
-                Button { favoriteEditing = true } label: {
-                    Image(systemName: { if case .favorited = favoriteObservation.state { return "star.fill" }; return "star" }())
-                        .frame(width: 44, height: 44).contentShape(Rectangle())
-                }.accessibilityLabel("站点收藏").accessibilityValue(favoriteAccessibilityValue)
-                    .accessibilityIdentifier("reader.site-favorite")
+                    .foregroundStyle(.white).padding(.horizontal, 5)
+                    .frame(minWidth: 54, minHeight: 44).fixedSize(horizontal: true, vertical: false)
+                    .contentShape(Rectangle())
             }
-        }.font(.system(size: 18, weight: .medium))
+            .accessibilityIdentifier("reader.page")
+            .accessibilityHint("跳转到指定页码")
+            Button { settings = true } label: {
+                Image(systemName: "ellipsis").font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white).frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .accessibilityLabel("阅读设置").accessibilityIdentifier("reader.settings")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, FeedChrome.panelSpacing)
+        .background { readerPanelSurface }
+        .frame(maxWidth: 460)
+        .padding(.horizontal, FeedChrome.contentInset)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reader.controls.compact")
     }
 
     private var readerSettings: some View {
-        NavigationStack {
-            Form {
-                Section("阅读方式") {
-                    Picker("布局", selection: $mode) {
-                        Text("连续模式").tag(ReaderMode.continuous.rawValue)
-                        Text("单页模式").tag(ReaderMode.singlePage.rawValue)
-                    }.pickerStyle(.segmented).accessibilityIdentifier("reader.settings.mode")
-                }
-                Section("翻页方向") {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                        ForEach(ReaderDirection.allCases) { item in
-                            Button { direction = item } label: {
-                                HStack(spacing: 8) { Text(item.arrow).font(.body.weight(.semibold)); Text(item.title).font(.subheadline); Spacer(minLength: 0) }
-                                    .foregroundStyle(direction == item ? Color.accentColor : Color.primary)
-                                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 44)
-                                    .background(direction == item ? Color.accentColor.opacity(0.1) : Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
-                                    .contentShape(Rectangle())
-                            }.buttonStyle(.plain).accessibilityValue(direction == item ? "已选择" : "未选择")
-                                .accessibilityIdentifier("reader.settings.direction.\(item.rawValue)")
-                        }
-                    }
-                }
-                Section {
-                    Button { favoriteAfterSettings = true; settings = false } label: {
-                        Label("站点收藏", systemImage: "star")
-                    }.accessibilityIdentifier("reader.settings.site-favorite")
-                    Button { library.toggleReadLater(gallery) } label: {
-                        Label(library.containsReadLater(gallery) ? "移出稍后再读" : "加入稍后再读", systemImage: "text.badge.plus")
-                    }
-                }
-                Section { Text("点左右或上下区域按阅读方向翻页，也可滑动翻页。中间双击打开作品详情，长按隐藏或显示阅读控件；双击两侧图片缩放，动图按一页自动播放。")
-                    .font(.caption).foregroundStyle(.secondary) }
-            }
-            .listSectionSpacing(16)
-            .navigationTitle("阅读设置").navigationBarTitleDisplayMode(.inline).appNavigationChrome()
-            .toolbar { AppToolbarItem(placement: .confirmationAction, tone: .accent) { Button("完成") { settings = false } } }
-        }
-        .presentationDetents([.medium, .large])
-        .statusBarHidden(false)
+        let symbol = if case .favorited = favoriteObservation.state { "star.fill" } else { "star" }
+        return ReaderSettingsPanel(mode: $mode, direction: Binding(get: { direction }, set: { direction = $0 }),
+                                   favoriteSymbol: symbol, favoriteValue: favoriteAccessibilityValue,
+                                   readLater: library.containsReadLater(gallery),
+                                   onFavorite: { favoriteAfterSettings = true; settings = false },
+                                   onReadLater: { library.toggleReadLater(gallery) })
     }
     private func bindFavoriteState() {
         favoriteObservation.bind(favoriteClient(for: gallery, session: session), reference: gallery.ref,
@@ -821,9 +834,10 @@ struct ReaderView: View {
         Button { dismiss() } label: {
             Image(systemName: "xmark")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.primary)
-                .frame(width: 30, height: 30)
-                .background(FloatingChrome.controlFill, in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(.white)
+                .frame(width: FeedChrome.rowHeight, height: FeedChrome.rowSurfaceHeight)
+                .background(FloatingChrome.readerBackground, in: AppShape.control)
+                .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
@@ -833,7 +847,7 @@ struct ReaderView: View {
     }
 
     private var readerHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: FeedChrome.panelSpacing) {
             closeButton
             Text(gallery.title)
                 .font(.subheadline.weight(.medium))
@@ -841,21 +855,35 @@ struct ReaderView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, FeedChrome.controlSpacing)
+                .frame(height: FeedChrome.rowSurfaceHeight)
+                .background(FloatingChrome.readerBackground, in: AppShape.control)
+                .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
         }
         .frame(height: 44)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, FeedChrome.panelSpacing)
+        .background { readerPanelSurface }
+        .frame(maxWidth: 460)
+        .padding(.horizontal, FeedChrome.contentInset)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("reader.header")
     }
 
+    private var readerPanelSurface: some View {
+        FeedChrome.panelShape.fill(FloatingChrome.readerBackground)
+            .overlay { FeedChrome.panelShape.strokeBorder(.white.opacity(0.08), lineWidth: 0.5) }
+            .frame(height: FeedChrome.singleRowPanelHeight)
+            .allowsHitTesting(false)
+    }
+
     private func canvasTapped(_ point: CGPoint) {
-        guard !pageZoomed, !singleDragActive, Date() >= ignoreCanvasTapUntil,
+        guard !pageZoomed, !singleTurn.isDraggingOrSettling, Date() >= ignoreCanvasTapUntil,
               let context = readingContext, isCurrent(context), viewportFrame.width > 0 else { return }
         switch ReaderTapPolicy.action(at: point, in: viewportFrame, direction: direction,
                                       mode: ReaderMode(rawValue: mode) ?? .continuous) {
         case .previous: changePage(by: -1)
         case .next: changePage(by: 1)
-        case .center: break
+        case .center: if immersive { immersive = false }
         case nil: break
         }
     }
@@ -865,7 +893,7 @@ struct ReaderView: View {
     }
 
     private func canvasDoubleTapped(_ point: CGPoint) -> Bool {
-        guard !singleDragActive, !settings, !detailsShowing, Date() >= ignoreCanvasTapUntil,
+        guard !singleTurn.isDraggingOrSettling, !settings, !detailsShowing, Date() >= ignoreCanvasTapUntil,
               let context = readingContext, isCurrent(context),
               ReaderTapPolicy.action(at: point, in: viewportFrame, direction: direction,
                                      mode: ReaderMode(rawValue: mode) ?? .continuous) == .center else { return false }
@@ -874,7 +902,7 @@ struct ReaderView: View {
     }
 
     private func toggleImmersive() {
-        guard !singleDragActive, !settings, !detailsShowing,
+        guard !singleTurn.isDraggingOrSettling, !settings, !detailsShowing,
               let context = readingContext, isCurrent(context) else { return }
         progressHUD = false; stopTrackingScroll(); cancelPageAnimation()
         immersive.toggle()
@@ -887,102 +915,144 @@ struct ReaderView: View {
         viewportFrame = frame
     }
 
+    private func isEdgeBackDrag(_ value: DragGesture.Value) -> Bool {
+        readerGesturesActive && !pageZoomed && !progressHUD &&
+            ReaderEdgeBackPolicy.isLeadingSwipe(startX: value.startLocation.x + viewportFrame.minX,
+                                                translation: value.translation)
+    }
+
     private func singleDragGesture(size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .updating($singleFingerDown) { _, down, _ in down = true }
             .onChanged { value in
                 guard mode == ReaderMode.singlePage.rawValue, !pageZoomed,
                       let context = readingContext, isCurrent(context) else { return }
-                if singleDragFinishing { cancelPageAnimation(updateDemand: false) }
+                if isEdgeBackDrag(value) {
+                    if singleTurn.isDraggingOrSettling { cancelSingleDrag() }
+                    return
+                }
+                if case .settling = singleTurn.dragPhase { cancelPageAnimation(updateDemand: false) }
                 let raw = direction.horizontal ? value.translation.width : value.translation.height
                 let cross = direction.horizontal ? value.translation.height : value.translation.width
                 let extent = direction.horizontal ? size.width : size.height
                 guard extent.isFinite, extent > 0 else { return }
-                guard singleDragActive || abs(raw) > max(8, abs(cross)) else { return }
-                if !singleDragActive {
-                    cancelPageAnimation(updateDemand: false); seekRevision = UUID(); findingPage = false
-                    singleDragExtent = extent
-                    singleDragActive = true
+                guard singleTurn.isDraggingOrSettling || abs(raw) > max(8, abs(cross)) else { return }
+                if !singleTurn.isDraggingOrSettling {
+                    cancelPageAnimation(updateDemand: false)
+                    seekRevision = UUID()
+                    findingPage = false
+                    singleTurn.dragPhase = .dragging(extent: extent)
                 }
+                guard case let .dragging(dragExtent) = singleTurn.dragPhase else { return }
                 ignoreCanvasTapUntil = Date().addingTimeInterval(0.45)
-                let target = current + ReaderDragPolicy.pageDelta(offset: raw, direction: direction)
-                let valid = target > 0 && (model.total.map { target <= $0 } ?? (model.pages.contains { $0.index == target } || model.next != nil))
-                let preview = valid ? target : nil
-                let changed = preview != singleDragPreview
-                singleDragPreview = preview
-                singleDragOffset = ReaderDragPolicy.boundedOffset(raw, extent: singleDragExtent, hasNeighbor: valid)
+                let delta = ReaderDragPolicy.pageDelta(offset: raw, direction: direction)
+                let preview = adjacentPage(by: delta)
+                let changed = preview != singleTurn.dragPreview
+                singleTurn.dragPreview = preview
+                // Keep the current canvas centered until the neighbor can actually draw.
+                singleTurn.dragOffset = if let preview, !isPagePresented(preview) { 0 }
+                    else { ReaderDragPolicy.boundedOffset(raw, extent: dragExtent, hasNeighbor: preview != nil) }
                 if changed {
                     updateMedia()
                 }
                 if AppMode.qa, let preview {
-                    lastDragEvidence = "\(current)+\(preview);offset=\(Int(abs(singleDragOffset)));neighborFile=\(media.files[preview] != nil)"
+                    lastDragEvidence = "\(current)+\(preview);offset=\(Int(abs(singleTurn.dragOffset)));neighborFile=\(media.files[preview] != nil)"
                 }
             }
             .onEnded { value in
-                guard singleDragActive, !pageZoomed else { return }
+                guard case .dragging = singleTurn.dragPhase, !pageZoomed else { return }
                 let raw = direction.horizontal ? value.translation.width : value.translation.height
                 let predicted = direction.horizontal ? value.predictedEndTranslation.width : value.predictedEndTranslation.height
                 let extent = direction.horizontal ? size.width : size.height
-                finishSingleDrag(commit: singleDragPreview != nil && ReaderDragPolicy.commits(offset: raw, predicted: predicted, extent: extent))
+                finishSingleDrag(commit: singleTurn.dragPreview != nil && ReaderDragPolicy.commits(offset: raw, predicted: predicted, extent: extent))
             }
     }
 
     private func finishSingleDrag(commit: Bool) {
-        guard singleDragActive, !singleDragFinishing, let context = readingContext, isCurrent(context) else { return }
-        guard singleDragExtent.isFinite, singleDragExtent > 0 else { cancelSingleDrag(); return }
-        singleDragFinishing = true
+        // Use the geometry captured when the gesture started, even if the viewport
+        // preference temporarily reports zero while the target page is loading.
+        guard case let .dragging(extent) = singleTurn.dragPhase,
+              let context = readingContext, isCurrent(context) else { return }
+        let releaseID = UUID()
+        singleTurn.dragPhase = .settling(releaseID)
         ignoreCanvasTapUntil = Date().addingTimeInterval(0.4)
-        let target = commit ? singleDragPreview : nil
+        let target = commit ? singleTurn.dragPreview : nil
         let oldPage = current
         if target != nil { seekRevision = UUID(); findingPage = false }
         let intent = seekRevision
         let releaseDirection = storedDirection
-        // Use the exact geometry that handled the finger, including a pending
-        // slow target. Preferences across NavigationStack can read as zero.
-        let extent = singleDragExtent
         if AppMode.qa {
-            lastReleaseEvidence = "commit=\(commit),target=\(target ?? 0),extent=\(extent),from=\(singleDragOffset),fileReady=\(target.map { media.files[$0] != nil } ?? false)"
+            lastReleaseEvidence = "commit=\(commit),target=\(target ?? 0),extent=\(extent),from=\(singleTurn.dragOffset),fileReady=\(target.map { media.files[$0] != nil } ?? false)"
         }
-        let revision = UUID(); singleDragRevision = revision
-        if let target {
+        switch singleTurn.release(commit: commit, isPresented: isPagePresented) {
+        case .commit(let target):
             let offset = ReaderDragPolicy.pageOffset(index: target, current: oldPage, direction: direction,
-                                                     size: CGSize(width: extent, height: extent), translation: singleDragOffset)
+                                                     size: CGSize(width: extent, height: extent), translation: singleTurn.dragOffset)
             var transaction = Transaction(); transaction.disablesAnimations = true
             withTransaction(transaction) {
-                current = target; scrollPosition = target; progressTarget = Double(target)
-                singleDragPreview = nil
-                singleDragOffset = direction.horizontal ? offset.width : offset.height
+                current = target
+                syncSinglePagePosition()
+                singleTurn.dragPreview = nil
+                singleTurn.dragOffset = direction.horizontal ? offset.width : offset.height
             }
             remember()
             updateMedia()
+        case .waitForPresentation(let target):
+            singleTurn.pendingPage = target
+        case .rebound:
+            break
         }
         withAnimation(motionReduced ? nil : .easeOut(duration: 0.18), completionCriteria: .removed) {
-            singleDragOffset = 0
+            singleTurn.dragOffset = 0
         } completion: {
-            guard singleDragRevision == revision, singleDragFinishing,
+            guard singleTurn.dragPhase == .settling(releaseID),
                   isCurrent(context), seekRevision == intent,
                   mode == ReaderMode.singlePage.rawValue, storedDirection == releaseDirection else { return }
-            var tx = Transaction(); tx.disablesAnimations = true
-            withTransaction(tx) {
-                singleDragActive = false; singleDragFinishing = false; singleDragOffset = 0
-                singleDragPreview = nil; singleDragExtent = 0
-            }
+            resetSingleDrag()
             historyCheckpoint?.flush()
             updateMedia()
+            finishPendingTurnIfReady()
         }
     }
 
     private func cancelSingleDrag(updateDemand: Bool = true) {
-        let hadPreview = singleDragActive || singleDragPreview != nil
-        singleDragRevision = UUID(); singleDragExtent = 0
-        var tx = Transaction(); tx.disablesAnimations = true
-        withTransaction(tx) { singleDragActive = false; singleDragFinishing = false; singleDragOffset = 0; singleDragPreview = nil }
+        let hadDemand = singleTurn.isDraggingOrSettling || singleTurn.requestedNeighbor != nil
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { singleTurn.cancel() }
         if updateDemand { historyCheckpoint?.finishMotion(fingerDown: singleFingerDown) }
-        if hadPreview && updateDemand { updateMedia() }
+        if hadDemand && updateDemand { updateMedia() }
+    }
+
+    private func resetSingleDrag() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { singleTurn.resetDrag() }
+    }
+
+    private func adjacentPage(by offset: Int) -> Int? {
+        let target = current + offset
+        guard target > 0, model.total.map({ target <= $0 }) ??
+            (model.next != nil || model.pages.contains(where: { $0.index == target })) else { return nil }
+        return target
     }
 
     private func changePage(by offset: Int) {
         guard offset != 0 else { return }
+        if mode == ReaderMode.singlePage.rawValue {
+            guard let target = adjacentPage(by: offset), target <= (model.total ?? 2000) else {
+                cancelSingleDrag()
+                return
+            }
+            guard singleTurn.pendingPage != target else { return }
+            cancelPageAnimation(updateDemand: false)
+            seekRevision = UUID()
+            findingPage = false
+            singleTurn.pendingPage = target
+            updateMedia()
+            finishPendingTurnIfReady()
+            return
+        }
         Task {
             let target = max(1, current + offset)
             guard model.total == nil || target <= (model.total ?? target) else { return }
@@ -999,7 +1069,7 @@ struct ReaderView: View {
     private func remember() {
         guard let context = readingContext, isCurrent(context), current > 0,
               model.total.map({ current <= $0 }) ?? model.pages.contains(where: { $0.index == current }) else { return }
-        if singleDragActive || singleDragFinishing || slideTask != nil, let historyCheckpoint {
+        if singleTurn.isDraggingOrSettling || slideTask != nil, let historyCheckpoint {
             historyCheckpoint.stage(current)
         } else {
             historyCheckpoint?.discard()
@@ -1033,8 +1103,8 @@ struct ReaderView: View {
         if mode == ReaderMode.singlePage.rawValue {
             findingPage = false
             displayPage(page, animatedTurn: animatedTurn)
-            scrollPosition = page; progressTarget = Double(page); remember()
-            updateMedia()
+            syncSinglePagePosition()
+            remember()
             return
         }
         findingPage = true; defer { if seekRevision == intent { findingPage = false } }
@@ -1058,14 +1128,141 @@ struct ReaderView: View {
     }
 }
 
+private struct ReaderSettingsPanel: View {
+    @Binding var mode: Int
+    @Binding var direction: ReaderDirection
+    let favoriteSymbol: String
+    let favoriteValue: String
+    let readLater: Bool
+    let onFavorite: () -> Void
+    let onReadLater: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.verticalSizeClass) private var heightClass
+    @State private var contentHeight: CGFloat = 300
+
+    private let modes = [
+        FeedScopeOption(id: ReaderMode.continuous.rawValue, title: ReaderMode.continuous.title, symbol: "rectangle.split.1x2"),
+        FeedScopeOption(id: ReaderMode.singlePage.rawValue, title: ReaderMode.singlePage.title, symbol: "book")
+    ]
+
+    private var detent: PresentationDetent {
+        if heightClass == .compact || typeSize.isAccessibilitySize { return .large }
+        return .height(contentHeight + 52)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if typeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: FeedChrome.panelSpacing) {
+                            sectionTitle("阅读方式")
+                            ForEach(modes) { item in
+                                choice(item.title, symbol: item.symbol, selected: mode == item.id) { mode = item.id }
+                                    .accessibilityIdentifier("reader.settings.mode.\(item.id)")
+                            }
+                        }
+                    } else {
+                        HStack(spacing: FeedChrome.controlSpacing) {
+                            sectionTitle("阅读方式").fixedSize()
+                            FeedScopePicker(selection: $mode, options: modes, identifier: "reader.settings.mode")
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        sectionTitle("翻页方向")
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: FeedChrome.panelSpacing),
+                                                 count: typeSize.isAccessibilitySize ? 1 : 2), spacing: FeedChrome.panelSpacing) {
+                            ForEach(ReaderDirection.allCases) { item in
+                                choice(item.title, symbol: item.forwardSymbol, selected: direction == item) { direction = item }
+                                    .accessibilityValue(direction == item ? "已选择" : "未选择")
+                                    .accessibilityIdentifier("reader.settings.direction.\(item.rawValue)")
+                            }
+                        }
+                    }
+                    VStack(spacing: 0) {
+                        Divider()
+                        galleryAction("站点收藏", symbol: favoriteSymbol, opensEditor: true, action: onFavorite)
+                            .accessibilityValue(favoriteValue)
+                            .accessibilityIdentifier("reader.settings.site-favorite")
+                        Divider().padding(.leading, 28)
+                        galleryAction(readLater ? "移出稍后再读" : "加入稍后再读",
+                                      symbol: readLater ? "checkmark" : "text.badge.plus", action: onReadLater)
+                            .accessibilityIdentifier("reader.settings.read-later")
+                    }
+                    Text("双击中间看详情 · 长按隐藏或显示控件")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, FeedChrome.contentInset)
+                .padding(.top, FeedChrome.contentTopGap).padding(.bottom, FeedChrome.sectionSpacing)
+                .onGeometryChange(for: CGFloat.self) { ceil($0.size.height) } action: { height in
+                    if height > 0 { contentHeight = height }
+                }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .floatingPageHeader("阅读设置", identifier: "reader.settings-page") {
+                EmptyView()
+            } trailing: {
+                Button("完成") { dismiss() }
+                    .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+                    .accessibilityIdentifier("reader.settings.done")
+            }
+        }
+        .presentationDetents([detent])
+        .presentationDragIndicator(.visible)
+        .presentationCornerRadius(FeedChrome.panelShape.cornerSize.width)
+        .presentationBackground(FloatingChrome.headerBackground)
+        .statusBarHidden(false)
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title).font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func choice(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(selected ? Color.accentColor : Color.primary)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .appControlSurface(selected: selected)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func galleryAction(_ title: String, symbol: String, opensEditor: Bool = false,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol).frame(width: 20).foregroundStyle(Color.accentColor).accessibilityHidden(true)
+                Text(title)
+                Spacer(minLength: 6)
+                if opensEditor {
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+            }
+            .font(.subheadline)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// XCTest's app hierarchy omits the system status bar on current iOS.
 /// Read its actual scene state rather than treating that omission as hidden.
 private struct ReaderSystemChromeProbe: UIViewRepresentable {
     final class Probe: UIView {
         override var accessibilityValue: String? {
             get {
-                guard let manager = window?.windowScene?.statusBarManager else { return "unavailable" }
-                return "hidden=\(manager.isStatusBarHidden);height=\(manager.statusBarFrame.height)"
+                guard let window, let manager = window.windowScene?.statusBarManager else { return "unavailable" }
+                let safe = window.safeAreaLayoutGuide.layoutFrame
+                return "hidden=\(manager.isStatusBarHidden);height=\(manager.statusBarFrame.height);safeMinX=\(safe.minX);safeMaxX=\(safe.maxX)"
             }
             set { }
         }
@@ -1092,12 +1289,14 @@ struct ReaderPage: View {
     var onZoomChanged: ((Bool) -> Void)? = nil
     var onImageSizeChanged: ((CGSize) -> Void)? = nil
     var onPresentation: ((ImageCanvasPresentation) -> Void)? = nil
+    var onDecodeFailure: ((URL) -> Void)? = nil
     var body: some View {
         ZStack {
             Color.black
             if active, let file {
                 MediaCanvas(file: file, animated: animated, onZoomChanged: onZoomChanged,
-                            onImageSizeChanged: onImageSizeChanged, interactions: interactions, onPresentation: onPresentation)
+                            onImageSizeChanged: onImageSizeChanged, interactions: interactions, onPresentation: onPresentation,
+                            onDecodeFailure: onDecodeFailure)
             } else if active, let failure {
                 ReaderLoadingPage(index: page.index, failure: ErrorMessages.message(failure), retry: retry, interactions: interactions)
             } else if active { ReaderLoadingPage(index: page.index, progress: progress, interactions: interactions) }
@@ -1105,350 +1304,5 @@ struct ReaderPage: View {
         }
         .onChange(of: active) { _, value in if !value { onZoomChanged?(false) } }
         .onChange(of: file) { _, _ in onZoomChanged?(false) }
-    }
-}
-
-struct GalleryDetailView: View {
-    var gallery: Gallery
-    var onResumeReading: (() -> Void)? = nil
-    var allowsTagSearch = true
-    var currentSearch: ExecutedGallerySearch? = nil
-    var onSearchQuery: (SearchQuery, GallerySite) -> Void
-    @EnvironmentObject private var session: SiteSession
-    @EnvironmentObject private var library: LibraryStore
-    @EnvironmentObject private var downloads: DownloadManager
-    @Environment(\.dynamicTypeSize) private var typeSize
-    @ObservedObject private var coverAspect = CoverAspectCache.shared
-    @State private var detail: GalleryDetail?
-    @State private var failure: String?
-    @State private var loading = false
-    @State private var reader = false
-    @State private var web: WebDestination?
-    @State private var downloadOptions = false
-    @State private var lastBlockedTags: [GalleryTag] = []
-    @State private var selectedTagIDs = Set<String>()
-    @State private var tagSearchDraft: DetailTagSearchDraft?
-    @State private var pendingSearchSubmission: (query: SearchQuery, site: GallerySite)?
-    @State private var pendingReaderSearch: (query: SearchQuery, site: GallerySite)?
-    @State private var tagFeedback: String?
-    @State private var tagFailure: String?
-    @State private var favoriteEditing = false
-    @State private var favoriteRemoval = false
-    @StateObject private var favoriteObservation = GalleryFavoriteObservation()
-    private var current: Gallery {
-        guard var resolved = detail?.gallery else { return gallery }
-        if resolved.cover == nil { resolved.cover = gallery.cover }
-        if resolved.title.isEmpty { resolved.title = gallery.title }
-        if resolved.category.isEmpty { resolved.category = gallery.category }
-        if resolved.uploader.isEmpty { resolved.uploader = gallery.uploader }
-        if resolved.pages == nil { resolved.pages = gallery.pages }
-        if resolved.rating == nil { resolved.rating = gallery.rating }
-        if resolved.tags.isEmpty { resolved.tags = gallery.tags; resolved.tagsComplete = gallery.tagsComplete }
-        return resolved
-    }
-    private var favoriteState: GalleryFavoriteState { favoriteObservation.state }
-    private var selectedTags: [GalleryTag] { current.tags.filter { selectedTagIDs.contains($0.id) } }
-    private var favoriteTitle: String {
-        switch favoriteState {
-        case .unknown: return "站点收藏"
-        case .notFavorited: return "收藏到站点"
-        case .favorited: return "已收藏"
-        }
-    }
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top, spacing: 18) {
-                    let ratio = coverAspect.aspect(for: current)
-                    CoverView(gallery: current).frame(width: min(108, 160 * ratio), height: min(160, 108 / ratio)).clipShape(RoundedRectangle(cornerRadius: 8))
-                    VStack(alignment: .leading, spacing: 10) {
-                        if !current.category.isEmpty { Text(current.category).font(.subheadline.weight(.medium)).foregroundStyle(.primary) }
-                        Text(current.title).font(.title3.weight(.semibold)).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                        if current.pages != nil || current.rating != nil {
-                            HStack(spacing: 12) {
-                                if let pages = current.pages { Text("\(pages) 页") }
-                                if let rating = current.rating { Label(String(format: "%.1f", rating), systemImage: "star.fill") }
-                            }.font(.subheadline).foregroundStyle(.primary)
-                        }
-                        let artists = current.tags.filter { $0.namespace == "artist" }.map(\.name)
-                        if !artists.isEmpty { Text("作者 · \(artists.joined(separator: "、"))").font(.subheadline).foregroundStyle(.primary).fixedSize(horizontal: false, vertical: true) }
-                        if !current.uploader.isEmpty { Text("上传者 · \(current.uploader)").font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
-                    }
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                  HStack(spacing: 10) {
-                    let readingTitle = onResumeReading != nil ? "返回阅读" : (library.snapshot.history.contains(where: { $0.id == gallery.id }) ? "继续阅读" : "在线阅读")
-                    Button { if let onResumeReading { onResumeReading() } else { reader = true } } label: { actionLabel(readingTitle, symbol: "book") }
-                        .buttonStyle(AppActionButtonStyle(tone: .accent)).controlSize(.regular)
-                        .accessibilityLabel(readingTitle).disabled(onResumeReading == nil && detail == nil && !AppMode.qa)
-                    Button { favoriteRemoval = false; favoriteEditing = true } label: {
-                        actionLabel(favoriteTitle, symbol: { if case .favorited = favoriteState { return "star.fill" }; return "star" }())
-                    }.buttonStyle(AppActionButtonStyle()).accessibilityIdentifier("detail.site-favorite")
-                        .accessibilityLabel(favoriteAccessibilityLabel)
-                  }
-                  if case let .favorited(group) = favoriteState {
-                    HStack(spacing: 8) {
-                      Text("收藏分组 · \(group)").font(.caption).foregroundStyle(.secondary)
-                          .lineLimit(1).truncationMode(.tail).accessibilityIdentifier("detail.favorite-group")
-                      Spacer(minLength: 4)
-                      Button("取消收藏") { favoriteRemoval = true; favoriteEditing = true }
-                          .font(.caption).lineLimit(1).fixedSize(horizontal: true, vertical: false)
-                          .frame(minHeight: 44).accessibilityIdentifier("detail.cancel-favorite")
-                    }
-                  }
-                  if let phase = favoriteObservation.phase {
-                      Button(phase.label) { favoriteRemoval = false; favoriteEditing = true }
-                          .font(.caption).frame(minHeight: 28).accessibilityIdentifier("detail.favorite-sync")
-                  }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("detail.actions")
-                if loading { ProgressView() }
-                if let failure { StatusMessage(title: failure) { Task { await load() } } }
-                Divider()
-                if !lastBlockedTags.isEmpty {
-                    HStack {
-                        Text("已屏蔽 \(lastBlockedTags.count) 个标签")
-                        Spacer()
-                        Button("撤销") {
-                            if library.unblock(lastBlockedTags) { lastBlockedTags = []; tagFeedback = "已撤销屏蔽" }
-                            else { tagFailure = library.error ?? "标签未能保存，请重试。" }
-                        }
-                    }.font(.caption)
-                }
-                if !current.tags.isEmpty {
-                    VStack(alignment: .leading, spacing: 15) {
-                        Text("标签").font(.headline)
-                        Text(tagFeedback ?? "点按可多选，选好后在顶部选择搜索方式。")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .accessibilityIdentifier("detail.tags.feedback")
-                        ForEach(Array(Set(current.tags.map(\.namespace))).sorted(), id: \.self) { namespace in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(namespace.uppercased()).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
-                                TagWrapLayout(spacing: 7) {
-                                    ForEach(current.tags.filter { $0.namespace == namespace }) { tag in
-                                        Button { toggleTagSelection(tag) } label: { Text(tag.name) }
-                                            .buttonStyle(TagChipButtonStyle(selected: selectedTagIDs.contains(tag.id)))
-                                            .accessibilityLabel(tag.name).accessibilityIdentifier("detail.tag.\(tag.id)")
-                                            .accessibilityValue(selectedTagIDs.contains(tag.id) ? "已选中" : "未选中")
-                                            .accessibilityAddTraits(selectedTagIDs.contains(tag.id) ? .isSelected : [])
-                                            .contextMenu {
-                                                Button("加入常用标签") { pinTags([tag]) }
-                                                Button("屏蔽标签", role: .destructive) { blockTags([tag]) }
-                                                if library.blockedIDs.contains(tag.id) { Button("解除屏蔽") { library.unblock(tag) } }
-                                            }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                VStack(spacing: 0) {
-                    detailLink(title: "站点原页", subtitle: "查看完整画廊信息", icon: "safari", identifier: "detail.site-page") {
-                        web = .init(title: "画廊原网页", url: current.ref.url)
-                    }
-                    Divider().padding(.leading, 50)
-                    detailLink(title: "下载", subtitle: "本地保存 · BT 种子", icon: "arrow.down.to.line", identifier: "detail.download") {
-                        downloadOptions = true
-                    }.disabled(detail == nil)
-                }.background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-            }.padding(22)
-                .padding(.bottom, onResumeReading == nil ? 64 : 0)
-        }
-            .accessibilityIdentifier("detail.scroll")
-            .navigationTitle(selectedTags.isEmpty ? "画廊详情" : "已选 \(selectedTags.count) 个")
-            .navigationBarTitleDisplayMode(.inline)
-            .appNavigationChrome(backButton: true, cancelSelection: selectedTags.isEmpty ? nil : clearTagSelection)
-            .toolbar {
-                AppToolbarItem(placement: .topBarTrailing) {
-                    if selectedTags.isEmpty { galleryMoreMenu }
-                    else { tagActionsMenu }
-                }
-                if !selectedTags.isEmpty {
-                    AppToolbarItem(placement: .topBarTrailing, tone: .accent) { tagSearchMenu }
-                }
-            }
-            .task { await load() }
-            .onDisappear { favoriteObservation.cancel() }
-            .onAppear(perform: bindFavoriteState)
-            .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in bindFavoriteState() }
-            .onReceive(session.favoriteStateCache.$revision) { _ in favoriteObservation.syncFromCache() }
-            .onChange(of: gallery.id) { _, _ in clearTagSelection() }
-            .onChange(of: current.tags) { _, tags in selectedTagIDs.formIntersection(Set(tags.map(\.id))) }
-            .accessibilityHidden(reader)
-            .fullScreenCover(isPresented: $reader, onDismiss: {
-                if let pending = pendingReaderSearch {
-                    pendingReaderSearch = nil
-                    onSearchQuery(pending.query, pending.site)
-                }
-            }) {
-                ReaderView(gallery: current, currentSearch: currentSearch, onSearchQuery: { query, site in
-                    pendingReaderSearch = (query, site); reader = false
-                })
-            }
-            .sheet(item: $web, onDismiss: { Task { await load() } }) { OfficialWebView(destination: $0) }
-            .sheet(isPresented: $downloadOptions) { GalleryDownloadsView(gallery: current) }
-            .sheet(isPresented: $favoriteEditing) {
-                GalleryFavoriteEditorView(gallery: current, session: session, requestRemoval: favoriteRemoval, preparation: favoriteObservation.preparation(favoriteClient(for: current, session: session), reference: current.ref)) { favoriteObservation.accept($0, form: $1) }
-            }
-            .sheet(item: $tagSearchDraft, onDismiss: {
-                if let pending = pendingSearchSubmission {
-                    pendingSearchSubmission = nil
-                    onSearchQuery(pending.query, pending.site)
-                }
-            }) { draft in
-                DiscoveryComposerView(query: draft.query, site: draft.site, savedID: nil, detailTagSource: draft) { query, site, _ in
-                    pendingSearchSubmission = (query, site)
-                }
-            }
-            .alert("标签操作未完成", isPresented: Binding(get: { tagFailure != nil }, set: { if !$0 { tagFailure = nil } })) {
-                Button("好") { tagFailure = nil }
-            } message: { Text(tagFailure ?? "") }
-    }
-
-    private var galleryMoreMenu: some View {
-        Menu {
-            Button { web = .init(title: "画廊原网页", url: current.ref.url) } label: { Label("站点原网页", systemImage: "safari") }
-                .accessibilityIdentifier("detail.more.site-page")
-            Button { downloadOptions = true } label: { Label("下载", systemImage: "arrow.down") }
-                .disabled(detail == nil).accessibilityIdentifier("detail.more.download")
-            Button { library.toggleReadLater(current) } label: {
-                Label(library.containsReadLater(current) ? "移出稍后再读" : "加入稍后再读", systemImage: "text.badge.plus")
-            }.accessibilityIdentifier("detail.local-bookmark")
-            if case .favorited = favoriteState {
-                Button("取消站点收藏", role: .destructive) { favoriteRemoval = true; favoriteEditing = true }
-                    .accessibilityIdentifier("detail.remove-site-favorite")
-            }
-        } label: { detailMenuLabel }
-            .buttonStyle(.plain)
-            .accessibilityLabel("更多操作").accessibilityIdentifier("detail.more")
-    }
-
-    private var tagActionsMenu: some View {
-        Menu {
-            Button("加入常用标签") { pinTags(selectedTags) }
-                .accessibilityIdentifier("detail.tags.pin")
-            Button("屏蔽所选标签", role: .destructive) { blockTags(selectedTags) }
-                .accessibilityIdentifier("detail.tags.block")
-        } label: { detailMenuLabel }
-            .buttonStyle(.plain)
-            .accessibilityLabel("所选标签操作").accessibilityIdentifier("detail.tags.more")
-    }
-
-    private var tagSearchMenu: some View {
-        Menu {
-            Button { tagSearchDraft = .newSearch(tags: selectedTags, site: current.ref.site) } label: {
-                Label("新建搜索", systemImage: "plus.magnifyingglass")
-                Text("仅使用 \(selectedTags.count) 个所选标签")
-            }.accessibilityIdentifier("detail.tags.new-search")
-            if let currentSearch {
-                Button { tagSearchDraft = .adding(tags: selectedTags, to: currentSearch) } label: {
-                    Label("加入当前搜索", systemImage: "text.badge.plus")
-                    Text(currentSearch.summary)
-                }.accessibilityIdentifier("detail.tags.add-to-search")
-                    .accessibilityHint(currentSearch.summary)
-            }
-        } label: {
-            HStack(spacing: 4) {
-                if typeSize.isAccessibilitySize { Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium)) }
-                else { Text("搜索") }
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-            }
-            .foregroundStyle(Color.accentColor)
-            .padding(.horizontal, 8).frame(minHeight: 44)
-            .appControlSurface(selected: true, verticalInset: 6)
-        }
-        .buttonStyle(.plain)
-        .disabled(!allowsTagSearch)
-        .accessibilityLabel("标签搜索方式").accessibilityIdentifier("detail.tags.search-menu")
-    }
-
-    private var detailMenuLabel: some View {
-        Image(systemName: "ellipsis").font(.system(size: 17, weight: .medium))
-            .foregroundStyle(.primary)
-            .frame(width: 44, height: 44)
-            .appControlSurface(verticalInset: 6)
-    }
-
-    private func toggleTagSelection(_ tag: GalleryTag) {
-        if selectedTagIDs.contains(tag.id) { selectedTagIDs.remove(tag.id) }
-        else { selectedTagIDs.insert(tag.id) }
-        tagFeedback = nil
-        UISelectionFeedbackGenerator().selectionChanged()
-    }
-
-    private func clearTagSelection() { selectedTagIDs.removeAll(); tagFeedback = nil }
-
-    private func pinTags(_ tags: [GalleryTag]) {
-        let existing = Set(library.snapshot.favoriteTags.map(\.id))
-        let count = tags.filter { !existing.contains($0.id) }.count
-        if library.pin(tags) { tagFeedback = count == 0 ? "所选标签已在常用中" : "已加入 \(count) 个常用标签" }
-        else { tagFailure = library.error ?? "标签未能保存，请重试。" }
-    }
-
-    private func blockTags(_ tags: [GalleryTag]) {
-        let additions = tags.filter { !library.blockedIDs.contains($0.id) }
-        if library.block(tags) { lastBlockedTags = additions; clearTagSelection() }
-        else { tagFailure = library.error ?? "标签未能保存，请重试。" }
-    }
-    private var favoriteAccessibilityLabel: String {
-        if case let .favorited(group) = favoriteState { return "\(favoriteTitle)，\(group)" }
-        return favoriteTitle
-    }
-    private func bindFavoriteState() {
-        favoriteObservation.bind(favoriteClient(for: gallery, session: session), reference: gallery.ref,
-                                 cache: session.favoriteStateCache, scope: GalleryFavoriteScope(gallery, session))
-    }
-    private func actionLabel(_ title: String, symbol: String) -> some View {
-        ViewThatFits(in: .horizontal) {
-            Label(title, systemImage: symbol).fixedSize(horizontal: true, vertical: false)
-            Image(systemName: symbol).font(.system(size: 17, weight: .medium)).frame(height: 28)
-        }.frame(maxWidth: .infinity, minHeight: 28)
-    }
-    private func detailLink(title: String, subtitle: String, icon: String, identifier: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: icon).font(.body).foregroundStyle(.secondary).frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.subheadline.weight(.medium)).foregroundStyle(.primary)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                }.fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 10).contentShape(Rectangle())
-        }.buttonStyle(.plain).disabled(AppMode.qa).accessibilityIdentifier(identifier)
-    }
-    private func load() async {
-        let scope = GalleryFavoriteScope(gallery, session)
-        let favoriteVersion = session.favoriteStateCache.entry(scope)?.version
-        if AppMode.qa {
-            detail = QASamples.detail(gallery)
-            session.favoriteStateCache.put(NativeFavoritesQA.detailState(reference: gallery.ref), scope: scope,
-                                           expectedVersion: favoriteVersion, conditional: true)
-            return
-        }
-        let revision = session.generation
-        loading = true; defer { loading = false }
-        do {
-            let value = try EHParser.detail(await session.html(gallery.ref.url), reference: gallery.ref)
-            guard revision == session.generation else { return }
-            detail = value; failure = nil
-            if value.favoriteStateKnown {
-                // This field was already returned with the gallery details.
-                // Reuse it without issuing any favorite-form request.
-                session.favoriteStateCache.put(value.favoriteState, scope: scope,
-                                               expectedVersion: favoriteVersion, conditional: true)
-            }
-        }
-        catch { guard revision == session.generation else { return }; failure = ErrorMessages.message(error, fallback: ViewerError.network.localizedDescription) }
-    }
-}
-
-struct TagWrapLayout: Layout {
-    var spacing: CGFloat
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize { positions(width: proposal.width ?? 320, subviews: subviews).1 }
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) { let points = positions(width: bounds.width, subviews: subviews).0; for (i, point) in points.enumerated() { subviews[i].place(at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y), proposal: .unspecified) } }
-    private func positions(width: CGFloat, subviews: Subviews) -> ([CGPoint], CGSize) {
-        var x: CGFloat = 0, y: CGFloat = 0, height: CGFloat = 0; var points: [CGPoint] = []
-        for subview in subviews { let size = subview.sizeThatFits(.unspecified); if x > 0 && x + size.width > width { x = 0; y += height + spacing; height = 0 }; points.append(CGPoint(x: x, y: y)); x += size.width + spacing; height = max(height, size.height) }
-        return (points, CGSize(width: width, height: y + height))
     }
 }

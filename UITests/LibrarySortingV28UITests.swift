@@ -16,7 +16,7 @@ final class LibrarySortingV28UITests: XCTestCase {
     private func openHistory(_ app: XCUIApplication) {
         app.buttons["main.tab.discover"].tap()
         app.buttons["discover.history"].tap()
-        XCTAssertTrue(app.navigationBars["阅读历史"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["阅读历史"].waitForExistence(timeout: 5))
     }
     private func choose(_ app: XCUIApplication, section: String, title: String, up: Bool = true) {
         if section != "history" { scope(app, section == "downloads" ? 3 : 0) }
@@ -32,7 +32,24 @@ final class LibrarySortingV28UITests: XCTestCase {
         XCTAssertLessThan(rows[0].frame.minY, rows[1].frame.minY); XCTAssertLessThan(rows[1].frame.minY, rows[2].frame.minY)
     }
     func testHistorySortPersistsAcrossDetailReturnTabReturnAndRelaunch() {
-        let app = openLibrary(); openHistory(app); assertHistory(app, [7203, 7202, 7201])
+        let app = openLibrary(extra: ["--qa-dark"]); openHistory(app); assertHistory(app, [7203, 7202, 7201])
+        let header = app.descendants(matching: .any)["reading-history.header.floating"].firstMatch
+        let title = app.staticTexts["reading-history.title"]
+        let close = app.buttons["reading-history.close"]
+        let sort = app.buttons["reading-history.sort"]
+        XCTAssertEqual(title.frame.midX, header.frame.midX, accuracy: 1)
+        XCTAssertEqual(close.frame.minX - header.frame.minX, 4, accuracy: 1)
+        XCTAssertEqual(header.frame.maxX - sort.frame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(close.frame.midY, sort.frame.midY, accuracy: 1)
+        XCTAssertEqual(title.frame.midY, sort.frame.midY, accuracy: 2)
+        XCTAssertEqual(title.frame.minX - close.frame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(sort.frame.minX - title.frame.maxX, 4, accuracy: 1)
+        XCTAssertTrue(app.descendants(matching: .any)["reading-history.summary"].firstMatch.exists)
+        XCTAssertFalse(app.navigationBars["阅读历史"].exists)
+        let historyShot = XCTAttachment(screenshot: app.screenshot())
+        historyShot.name = "discover-history-floating-header"
+        historyShot.lifetime = .keepAlways
+        add(historyShot)
         choose(app, section: "history", title: "最早阅读"); assertHistory(app, [7201, 7202, 7203])
         choose(app, section: "history", title: "标题"); assertHistory(app, [7202, 7203, 7201])
         app.buttons["reading-history.item.7202"].tap()

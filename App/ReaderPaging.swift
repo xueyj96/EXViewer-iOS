@@ -94,3 +94,55 @@ enum ReaderDragPolicy {
         return hasNeighbor ? clamped : clamped * 0.16
     }
 }
+
+/// State for one adjacent turn. The view owns animation and commits the page;
+/// the media store only sees which neighbor needs foreground priority.
+struct ReaderSinglePageTurn {
+    enum DragPhase: Equatable {
+        case idle
+        case dragging(extent: CGFloat)
+        case settling(UUID)
+    }
+
+    enum Release: Equatable {
+        case rebound
+        case waitForPresentation(Int)
+        case commit(Int)
+    }
+
+    var dragPhase: DragPhase = .idle
+    var dragOffset: CGFloat = 0
+    var dragPreview: Int?
+    var pendingPage: Int?
+
+    var isDraggingOrSettling: Bool { dragPhase != .idle }
+    var requestedNeighbor: Int? { dragPreview ?? pendingPage }
+
+    func release(commit: Bool, isPresented: (Int) -> Bool) -> Release {
+        guard commit, let target = dragPreview else { return .rebound }
+        return isPresented(target) ? .commit(target) : .waitForPresentation(target)
+    }
+
+    mutating func resetDrag() {
+        dragPhase = .idle
+        dragOffset = 0
+        dragPreview = nil
+    }
+
+    mutating func cancel() {
+        pendingPage = nil
+        resetDrag()
+    }
+}
+
+enum ReaderEdgeBackPolicy {
+    static let leadingInset: CGFloat = 20
+
+    static func isLeadingSwipe(startX: CGFloat, translation: CGSize) -> Bool {
+        (0...leadingInset).contains(startX) && translation.width > abs(translation.height) * 1.4
+    }
+
+    static func completes(startX: CGFloat, translation: CGSize) -> Bool {
+        translation.width >= 56 && isLeadingSwipe(startX: startX, translation: translation)
+    }
+}

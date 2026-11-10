@@ -3,6 +3,15 @@ import UIKit
 @testable import ExViewer
 
 @MainActor final class StaticCoverTests: XCTestCase {
+    func testPortraitCoverCropsModerateAspectsAndFitsExtremeImages() {
+        let frame = CGSize(width: 68, height: 102)
+        XCTAssertEqual(StaticCover.portraitCoverMode(image: CGSize(width: 120, height: 180), frame: frame), .fill)
+        XCTAssertEqual(StaticCover.portraitCoverMode(image: CGSize(width: 100, height: 120), frame: frame), .fill)
+        XCTAssertEqual(StaticCover.portraitCoverMode(image: CGSize(width: 1200, height: 300), frame: frame), .fit)
+        XCTAssertEqual(StaticCover.portraitCoverMode(image: CGSize(width: 300, height: 2400), frame: frame), .fit)
+        XCTAssertEqual(StaticCover.portraitCoverMode(image: .zero, frame: frame), .fit)
+    }
+
     private actor ControlledDecoder: StaticCoverImageDecoding {
         private var requests: [String] = []
         private var continuations: [String: CheckedContinuation<UIImage?, Never>] = [:]

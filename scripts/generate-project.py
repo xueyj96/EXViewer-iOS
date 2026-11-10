@@ -78,14 +78,14 @@ for config in ['Debug', 'Release']:
     shared = 'CLANG_ENABLE_MODULES = YES; SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 5.0;'
     obj('project-' + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{{shared}}};')
     settings = '''PRODUCT_BUNDLE_IDENTIFIER = com.xueyj.exviewer; PRODUCT_NAME = "$(TARGET_NAME)";
-    GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = ExViewer;
+    GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = App/Info.plist; INFOPLIST_KEY_CFBundleDisplayName = ExViewer;
     INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
     INFOPLIST_KEY_UILaunchScreen_Generation = YES;
     INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
     INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-    CURRENT_PROJECT_VERSION = 55; MARKETING_VERSION = 0.1.0;
+    CURRENT_PROJECT_VERSION = 102; MARKETING_VERSION = 1.0.0;
     TARGETED_DEVICE_FAMILY = "1,2"; CODE_SIGN_STYLE = Automatic;
     "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
     "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = YES;

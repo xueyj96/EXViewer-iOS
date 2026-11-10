@@ -7,7 +7,7 @@ final class TagSuggestionsTests: XCTestCase {
         XCTAssertEqual(TagSuggestionRequest.text(prefix: " EnGLISh ", namespace: " ALL "), "english")
         XCTAssertEqual(TagSuggestionRequest.text(prefix: " GLI ", namespace: " LANGUAGE "), "language:gli")
         XCTAssertEqual(TagSuggestionRequest.exactText(for: .init(namespace: "LANGUAGE", name: "EnGLISh")), "language:english$")
-        let item = TagSuggestion(tag: .init(namespace: "language", name: "English"), source: .site, chineseName: nil, relatedMaster: nil)
+        let item = TagSuggestion(tag: .init(namespace: "language", name: "English"), source: .site, chineseName: nil, matchedAlias: nil)
         XCTAssertEqual(TagSuggestionRequest.matching([item], namespace: " LANGUAGE "), [item])
     }
 
@@ -40,9 +40,25 @@ final class TagSuggestionsTests: XCTestCase {
         XCTAssertEqual(Set(model.items.map(\.id)).count, model.items.count)
     }
 
+    @MainActor func testCancellingRemoteSuggestionsClearsLoadingAndKeepsLocalCandidates() async throws {
+        let catalog = TagTranslationCatalog(version: "fixture", source: "test", commit: "fixture", license: "test",
+                                            updatedAt: nil, namespaces: ["language": ["English": "英语"]])
+        let model = TagSuggestionModel(catalog: catalog)
+        model.update(prefix: "eng", namespace: "language", session: SiteSession(qa: true), qa: true,
+                     arguments: ["--qa-tags-delayed"])
+        for _ in 0..<100 where model.items.isEmpty {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.state, .loading)
+        XCTAssertEqual(model.items.map(\.id), ["language:english"])
+        model.cancel()
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.items.map(\.id), ["language:english"])
+    }
+
     func testMergedCandidatesRankExactThenPrefixThenInteriorFragment() {
         let names = ["learn english", "English reader", "ENGLISH"]
-        let items = names.map { TagSuggestion(tag: .init(namespace: "other", name: $0), source: .dictionary, chineseName: nil, relatedMaster: nil) }
+        let items = names.map { TagSuggestion(tag: .init(namespace: "other", name: $0), source: .dictionary, chineseName: nil, matchedAlias: nil) }
         XCTAssertEqual(TagSuggestionRequest.ranked(items, prefix: "eNgLiSh").map(\.tag.name), ["ENGLISH", "English reader", "learn english"])
     }
 
@@ -71,22 +87,31 @@ final class TagSuggestionsTests: XCTestCase {
         }
     }
 
-    @MainActor func testUnsupportedCandidateRemainsUnselectableWhenReusedFromCache() async {
-        let unsupported = TagSuggestion(tag: .init(namespace: "temp", name: "temporary"), source: .unsupported,
-                                        chineseName: nil, relatedMaster: nil)
-        let cached = TagSuggestionModel.cached(unsupported)
-        XCTAssertEqual(cached.source, .unsupported)
-        XCTAssertFalse(TagSuggestionRequest.isSelectable(cached.tag))
-        let cachedAgain = TagSuggestionModel.cached(cached)
-        XCTAssertEqual(cachedAgain.source, .unsupported)
-        XCTAssertFalse(TagSuggestionRequest.isSelectable(cachedAgain.tag))
+    @MainActor func testSiteAliasRanksByMatchedNameAndKeepsCanonicalTagInCache() throws {
+        let payload = Data(#"{"tags":{"1":{"ns":"temp","tn":"deformation","mns":"female","mtn":"defloration"},"2":{"ns":"female","tn":"defloration"},"3":{"ns":"female","tn":"stomach deformation"},"4":{"ns":"temp","tn":"skin deformation","mns":"female","mtn":"defloration"}}}"#.utf8)
+        let items = try EHTagSuggestionResponse.parse(payload)
+        let results = TagSuggestionRequest.ranked(items, prefix: "DeFORMATION", limit: 2)
+        XCTAssertEqual(results.map(\.id), ["female:defloration", "female:stomach deformation"])
+        let first = try XCTUnwrap(results.first)
+        XCTAssertEqual(first.matchedAlias?.id, "temp:deformation")
+        let cached = TagSuggestionModel.cached(first)
+        XCTAssertEqual(cached.source, .cached)
+        XCTAssertEqual(cached.id, first.id)
+        XCTAssertEqual(cached.matchedAlias, first.matchedAlias)
+        let direct = TagSuggestionRequest.ranked(items, prefix: "defloration").first
+        XCTAssertEqual(direct?.id, first.id)
+        XCTAssertNil(direct?.matchedAlias)
+
+        var search = SearchQuery()
+        search.rules = [TagRule(tag: cached.tag, match: .exclude)]
+        XCTAssertEqual(try search.expression(), #"-female:"defloration"$"#)
     }
     func testOfficialPayloadUsesNumericMapKeysAndOptionalSlaveMetadata() throws {
         let data = Data(#"{"tags":{"1058":{"ns":"language","tn":"english"},"7":{"tn":"sample","mns":"other","mtn":"root"}}}"#.utf8)
         let values = try EHTagSuggestionResponse.parse(data)
-        XCTAssertEqual(values.map(\.tag.id), ["language:english", "other:sample"])
-        XCTAssertEqual(values.first?.relatedMaster, nil)
-        XCTAssertEqual(values.last?.relatedMaster, GalleryTag(namespace: "other", name: "root"))
+        XCTAssertEqual(values.map(\.tag.id), ["language:english", "other:root"])
+        XCTAssertNil(values.first?.matchedAlias)
+        XCTAssertEqual(values.last?.matchedAlias, GalleryTag(namespace: "other", name: "sample"))
     }
 
     func testEmptyArrayIsValidNoResultsPayload() throws {
@@ -102,13 +127,14 @@ final class TagSuggestionsTests: XCTestCase {
         }
     }
 
-    func testAllNamespaceRequestUsesPlainPrefixAndRetainsEveryReturnedNamespace() throws {
-        let payload = Data(#"{"tags":{"1":{"ns":"language","tn":"english"},"2":{"ns":"temp","tn":"temporary"}}}"#.utf8)
+    func testAllNamespaceRequestUsesPlainPrefixAndHidesUnusableCandidates() throws {
+        let payload = Data(#"{"tags":{"1":{"ns":"language","tn":"english"},"2":{"ns":"temp","tn":"temporary"},"3":{"ns":"temp","tn":"sample","mns":"artist","mtn":"primary artist"},"4":{"ns":"artist","tn":"broken link","mns":"temp","mtn":"unsupported"},"5":{"ns":"temp","tn":"incomplete","mns":"artist","mtn":" "}}}"#.utf8)
         let parsed = try EHTagSuggestionResponse.parse(payload)
         XCTAssertEqual(TagSuggestionRequest.text(prefix: "english", namespace: "all"), "english")
         XCTAssertEqual(TagSuggestionRequest.text(prefix: "eng", namespace: "language"), "language:eng")
-        XCTAssertEqual(TagSuggestionRequest.matching(parsed, namespace: "all").map(\.tag.namespace), ["language", "temp"])
+        XCTAssertEqual(TagSuggestionRequest.matching(parsed, namespace: "all").map(\.id), ["artist:primary artist", "language:english"])
         XCTAssertEqual(TagSuggestionRequest.matching(parsed, namespace: "language").map(\.tag.namespace), ["language"])
+        XCTAssertEqual(TagSuggestionRequest.matching(parsed, namespace: "artist").map(\.id), ["artist:primary artist"])
         XCTAssertTrue(TagSuggestionRequest.isSelectable(GalleryTag(namespace: "language", name: "english")))
         XCTAssertFalse(TagSuggestionRequest.isSelectable(GalleryTag(namespace: "temp", name: "temporary")))
     }

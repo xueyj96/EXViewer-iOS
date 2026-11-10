@@ -83,24 +83,24 @@ actor StaticCoverImageCache: StaticCoverImageDecoding {
 
     private func incrementDecodeCount() { decodeCount += 1 }
 
-    private static func decode(file: URL, maxPixelSize: Int) async -> UIImage? {
+    static func decode(file: URL, maxPixelSize: Int) async -> UIImage? {
         await withCheckedContinuation { continuation in
             operationQueue.addOperation {
-                guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
-                    continuation.resume(returning: nil); return
-                }
-                let options: [CFString: Any] = [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceShouldCacheImmediately: true
-                ]
-                guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-                    continuation.resume(returning: nil); return
-                }
-                continuation.resume(returning: UIImage(cgImage: thumbnail))
+                continuation.resume(returning: decodeThumbnail(file: file, maxPixelSize: maxPixelSize).map { UIImage(cgImage: $0) })
             }
         }
+    }
+
+    static func decodeThumbnail(file: URL, maxPixelSize: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     private static func cost(of image: UIImage) -> Int {
@@ -167,6 +167,7 @@ struct StaticCover: View {
     let requestIdentity: String
     var contentMode: ContentMode = .fit
     var alignment: Alignment = .center
+    var fitsExtremeAspects = false
     var onDecodeFailure: (() -> Void)? = nil
 
     @Environment(\.displayScale) private var displayScale
@@ -174,15 +175,16 @@ struct StaticCover: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let pixels = max(geometry.size.width, geometry.size.height) * displayScale
-            let targetSize = max(64, min(1024, Int(ceil(pixels / 64)) * 64))
+            let targetSize = Self.thumbnailPixelSize(for: geometry.size, scale: displayScale)
             let request = LoadRequest(file: file.standardizedFileURL, context: contextIdentity,
                                       request: requestIdentity, maxPixelSize: targetSize)
             Group {
                 if model.contextIdentityMatches(contextIdentity), let image = model.image {
                     Image(uiImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: contentMode)
+                        .aspectRatio(contentMode: fitsExtremeAspects
+                                     ? Self.portraitCoverMode(image: image.size, frame: geometry.size)
+                                     : contentMode)
                         .frame(width: geometry.size.width, height: geometry.size.height, alignment: alignment)
                         .clipped()
                         .accessibilityLabel("画廊封面").accessibilityIdentifier("cover.decoded-image")
@@ -198,6 +200,20 @@ struct StaticCover: View {
         }
         .onChange(of: contextIdentity) { _, newIdentity in model.updateContext(newIdentity) }
         .onDisappear { model.invalidateRequest() }
+    }
+
+    static func portraitCoverMode(image: CGSize, frame: CGSize) -> ContentMode {
+        guard image.width > 0, image.height > 0, frame.width > 0, frame.height > 0 else {
+            return .fit
+        }
+        // Fit instead of cropping when filling would discard over a third of the upright image.
+        let aspectRelativeToFrame = (image.width / image.height) / (frame.width / frame.height)
+        return min(aspectRelativeToFrame, 1 / aspectRelativeToFrame) < 2.0 / 3 ? .fit : .fill
+    }
+
+    static func thumbnailPixelSize(for size: CGSize, scale: CGFloat) -> Int {
+        let pixels = min(1024, max(size.width, size.height) * scale)
+        return max(64, Int(ceil(pixels / 64)) * 64)
     }
 
     private struct LoadRequest: Hashable {

@@ -26,7 +26,7 @@ import ExViewerCore
         let reopened = LibraryStore(qa: true, storageRoot: root)
         let saved = try XCTUnwrap(reopened.snapshot.bookmarks.first)
         XCTAssertNil(saved.cover); XCTAssertNil(reopened.snapshot.history.first?.gallery.cover)
-        let resolver = StoredCoverResolver(batchDelay: 0, interval: 0)
+        let resolver = StoredCoverResolver(batchDelay: 0)
         var calls = 0
         let fetch: StoredCoverResolver.Fetch = { batch in
             calls += 1
@@ -45,7 +45,7 @@ import ExViewerCore
     }
 
     func testVisibleRequestsBatchAt25AndDuplicateConsumersShareOneSource() async throws {
-        let resolver = StoredCoverResolver(batchDelay: 5_000_000, interval: 0)
+        let resolver = StoredCoverResolver(batchDelay: 5_000_000)
         var batches: [[Int64]] = []
         let fetch: StoredCoverResolver.Fetch = { batch in batches.append(batch.map(\.ref.gid)); return self.resolved(batch) }
         let tasks = (1...60).map { id in Task { try await resolver.source(for: gallery(Int64(id)).stored, context: "owner-a", fetch: fetch) } }
@@ -56,7 +56,7 @@ import ExViewerCore
     }
 
     func testCancellingOneConsumerKeepsTheOtherConsumerAndWarmResult() async throws {
-        let resolver = StoredCoverResolver(batchDelay: 1_000_000, interval: 0)
+        let resolver = StoredCoverResolver(batchDelay: 1_000_000)
         var reply: CheckedContinuation<[Gallery], Error>?
         var calls = 0
         let fetch: StoredCoverResolver.Fetch = { _ in calls += 1; return try await withCheckedThrowingContinuation { reply = $0 } }
@@ -71,7 +71,7 @@ import ExViewerCore
     }
 
     func testAccountChangeRejectsLateSourceFromPreviousContext() async throws {
-        let resolver = StoredCoverResolver(batchDelay: 0, interval: 0)
+        let resolver = StoredCoverResolver(batchDelay: 0)
         var oldReply: CheckedContinuation<[Gallery], Error>?
         let old = Task { try await resolver.source(for: gallery(1).stored, context: "owner-a", fetch: { _ in
             try await withCheckedThrowingContinuation { oldReply = $0 }
@@ -86,7 +86,7 @@ import ExViewerCore
     }
 
     func testMissingSourceShowsFailureAndExplicitRetryCanRecover() async throws {
-        let resolver = StoredCoverResolver(batchDelay: 0, interval: 0)
+        let resolver = StoredCoverResolver(batchDelay: 0)
         do {
             _ = try await resolver.source(for: gallery(1).stored, context: "a", fetch: { $0 })
             XCTFail("Missing metadata cover must not silently succeed")
@@ -100,7 +100,7 @@ import ExViewerCore
     }
 
     func testResolvedSourceCacheIsBoundedAndSessionChangesRefetch() async throws {
-        let resolver = StoredCoverResolver(cacheLimit: 2, batchDelay: 0, interval: 0)
+        let resolver = StoredCoverResolver(cacheLimit: 2, batchDelay: 0)
         var calls = 0
         let fetch: StoredCoverResolver.Fetch = { calls += 1; return self.resolved($0) }
         for id in 1...3 { _ = try await resolver.source(for: gallery(Int64(id)).stored, context: "owner/session1", fetch: fetch) }

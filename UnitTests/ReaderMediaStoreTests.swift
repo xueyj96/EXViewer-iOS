@@ -87,6 +87,25 @@ import ExViewerCore
         store.reset()
     }
 
+    func testReaderBackgroundDrainsActivePagesBeforeResumingTheWindow() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader()
+        store.update(scope: scope(), pages: pages(6), current: 1, prefetchCount: 5,
+                     loader: { try await loader.load($0, $1) }, isCurrent: { true })
+        let started = await waitForLoaderCalls(loader, count: 2)
+        XCTAssertTrue(started)
+        store.setForeground(false)
+        for call in loader.calls { loader.resolve(call, as: "background-\(call.page)") }
+        await settle()
+        XCTAssertEqual(Set(store.files.keys), [1, 2])
+        XCTAssertEqual(loader.calls.count, 2)
+
+        store.setForeground(true)
+        let resumed = await waitForLoaderCalls(loader, count: 3)
+        XCTAssertTrue(resumed)
+        XCTAssertEqual(loader.calls[2].page, 3)
+        store.reset()
+    }
+
     func testSixPrefetchBoundaryAndSinglePrefetchPump() async throws {
         let store = ReaderMediaStore(), loader = ControlledLoader(), scope = scope()
         store.update(scope: scope, pages: pages(), current: 1, prefetchCount: 6,
@@ -374,7 +393,7 @@ import ExViewerCore
     }
 
     func testForegroundWaiterPrecedesPrefetchAndGateReservesOnePermit() async throws {
-        let gate = TransferGate(limit: 3)
+        let gate = TransferGate(limit: 3, totalLimit: MediaTransferClient.maxConnections)
         try await gate.acquire(priority: .prefetch)
         try await gate.acquire()
         try await gate.acquire()
@@ -399,6 +418,46 @@ import ExViewerCore
         try await low.value
         let completed = await events.values()
         XCTAssertEqual(completed, ["foreground", "prefetch"])
+    }
+
+    func testThirtyTwoOfflineTransfersLeaveOneSlotForVisibleReading() async throws {
+        let gate = TransferGate(limit: ReaderLoadPolicy.maxConcurrency, totalLimit: MediaTransferClient.maxConnections)
+        let events = GateEvents()
+        let downloads = (0..<32).map { _ in
+            Task {
+                let lease = try await gate.acquire(request: MediaRequestDemand(priority: .download))
+                await events.append("download")
+                return lease
+            }
+        }
+        defer { downloads.forEach { $0.cancel() } }
+        for _ in 0..<100 {
+            if await events.values().count == 32 { break }
+            await settle()
+        }
+        let downloadCount = await events.values().count
+        XCTAssertEqual(downloadCount, 32)
+        guard downloadCount == 32 else { return }
+
+        let queued = Task { try await gate.acquire(request: MediaRequestDemand(priority: .download)) }
+        defer { queued.cancel() }
+        let visible = Task {
+            let lease = try await gate.acquire(request: MediaRequestDemand())
+            await events.append("visible")
+            return lease
+        }
+        defer { visible.cancel() }
+        for _ in 0..<100 {
+            if await events.values().last == "visible", await gate.queuedCount == 1 { break }
+            await settle()
+        }
+        let last = await events.values().last, waiting = await gate.queuedCount
+        XCTAssertEqual(last, "visible")
+        XCTAssertEqual(waiting, 1, "The extra offline transfer must wait while the reader uses the reserved slot")
+        guard last == "visible", waiting == 1 else { return }
+        await gate.release(priority: try await visible.value)
+        for download in downloads { await gate.release(priority: try await download.value) }
+        await gate.release(priority: try await queued.value)
     }
     func testFingerDemandAtZeroPrefetchRetainsItsCompletedNeighborOnRelease() async throws {
         let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()

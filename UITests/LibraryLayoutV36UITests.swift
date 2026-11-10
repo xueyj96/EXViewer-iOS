@@ -23,10 +23,11 @@ final class LibraryLayoutV36UITests: XCTestCase {
         waitForExpectations(timeout: 5)
     }
 
-    private func assertActions(_ app: XCUIApplication) {
+    private func assertActions(_ app: XCUIApplication, managing: Bool = false) {
         let bar = app.descendants(matching: .any)["favorites.actions"].firstMatch
         XCTAssertTrue(bar.waitForExistence(timeout: 5))
-        for name in ["favorites.select-all", "favorites.move", "favorites.remove"] {
+        let actions = managing ? ["favorites.move", "favorites.remove", "favorites.back"] : ["favorites.add-read-later", "favorites.download", "favorites.manage"]
+        for name in actions {
             let button = app.buttons[name]
             XCTAssertTrue(button.exists && button.isHittable && button.isEnabled, name)
             XCTAssertGreaterThanOrEqual(button.frame.width + 0.000_001, 44, name)
@@ -38,6 +39,14 @@ final class LibraryLayoutV36UITests: XCTestCase {
         XCTAssertFalse(app.buttons["main.tab.library"].exists)
     }
 
+    private func assertSameBarFrame(_ actual: CGRect, as expected: CGRect,
+                                    file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 1, file: file, line: line)
+    }
+
     private func capture(_ app: XCUIApplication, _ name: String) {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
@@ -45,19 +54,51 @@ final class LibraryLayoutV36UITests: XCTestCase {
 
     func testBulkRemoveAndMoveAreReachableAndMainTabsRestoreAfterCompletion() {
         let app = openLibrary()
+        let normalFrame = app.buttons["favorites.gallery.10000"].frame
+        let tabs = app.descendants(matching: .any)["main.tabs.compact"].firstMatch
+        let normalBarFrame = tabs.frame
         selectFirst(app); assertActions(app)
-        capture(app, "library36.bulk-actions")
+        let actions = app.descendants(matching: .any)["favorites.actions"].firstMatch
+        assertSameBarFrame(actions.frame, as: normalBarFrame)
+        let card = app.buttons["favorites.select.10000"]
+        let cardFrame = card.frame
+        XCTAssertEqual(cardFrame.width, normalFrame.width, accuracy: 1)
+        XCTAssertEqual(cardFrame.height, normalFrame.height, accuracy: 1)
+        let manageFrame = app.buttons["favorites.manage"].frame
+        XCTAssertFalse(app.buttons["favorites.favorite"].exists)
+        capture(app, "batch-favorites.selection")
+        app.buttons["favorites.manage"].tap()
+        assertActions(app, managing: true)
+        assertSameBarFrame(actions.frame, as: normalBarFrame)
+        let back = app.buttons["favorites.back"]
+        XCTAssertEqual(back.frame.midX, manageFrame.midX, accuracy: 1)
+        XCTAssertEqual(back.frame.midY, manageFrame.midY, accuracy: 1)
+        XCTAssertEqual(card.frame.minY, cardFrame.minY, accuracy: 1)
+        XCTAssertEqual(card.frame.size, cardFrame.size)
+        XCTAssertEqual(card.value as? String, "已选中")
+        XCTAssertFalse(app.buttons["favorites.add-read-later"].exists)
+        capture(app, "batch-favorites.manage")
         app.buttons["favorites.remove"].tap()
         XCTAssertTrue(app.buttons["移除所选收藏"].waitForExistence(timeout: 4))
         app.buttons["取消"].tap()
-        assertActions(app)
+        assertActions(app, managing: true)
         app.buttons["favorites.move"].tap()
         let destination = app.buttons["favorites.move-to.0"]
-        XCTAssertTrue(destination.waitForExistence(timeout: 4)); destination.tap()
-        XCTAssertTrue(app.buttons["确认移动"].waitForExistence(timeout: 4))
-        app.buttons["取消"].tap()
+        XCTAssertTrue(destination.waitForExistence(timeout: 4))
+        let confirm = app.buttons["favorites.confirm-move"]
+        XCTAssertFalse(confirm.isEnabled)
+        destination.tap()
+        XCTAssertTrue(confirm.isEnabled)
+        capture(app, "batch-favorites.groups")
+        app.buttons["favorites.groups.back"].tap()
+        assertActions(app, managing: true)
+        XCTAssertEqual(card.value as? String, "已选中")
+        app.buttons["favorites.back"].tap()
+        assertActions(app)
+        app.buttons["favorites.manage"].tap()
         app.buttons["favorites.remove"].tap(); app.buttons["移除所选收藏"].tap()
         XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 5))
+        assertSameBarFrame(tabs.frame, as: normalBarFrame)
         XCTAssertFalse(app.buttons["favorites.remove"].exists)
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "未修改站点收藏")).firstMatch.waitForExistence(timeout: 5))
     }
@@ -65,8 +106,10 @@ final class LibraryLayoutV36UITests: XCTestCase {
     func testLargeTypeBulkActionsRemainSingleRowAndExitRestoresNavigation() {
         let app = openLibrary(["--qa-large-type", "--qa-dark"])
         selectFirst(app); assertActions(app)
-        let all = app.buttons["favorites.select-all"], remove = app.buttons["favorites.remove"]
-        XCTAssertEqual(all.frame.midY, remove.frame.midY, accuracy: 1)
+        app.buttons["favorites.manage"].tap()
+        assertActions(app, managing: true)
+        let move = app.buttons["favorites.move"], remove = app.buttons["favorites.remove"]
+        XCTAssertEqual(move.frame.midY, remove.frame.midY, accuracy: 1)
         XCTAssertLessThanOrEqual(remove.frame.height, 48.000_001)
         capture(app, "library36.large-type-actions")
         remove.tap()
@@ -104,7 +147,7 @@ final class LibraryLayoutV36UITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 12)); app.buttons["main.tab.library"].tap()
         app.buttons["library.scope.3"].tap()
-        let read = app.buttons["离线阅读"].firstMatch
+        let read = app.buttons["library.download.item.1"]
         XCTAssertTrue(read.waitForExistence(timeout: 5)); read.tap()
         XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 8))
         let tabs = app.descendants(matching: .any)["main.tabs.compact"].firstMatch

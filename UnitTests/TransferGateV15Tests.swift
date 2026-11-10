@@ -14,6 +14,43 @@ final class TransferGateV15Tests: XCTestCase {
         }
         return await predicate()
     }
+    func testVisibleCoverOvertakesQueuedCoverLookahead() async throws {
+        let gate = TransferGate(limit: 3)
+        let active = try await gate.acquire(request: MediaRequestDemand(priority: .thumbnail))
+        let foreground = try await gate.acquire(request: MediaRequestDemand(priority: .foreground))
+        let results = Results()
+        func request(_ priority: MediaRequestPriority) -> Task<MediaRequestPriority, Error> {
+            Task {
+                let lease = try await gate.acquire(request: MediaRequestDemand(priority: priority))
+                await results.append(lease)
+                return lease
+            }
+        }
+
+        let upcoming = request(.thumbnailPrefetch)
+        defer { upcoming.cancel() }
+        let upcomingQueued = await waitUntil { await gate.queuedCount == 1 }
+        XCTAssertTrue(upcomingQueued)
+        let visible = request(.thumbnail)
+        defer { visible.cancel() }
+        let bothQueued = await waitUntil { await gate.queuedCount == 2 }
+        XCTAssertTrue(bothQueued)
+        guard upcomingQueued, bothQueued else { return }
+
+        await gate.release(priority: active)
+        let acquired = await waitUntil { await results.count() == 1 }
+        XCTAssertTrue(acquired)
+        let first = await results.leases.first
+        XCTAssertEqual(first, .thumbnail)
+        guard first == .thumbnail else { return }
+
+        await gate.release(priority: try await visible.value)
+        let lookaheadStarted = await waitUntil { await results.count() == 2 }
+        XCTAssertTrue(lookaheadStarted)
+        if lookaheadStarted { await gate.release(priority: try await upcoming.value) }
+        await gate.release(priority: foreground)
+    }
+
     func testSixteenPermitsAreActuallyUsableAndSeventeenthWaits() async throws {
         let gate = TransferGate(limit: 16, prefetchLimit: 15, allowFullWithForeground: true), results = Results()
         let current = try await gate.acquire(request: MediaRequestDemand(priority: .foreground))

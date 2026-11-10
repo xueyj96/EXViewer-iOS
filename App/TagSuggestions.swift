@@ -3,15 +3,16 @@ import Combine
 import ExViewerCore
 
 struct TagSuggestion: Identifiable, Equatable, Sendable {
-    enum Source: Equatable, Sendable { case site, cached, dictionary, saved, unsupported, qaFixture }
+    enum Source: Equatable, Sendable { case site, cached, dictionary, saved, qaFixture }
     let tag: GalleryTag
     let source: Source
     let chineseName: String?
-    let relatedMaster: GalleryTag?
+    let matchedAlias: GalleryTag?
     var id: String { tag.id }
 }
 
 struct TagTranslationCatalog: Decodable, Sendable {
+    static let bundled = load()
     let version: String
     let source: String
     let commit: String
@@ -46,7 +47,7 @@ struct TagTranslationCatalog: Decodable, Sendable {
                 if visited.isMultiple(of: 128), Self.currentTaskIsCancelled { return [] }
                 guard let score = TagSuggestionRequest.matchRank(original: raw, chinese: chinese, normalizedPrefix: needle) else { continue }
                 let suggestion = TagSuggestion(tag: GalleryTag(namespace: key, name: raw), source: .dictionary,
-                                               chineseName: chinese.isEmpty ? nil : chinese, relatedMaster: nil)
+                                               chineseName: chinese.isEmpty ? nil : chinese, matchedAlias: nil)
                 let insertion = best.firstIndex {
                     $0.score > score || ($0.score == score && $0.suggestion.tag.id.localizedStandardCompare(suggestion.tag.id) == .orderedDescending)
                 } ?? best.endIndex
@@ -105,12 +106,11 @@ struct EHTagSuggestionResponse: Decodable, Sendable {
             guard let raw = value.tn?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
             let namespace = (value.ns?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()).flatMap { $0.isEmpty ? nil : $0 } ?? "other"
             guard namespace.utf8.count <= 32, namespace.unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0) }) else { return nil }
-            let master: GalleryTag? = {
-                guard let masterNamespace = value.mns, let masterName = value.mtn, !masterName.isEmpty else { return nil }
-                return GalleryTag(namespace: masterNamespace, name: masterName)
-            }()
-            return TagSuggestion(tag: GalleryTag(namespace: namespace, name: raw), source: .site,
-                                 chineseName: nil, relatedMaster: master)
+            let original = GalleryTag(namespace: namespace, name: raw)
+            let master = GalleryTag(namespace: value.mns ?? "", name: value.mtn ?? "")
+            let tag = master.namespace.isEmpty && master.name.isEmpty ? original : master
+            guard TagSuggestionRequest.isSelectable(tag), !tag.name.isEmpty else { return nil }
+            return TagSuggestion(tag: tag, source: .site, chineseName: nil, matchedAlias: original.id == tag.id ? nil : original)
         }
         .sorted { $0.tag.id.localizedStandardCompare($1.tag.id) == .orderedAscending }
     }
@@ -150,14 +150,20 @@ enum TagSuggestionRequest {
     static func ranked(_ items: [TagSuggestion], prefix: String, limit: Int = 20) -> [TagSuggestion] {
         let needle = normalized(prefix)
         var scored: [(item: TagSuggestion, score: Int)] = items.map { item in
-            let score = matchRank(original: item.tag.name, chinese: item.chineseName, normalizedPrefix: needle) ?? 3
-            return (item: item, score: score)
+            let nameRank = matchRank(original: item.tag.name, chinese: item.chineseName, normalizedPrefix: needle)
+            let aliasRank = item.matchedAlias.flatMap { matchRank(original: $0.name, chinese: nil, normalizedPrefix: needle) }
+            return (item: item, score: min(nameRank ?? 3, aliasRank ?? 3))
         }
         scored.sort { left, right in
             if left.score != right.score { return left.score < right.score }
-            return left.item.id.localizedStandardCompare(right.item.id) == .orderedAscending
+            if left.item.id != right.item.id {
+                return left.item.id.localizedStandardCompare(right.item.id) == .orderedAscending
+            }
+            return (left.item.matchedAlias?.id ?? "") < (right.item.matchedAlias?.id ?? "")
         }
-        return scored.prefix(max(0, limit)).map { $0.item }
+        var seen = Set<String>()
+        let unique = scored.filter { seen.insert($0.item.id).inserted }
+        return unique.prefix(max(0, limit)).map(\.item)
     }
 
     static func isSelectable(_ tag: GalleryTag) -> Bool { selectableNamespaces.contains(tag.namespace) }
@@ -234,7 +240,7 @@ enum TagVerification: Equatable {
     private let suggestionLimit = 20
     private let networkPacer = TagSuggestionPacer()
 
-    init(catalog: TagTranslationCatalog? = .load()) { self.catalog = catalog }
+    init(catalog: TagTranslationCatalog? = .bundled) { self.catalog = catalog }
 
     func update(prefix raw: String, namespace: String, session: SiteSession, qa: Bool, arguments: [String] = ProcessInfo.processInfo.arguments) {
         task?.cancel()
@@ -269,6 +275,7 @@ enum TagVerification: Equatable {
                     state = .failed("测试模式不访问站点标签建议；可用 --qa-tags-offline 或 --qa-tags-delayed 检查交互。")
                     return
                 }
+                state = .loading
                 do { try await Task.sleep(nanoseconds: 2_500_000_000) } catch { return }
                 guard !Task.isCancelled, current == generation else { return }
                 merge(Self.qaFixtures(matching: prefix, namespace: namespace), current: current)
@@ -292,7 +299,7 @@ enum TagVerification: Equatable {
                 guard current == generation else { return }
                 let response = try await session.html(url, method: "POST", body: body, contentType: "application/json")
                 let found = TagSuggestionRequest.matching(try EHTagSuggestionResponse.parse(Data(response.utf8)), namespace: namespace)
-                    .map(classifySiteCandidate)
+                    .map { TagSuggestion(tag: $0.tag, source: .site, chineseName: catalog?.translation(for: $0.tag), matchedAlias: $0.matchedAlias) }
                 guard !Task.isCancelled, current == generation else { return }
                 store(found, for: key)
                 merge(found, current: current)
@@ -318,7 +325,7 @@ enum TagVerification: Equatable {
             try Task.checkCancellation()
             guard revision == session.generation else { return .unverified }
             let found = try EHTagSuggestionResponse.parse(Data(response.utf8))
-            return found.contains { $0.tag.id == tag.id } ? .verified : .notFound
+            return found.contains { $0.id == tag.id || $0.matchedAlias?.id == tag.id } ? .verified : .notFound
         } catch is CancellationError { return .unverified }
         catch { return .failed(Self.failureLabel(error, usedExpiredCache: false, catalogAvailable: catalog != nil)) }
     }
@@ -330,6 +337,9 @@ enum TagVerification: Equatable {
     func cancel() {
         generation = UUID()
         task?.cancel(); task = nil
+        if state == .loading {
+            state = currentPrefix.isEmpty ? .idle : (catalog == nil ? .unavailable : .ready)
+        }
     }
 
     func sessionChanged() {
@@ -337,8 +347,7 @@ enum TagVerification: Equatable {
     }
 
     static func cached(_ item: TagSuggestion) -> TagSuggestion {
-        TagSuggestion(tag: item.tag, source: TagSuggestionRequest.isSelectable(item.tag) ? .cached : .unsupported,
-                      chineseName: item.chineseName, relatedMaster: item.relatedMaster)
+        TagSuggestion(tag: item.tag, source: .cached, chineseName: item.chineseName, matchedAlias: item.matchedAlias)
     }
 
     private static func safePrefix(_ value: String) -> Bool {
@@ -377,22 +386,22 @@ enum TagVerification: Equatable {
 
     static func qaFixtures(matching prefix: String, namespace: String) -> [TagSuggestion] {
         let fixtures = [
-            TagSuggestion(tag: GalleryTag(namespace: "language", name: "english"), source: .qaFixture, chineseName: nil, relatedMaster: nil),
-            TagSuggestion(tag: GalleryTag(namespace: "artist", name: "preview"), source: .qaFixture, chineseName: nil, relatedMaster: nil)
+            TagSuggestion(tag: GalleryTag(namespace: "language", name: "english"), source: .qaFixture, chineseName: nil, matchedAlias: nil),
+            TagSuggestion(tag: GalleryTag(namespace: "artist", name: "preview"), source: .qaFixture, chineseName: nil, matchedAlias: nil),
+            TagSuggestion(tag: GalleryTag(namespace: "artist", name: "qa stencil"), source: .qaFixture, chineseName: nil,
+                          matchedAlias: GalleryTag(namespace: "temp", name: "qa printmaker"))
         ]
-        return fixtures.filter { (namespace == "all" || $0.tag.namespace == namespace) && $0.tag.name.localizedCaseInsensitiveContains(prefix) }
-    }
-
-    private func classifySiteCandidate(_ item: TagSuggestion) -> TagSuggestion {
-        let source: TagSuggestion.Source = TagSuggestionRequest.isSelectable(item.tag) ? .site : .unsupported
-        return TagSuggestion(tag: item.tag, source: source, chineseName: catalog?.translation(for: item.tag), relatedMaster: item.relatedMaster)
+        return TagSuggestionRequest.matching(fixtures, namespace: namespace).filter {
+            $0.tag.name.localizedCaseInsensitiveContains(prefix) || $0.matchedAlias?.name.localizedCaseInsensitiveContains(prefix) == true
+        }
     }
 
     private func merge(_ fresh: [TagSuggestion], current expected: UUID) {
         guard expected == generation else { return }
-        var unique = Dictionary(items.map { ($0.tag.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for item in fresh { unique[item.tag.id] = item }
-        items = TagSuggestionRequest.ranked(Array(unique.values), prefix: currentPrefix, limit: suggestionLimit)
+        var siteIDs = Set(fresh.map(\.id))
+        siteIDs.formUnion(fresh.compactMap { $0.matchedAlias?.id })
+        let local = items.filter { !siteIDs.contains($0.id) }
+        items = TagSuggestionRequest.ranked(fresh + local, prefix: currentPrefix, limit: suggestionLimit)
         state = .ready
     }
 

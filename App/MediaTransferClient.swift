@@ -3,13 +3,14 @@ import Foundation
 /// Owns one reusable, private media session. Individual transfers supply their
 /// own task delegate so concurrent downloads keep independent response state.
 final class MediaTransferClient: @unchecked Sendable {
+    static let maxConnections = max(ReaderLoadPolicy.maxConcurrency, DownloadLoadPolicy.concurrencyRange.upperBound + 1)
     static let shared = MediaTransferClient()
 
     private let session: URLSession
 
     init(configuration suppliedConfiguration: URLSessionConfiguration? = nil) {
         let configuration = suppliedConfiguration?.copy() as? URLSessionConfiguration ?? .ephemeral
-        configuration.httpMaximumConnectionsPerHost = 16
+        configuration.httpMaximumConnectionsPerHost = Self.maxConnections
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil

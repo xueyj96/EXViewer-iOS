@@ -62,6 +62,29 @@ import ExViewerCore
         XCTAssertEqual(first.order(for: .history), .recent)
         XCTAssertEqual(defaults.string(forKey: "library.sort.v1.a1.history"), "future-value")
     }
+    func testFavoriteOrderUsesSiteOptionsAndPersistsByAccountAndSite() throws {
+        let suite = "LibrarySortingTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = LibrarySortPreferences(owner: "a1", defaults: defaults)
+        let other = LibrarySortPreferences(owner: "b2", defaults: defaults)
+
+        XCTAssertEqual(preferences.favoriteOrder(for: .ex), .siteDefault)
+        XCTAssertEqual(SiteFavoriteOrder.siteDefault.url(site: .ex, category: "all"),
+                       try SearchQuery().url(site: .ex, favorites: true))
+        preferences.set(.favorited, for: .ex)
+        preferences.set(.posted, for: .eh)
+        XCTAssertEqual(other.favoriteOrder(for: .ex), .siteDefault)
+        for (site, setting) in [(GallerySite.ex, "fs_f"), (.eh, "fs_p")] {
+            let reloaded = LibrarySortPreferences(owner: "a1", defaults: try XCTUnwrap(UserDefaults(suiteName: suite)))
+            let root = try XCTUnwrap(reloaded.favoriteOrder(for: site).url(site: site, category: "7"))
+            XCTAssertEqual(root.host, site.host)
+            XCTAssertEqual(root.path, "/favorites.php")
+            let items = try XCTUnwrap(URLComponents(url: root, resolvingAgainstBaseURL: false)?.queryItems)
+            XCTAssertEqual(items.filter { $0.name == "favcat" }.map(\.value), ["7"])
+            XCTAssertEqual(items.filter { $0.name == "inline_set" }.map(\.value), [setting])
+        }
+    }
     func testLegacyLibraryAndSeparateSearchHistoryRemainByteIdenticalAfterSorting() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
