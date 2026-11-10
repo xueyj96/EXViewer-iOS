@@ -15,8 +15,9 @@ final class LibrarySortingV28UITests: XCTestCase {
     }
     private func openHistory(_ app: XCUIApplication) {
         app.buttons["main.tab.discover"].tap()
-        app.buttons["discover.history"].tap()
-        XCTAssertTrue(app.staticTexts["阅读历史"].waitForExistence(timeout: 5))
+        let history = app.buttons["discover.lane.2"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5)); history.tap()
+        XCTAssertTrue(app.textFields["reading-history.search-field"].waitForExistence(timeout: 5))
     }
     private func choose(_ app: XCUIApplication, section: String, title: String, up: Bool = true) {
         if section != "history" { scope(app, section == "downloads" ? 3 : 0) }
@@ -33,18 +34,37 @@ final class LibrarySortingV28UITests: XCTestCase {
     }
     func testHistorySortPersistsAcrossDetailReturnTabReturnAndRelaunch() {
         let app = openLibrary(extra: ["--qa-dark"]); openHistory(app); assertHistory(app, [7203, 7202, 7201])
-        let header = app.descendants(matching: .any)["reading-history.header.floating"].firstMatch
-        let title = app.staticTexts["reading-history.title"]
-        let close = app.buttons["reading-history.close"]
+        let header = app.descendants(matching: .any)["discover.header.floating"].firstMatch
+        XCTAssertTrue(header.exists)
+        XCTAssertTrue(app.buttons["discover.lane.2"].isSelected)
         let sort = app.buttons["reading-history.sort"]
-        XCTAssertEqual(title.frame.midX, header.frame.midX, accuracy: 1)
-        XCTAssertEqual(close.frame.minX - header.frame.minX, 4, accuracy: 1)
-        XCTAssertEqual(header.frame.maxX - sort.frame.maxX, 4, accuracy: 1)
-        XCTAssertEqual(close.frame.midY, sort.frame.midY, accuracy: 1)
-        XCTAssertEqual(title.frame.midY, sort.frame.midY, accuracy: 2)
-        XCTAssertEqual(title.frame.minX - close.frame.maxX, 4, accuracy: 1)
-        XCTAssertEqual(sort.frame.minX - title.frame.maxX, 4, accuracy: 1)
-        XCTAssertTrue(app.descendants(matching: .any)["reading-history.summary"].firstMatch.exists)
+        let period = app.buttons["reading-history.period"]
+        let search = app.descendants(matching: .any)["reading-history.search"].firstMatch
+        XCTAssertEqual(search.frame.width, 2 * period.frame.width + 4, accuracy: 1)
+        XCTAssertEqual(sort.frame.width, period.frame.width, accuracy: 1)
+        XCTAssertEqual(period.frame.minX - search.frame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(sort.frame.minX - period.frame.maxX, 4, accuracy: 1)
+        let historyTab = app.buttons["discover.lane.2"]
+        XCTAssertEqual(search.frame.midY, sort.frame.midY, accuracy: 1)
+        XCTAssertEqual(search.frame.midY - historyTab.frame.midY, search.frame.height, accuracy: 1)
+        XCTAssertFalse(app.buttons["discover.saved-menu"].exists)
+        XCTAssertFalse(app.buttons["discover.search-entry"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["reading-history.summary"].firstMatch.exists)
+        period.tap()
+        app.buttons["reading-history.period.today"].tap()
+        XCTAssertTrue(app.staticTexts["这段时间暂无阅读记录"].waitForExistence(timeout: 5))
+        period.tap()
+        app.buttons["reading-history.period.all"].tap()
+        XCTAssertTrue(app.buttons["reading-history.item.7203"].waitForExistence(timeout: 5))
+        let field = app.textFields["reading-history.search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("beta")
+        XCTAssertTrue(app.buttons["reading-history.item.7203"].waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["reading-history.item.7201"].exists)
+        field.typeText("\n")
+        app.buttons["reading-history.clear-search"].tap()
+        XCTAssertTrue(app.buttons["reading-history.item.7203"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.navigationBars["阅读历史"].exists)
         let historyShot = XCTAttachment(screenshot: app.screenshot())
         historyShot.name = "discover-history-floating-header"
@@ -55,7 +75,8 @@ final class LibrarySortingV28UITests: XCTestCase {
         app.buttons["reading-history.item.7202"].tap()
         XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5)); app.buttons["BackButton"].tap()
         XCTAssertEqual(app.descendants(matching: .any)["reading-history.sort"].firstMatch.value as? String, "标题")
-        app.buttons["reading-history.close"].tap()
+        app.buttons["discover.lane.0"].tap()
+        XCTAssertTrue(app.buttons["discover.lane.0"].isSelected)
         app.buttons["main.tab.library"].tap(); openHistory(app)
         XCTAssertEqual(app.descendants(matching: .any)["reading-history.sort"].firstMatch.value as? String, "标题")
         app.terminate()
@@ -117,14 +138,14 @@ final class LibrarySortingV28UITests: XCTestCase {
         let app = XCUIApplication(); app.launchArguments = ["--qa", "--qa-library-large-selection"]; app.launch()
         XCTAssertTrue(app.buttons["main.tab.library"].waitForExistence(timeout: 12)); app.buttons["main.tab.library"].tap()
         let first = app.buttons["favorites.gallery.10000"]; XCTAssertTrue(first.waitForExistence(timeout: 8)); first.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
-        app.buttons["favorites.select.10001"].tap(); XCTAssertTrue(app.staticTexts["已选 2 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
+        app.buttons["favorites.select.10001"].tap(); XCTAssertTrue(app.batchSelection("已选 2 项").waitForExistence(timeout: 5))
         let exit = app.buttons["favorites.edit"]; XCTAssertEqual(exit.label, "退出多选"); exit.tap()
         XCTAssertTrue(first.waitForExistence(timeout: 5)); first.tap()
         XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5)); app.buttons["BackButton"].tap()
         XCTAssertTrue(first.waitForExistence(timeout: 5)); first.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
-        app.buttons["favorites.select.10000"].tap(); XCTAssertTrue(app.staticTexts["已选 0 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
+        app.buttons["favorites.select.10000"].tap(); XCTAssertTrue(app.batchSelection("已选 0 项").waitForExistence(timeout: 5))
         exit.tap(); XCTAssertTrue(first.waitForExistence(timeout: 5))
     }
 }

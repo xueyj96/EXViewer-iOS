@@ -4,94 +4,84 @@ struct LibraryFloatingHeader<Controls: View>: View {
     @Binding private var selection: Int
     private let scopeEnabled: Bool
     private let identifier: String
+    private let isSelecting: Bool
     private let controls: Controls
 
-    init(selection: Binding<Int>, scopeEnabled: Bool = true, identifier: String, @ViewBuilder controls: () -> Controls) {
+    init(selection: Binding<Int>, scopeEnabled: Bool = true, identifier: String, isSelecting: Bool,
+         @ViewBuilder controls: () -> Controls) {
         _selection = selection
         self.scopeEnabled = scopeEnabled
         self.identifier = identifier
+        self.isSelecting = isSelecting
         self.controls = controls()
     }
 
     var body: some View {
-        FloatingHeaderPanel(identifier: identifier, twoRows: true) {
-            FeedHeaderRows {
-                LibraryScopePicker(selection: $selection).disabled(!scopeEnabled)
-            } secondary: {
-                controls
-            }
+        FloatingTwoRowHeader(identifier: identifier, transitionID: "library", primaryLayout: "scopes",
+                             secondaryLayout: "\(selection)-\(isSelecting)") {
+            LibraryScopePicker(selection: $selection).disabled(!scopeEnabled)
+        } secondary: {
+            controls
         }
     }
 }
 
-struct LibraryHeaderActions<Leading: View, Trailing: View>: View {
+struct AccessibilityHeaderActions<Leading: View, Trailing: View>: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @ViewBuilder let leading: () -> Leading
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
-        if typeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: FeedChrome.rowSpacing(for: typeSize)) {
-                leading()
-                trailing().frame(maxWidth: .infinity, alignment: .trailing)
-            }
-        } else {
-            HStack(spacing: FeedChrome.panelSpacing) {
-                leading()
-                Spacer(minLength: 0)
-                trailing().layoutPriority(1)
-            }
+        VStack(alignment: .leading, spacing: FeedChrome.rowSpacing(for: typeSize)) {
+            leading()
+            trailing().frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 }
 
-struct LibraryHeaderCount: View {
-    let title: String
+struct LibraryFilterMenu<Option: Hashable & RawRepresentable>: View where Option.RawValue == String {
+    @Binding var selection: Option
+    let options: [Option]
+    let title: (Option) -> String
+    let label: String
+    let identifier: String
     let symbol: String
-    var fillsWidth = false
-    var detail: String? = nil
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    var body: some View {
-        Group {
-            if let detail {
-                HStack(spacing: FeedChrome.controlSpacing) {
-                    count.layoutPriority(1)
-                    Spacer(minLength: 0)
-                    Text(detail)
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                }
-            } else {
-                count
-            }
-        }
-        .frame(maxWidth: fillsWidth ? .infinity : nil)
-        .foregroundStyle(.secondary)
-        .feedHeaderControl(typeSize: typeSize)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .accessibilityValue(detail ?? "")
-    }
+    private var expands: Bool { !typeSize.isAccessibilitySize }
 
-    private var count: some View {
-        ViewThatFits(in: .horizontal) {
-            Label(title, systemImage: symbol).fixedSize()
-            Text(title).lineLimit(1).minimumScaleFactor(0.8)
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    selection = option
+                } label: {
+                    if option == selection { Label(title(option), systemImage: "checkmark") }
+                    else { Text(title(option)) }
+                }
+                .accessibilityIdentifier("\(identifier).\(option.rawValue)")
+            }
+        } label: {
+            ViewThatFits(in: .horizontal) {
+                LibraryMenuLabel(title: title(selection), symbol: symbol).fixedSize()
+                Text(title(selection)).lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: expands ? .infinity : nil)
         }
+        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: expands))
+        .accessibilityLabel(label)
+        .accessibilityValue(title(selection))
+        .accessibilityIdentifier(identifier)
     }
 }
 
 struct LibraryMenuLabel: View {
     let title: String
     var symbol = "arrow.up.arrow.down"
-    var fillsWidth = false
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: FeedChrome.iconLabelSpacing) {
             Image(systemName: symbol).accessibilityHidden(true)
             Text(title).lineLimit(1).truncationMode(.tail)
-            if fillsWidth { Spacer(minLength: 0) }
             Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 .accessibilityHidden(true)
         }

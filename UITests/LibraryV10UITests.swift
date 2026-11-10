@@ -10,16 +10,16 @@ final class LibraryV10UITests: XCTestCase {
         let normal = app.buttons["favorites.gallery.10000"]
         XCTAssertTrue(normal.waitForExistence(timeout: 12))
         normal.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         app.buttons["favorites.select.10000"].tap()
-        XCTAssertTrue(app.staticTexts["已选 0 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 0 项").waitForExistence(timeout: 5))
         let workload = app.descendants(matching: .any)["library.qa.workload"].firstMatch
         XCTAssertEqual(workload.value as? String, "galleries=600;blocked=250")
         return app
     }
 
     private func waitForCount(_ count: Int, in app: XCUIApplication) {
-        let expected = app.staticTexts["已选 \(count) 项"]
+        let expected = app.batchSelection("已选 \(count) 项")
         XCTAssertTrue(expected.waitForExistence(timeout: 5), "Expected visible selection count \(count)")
     }
 

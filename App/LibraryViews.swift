@@ -123,6 +123,40 @@ struct TagsView: View {
     }
 }
 
+private enum DownloadFilter: String, CaseIterable {
+    case all, active, needsAttention, complete
+
+    var title: String {
+        switch self {
+        case .all: "全部下载"
+        case .active: "进行中"
+        case .needsAttention: "暂停或失败"
+        case .complete: "已下载"
+        }
+    }
+
+    func includes(_ status: DownloadRecord.Status) -> Bool {
+        switch self {
+        case .all: true
+        case .active: status == .waiting || status == .downloading
+        case .needsAttention: status == .paused || status == .failed
+        case .complete: status == .complete
+        }
+    }
+}
+
+private enum ReadLaterFilter: String, CaseIterable {
+    case all, unread, started
+
+    var title: String {
+        switch self {
+        case .all: "全部作品"
+        case .unread: "尚未阅读"
+        case .started: "有阅读记录"
+        }
+    }
+}
+
 struct LibraryView: View {
     @Environment(\.galleryDetailPresentation) private var presentation
     @Binding var site: GallerySite
@@ -131,20 +165,30 @@ struct LibraryView: View {
     @EnvironmentObject private var downloads: DownloadManager
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var scope = 0
-    @State private var downloadHelp = false
+    @State private var downloadFilter: DownloadFilter = .all
+    @State private var readLaterFilter: ReadLaterFilter = .all
     @State private var sortOrders: [LibrarySortSection: LibrarySortOrder] = [:]
     @StateObject private var localSelection = LibrarySelectionStore()
     @State private var selectingLocal = false
     @State private var confirmingLocalRemoval = false
     @State private var removingDownloads = false
+    private var matchingReadLater: [Gallery] {
+        let saved = library.snapshot.readLater
+        guard readLaterFilter != .all else { return saved }
+        let started = Set(library.snapshot.history.map(\.id))
+        return saved.filter { started.contains($0.id) == (readLaterFilter == .started) }
+    }
     private var readLaterVisible: [Gallery] {
-        LibrarySelectionPolicy.filtered(library.snapshot.readLater, blocked: library.blockedIDs).visible
+        LibrarySelectionPolicy.filtered(matchingReadLater, blocked: library.blockedIDs).visible
     }
     private var sortPreferences: LibrarySortPreferences {
         .init(owner: library.owner, defaults: AppMode.qa ? UserDefaults(suiteName: LibrarySortPreferences.qaSuite)! : .standard)
     }
+    private var visibleDownloads: [DownloadRecord] {
+        library.snapshot.downloads.filter { downloadFilter.includes($0.status) }
+    }
     private var localIDs: Set<String> {
-        scope == 3 ? Set(library.snapshot.downloads.map(\.id)) : Set(readLaterVisible.map(\.id))
+        scope == 3 ? Set(visibleDownloads.map(\.id)) : Set(readLaterVisible.map(\.id))
     }
     private var localSource: LibraryBatchSource { scope == 3 ? .downloads : .readLater }
 
@@ -152,7 +196,7 @@ struct LibraryView: View {
         VStack(spacing: 0) {
             if scope == 1 { CloudFavoritesView(site: $site, scope: $scope, isActive: isActive) }
             else if scope == 2 {
-                ReadingHistoryView(libraryScope: $scope)
+                ReadingHistoryView(placement: .library($scope))
             }
             else { localLibrary }
         }
@@ -160,10 +204,13 @@ struct LibraryView: View {
         .onAppear { sortOrders = sortPreferences.load() }
         .onChange(of: library.owner) { _, _ in sortOrders = sortPreferences.load() }
         .onChange(of: scope) { _, _ in endLocalSelection() }
-        .onChange(of: library.owner) { _, _ in endLocalSelection() }
+        .onChange(of: library.owner) { _, _ in
+            downloadFilter = .all
+            readLaterFilter = .all
+            endLocalSelection()
+        }
         .onChange(of: isActive) { _, active in if !active { endLocalSelection() } }
         .onChange(of: localIDs) { _, ids in localSelection.updateLoadedIDs(ids) }
-        .sheet(isPresented: $downloadHelp) { DownloadHelpView() }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if selectingLocal && isActive {
                 LibraryBatchToolbar(source: localSource, summary: localSelection.summary, busy: removingDownloads,
@@ -209,18 +256,18 @@ struct LibraryView: View {
                 .accessibilityIdentifier("library.local")
             }
         } header: {
-            LibraryFloatingHeader(selection: $scope, identifier: "library.header.floating") {
+            LibraryFloatingHeader(selection: $scope, identifier: "library.header.floating", isSelecting: selectingLocal) {
                 if selectingLocal {
                     LibraryBatchSelectionHeader(source: localSource, store: localSelection, summary: localSelection.summary,
                                                 busy: removingDownloads, onExit: endLocalSelection)
                 } else {
                     if typeSize.isAccessibilitySize {
-                        LibraryHeaderActions { localCount } trailing: {
+                        AccessibilityHeaderActions { localLeading } trailing: {
                             HStack(spacing: FeedChrome.panelSpacing) { localSort; localAction }
                         }
                     } else {
-                        FeedHeaderGrid(spans: [2, 1, 1]) {
-                            localCount
+                        FeedHeaderGrid(spans: [1, 1, 1]) {
+                            localLeading
                             localSort
                             localAction
                         }
@@ -230,57 +277,40 @@ struct LibraryView: View {
         }
     }
 
-    private var localCount: some View {
-        let downloads = library.snapshot.downloads
-        let title: String
+    @ViewBuilder private var localLeading: some View {
         if scope == 3 {
-            let completed = downloads.count(where: { $0.status == .complete })
-            title = "\(downloads.count) 项 · \(completed) 项已下载"
+            LibraryFilterMenu(selection: $downloadFilter, options: DownloadFilter.allCases, title: \.title,
+                              label: "下载状态筛选", identifier: "downloads.filter", symbol: "line.3.horizontal.decrease")
         } else {
-            title = "已保存 \(library.snapshot.readLater.count) 个作品"
+            LibraryFilterMenu(selection: $readLaterFilter, options: ReadLaterFilter.allCases, title: \.title,
+                              label: "阅读状态筛选", identifier: "read-later.filter", symbol: "line.3.horizontal.decrease")
         }
-        return LibraryHeaderCount(title: title, symbol: scope == 3 ? "arrow.down.circle" : "text.badge.plus",
-                                  fillsWidth: !typeSize.isAccessibilitySize)
-            .accessibilityIdentifier("library.count.\(scope == 3 ? "downloads" : "bookmarks")")
     }
 
     private var localSort: some View {
         sortMenu(scope == 3 ? .downloads : .bookmarks)
     }
 
-    @ViewBuilder private var localAction: some View {
-        if scope == 3 {
-            Button { downloadHelp = true } label: {
-                Image(systemName: "info.circle")
-                    .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
-            }
-            .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
-            .accessibilityLabel("下载说明").accessibilityIdentifier("downloads.help")
-        } else {
-            Button {
-                localSelection.clear()
-                localSelection.updateLoadedIDs(localIDs)
-                selectingLocal = true
-            } label: {
-                ViewThatFits(in: .horizontal) {
-                    Label("选择", systemImage: "checkmark.square").fixedSize()
-                    Image(systemName: "checkmark.square")
-                }
-                .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
-            }
-            .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
-            .foregroundStyle(Color.accentColor)
-            .disabled(readLaterVisible.isEmpty)
-            .accessibilityLabel("选择").accessibilityIdentifier("read-later.select")
+    private var localAction: some View {
+        LibraryBatchEntryButton(identifier: scope == 3 ? "downloads.select" : "read-later.select") {
+            localSelection.clear()
+            localSelection.updateLoadedIDs(localIDs)
+            selectingLocal = true
         }
+        .disabled(localIDs.isEmpty || removingDownloads)
     }
 
     private var downloadsSection: some View {
-        LazyVStack(alignment: .leading, spacing: 8) {
-            if library.snapshot.downloads.isEmpty {
-                StatusMessage(title: "暂无下载", symbol: "arrow.down.circle")
+        LazyVStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
+            if visibleDownloads.isEmpty {
+                StatusMessage(title: downloadFilter == .all ? "暂无下载" : "没有符合该状态的下载",
+                              symbol: "arrow.down.circle")
             } else {
-                ForEach(LibrarySorting.downloads(library.snapshot.downloads, order: sortOrders[.downloads] ?? .original, history: library.snapshot.history)) { record in
+                let records = LibrarySorting.downloads(visibleDownloads, order: sortOrders[.downloads] ?? .original,
+                                                       history: library.snapshot.history)
+                LibraryCardRows(items: records, cover: { record in
+                    record.coverSource(in: library)
+                }) { record in
                     downloadRow(record)
                         .accessibilityIdentifier("library.download.item.\(record.gallery.ref.gid)")
                 }
@@ -308,9 +338,9 @@ struct LibraryView: View {
             }
             .buttonStyle(.plain)
             .highPriorityGesture(LongPressGesture(minimumDuration: 0.55).onEnded { _ in beginLocalSelection(record.id) })
-            .accessibilityValue(record.downloadStatus)
+            .accessibilityValue(record.accessibleDownloadStatus)
             .accessibilityHint(record.status == .complete ? "轻点打开离线阅读，长按选择" :
-                                record.requiresRetry ? "轻点重试，长按选择" :
+                                record.requiresRetry ? [record.error, "轻点重试，长按选择"].compactMap { $0 }.joined(separator: "。") :
                                 record.canPause ? "轻点暂停，长按选择" : "轻点继续，长按选择")
             .accessibilityAction(named: Text("选择并管理")) { beginLocalSelection(record.id) }
             .disabled(removingDownloads)
@@ -324,8 +354,12 @@ struct LibraryView: View {
                     .padding(.horizontal, FeedChrome.contentInset).padding(.vertical, 14)
                     .accessibilityIdentifier("read-later.empty")
             }
-            else {
-                GalleryRows(galleries: LibrarySorting.galleries(library.snapshot.readLater, order: sortOrders[.bookmarks] ?? .original, history: library.snapshot.history), layout: .grid,
+            else if matchingReadLater.isEmpty {
+                StatusMessage(title: readLaterFilter == .unread ? "暂无未读作品" : "暂无有阅读记录的作品", symbol: "book")
+                    .padding(.horizontal, FeedChrome.contentInset)
+                    .padding(.top, FeedChrome.contentTopGap)
+            } else {
+                GalleryRows(galleries: LibrarySorting.galleries(matchingReadLater, order: sortOrders[.bookmarks] ?? .original, history: library.snapshot.history), layout: .grid,
                             sourceIdentity: library.owner + ":read-later",
                             selectionStore: localSelection, isSelecting: selectingLocal, openIdentifier: "favorites.gallery",
                             onLongPressSelect: { beginLocalSelection($0.id) }, viewport: viewport)
@@ -355,7 +389,6 @@ struct LibraryView: View {
                     else { Text(option.title) }
                 }.accessibilityIdentifier("library.sort.\(section.rawValue).\(option.rawValue)")
             }
-            if section != .history { Text("最近阅读：无记录的作品置后，保留原序。") }
         } label: {
             LibrarySortControlLabel(title: (sortOrders[section] ?? section.defaultOrder).title)
         }
@@ -369,6 +402,22 @@ struct LibraryView: View {
 
 private extension DownloadRecord {
     var canPause: Bool { status == .waiting || status == .downloading }
+    var accessibleDownloadStatus: String {
+        guard status != .complete else { return downloadStatus }
+        if let pageCount, pageCount > 0 {
+            return "\(downloadStatus)，已保存 \(completed.count)/\(pageCount) 页"
+        }
+        return completed.isEmpty ? downloadStatus : "\(downloadStatus)，已保存 \(completed.count) 页"
+    }
+
+    @MainActor func coverSource(in library: LibraryStore) -> LibraryCardCover? {
+        guard TagFilter.decision(tags: gallery.tags, blocked: library.blockedIDs,
+                                 complete: gallery.tagsComplete) == .visible else { return nil }
+        return LibraryCardCover(gallery: gallery, localFile: library.downloadedPage(1, in: self)?.url)
+    }
+
+    var pageCount: Int? { total ?? gallery.pages }
+
     var downloadStatus: String {
         if requiresRetry { return "下载失败" }
         return switch status {
@@ -384,47 +433,55 @@ private extension DownloadRecord {
 private struct DownloadRowLabel: View {
     let record: DownloadRecord
     var selected: Bool? = nil
+    @EnvironmentObject private var library: LibraryStore
 
     private var symbol: String {
-        if let selected { return selected ? "checkmark.circle.fill" : "circle" }
         if record.status == .complete { return "chevron.right" }
         if record.requiresRetry { return "arrow.clockwise" }
         return record.canPause ? "pause.fill" : "play.fill"
     }
 
+    private var progress: CGFloat {
+        if record.status == .complete { return 1 }
+        guard let pageCount = record.pageCount, pageCount > 0 else { return 0 }
+        return min(1, CGFloat(record.completed.count) / CGFloat(pageCount))
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(record.gallery.title).font(.subheadline.weight(.medium)).lineLimit(1)
-                if record.status == .complete {
-                    Text(record.downloadStatus).font(.caption).foregroundStyle(.secondary)
-                } else {
-                    HStack(spacing: 8) {
-                        ProgressView(value: record.total.map { min(1, Double(record.completed.count) / Double(max($0, 1))) })
-                        Text("\(record.completed.count)/\(record.total.map(String.init) ?? "–") 页")
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
-                    }
-                    if record.requiresRetry {
-                        Text(record.error ?? "下载失败").font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Image(systemName: symbol).font(.subheadline.weight(.semibold))
-                .foregroundStyle(selected == true ? Color.accentColor : Color.secondary)
-                .frame(width: 24).accessibilityHidden(true)
-        }
-        .padding(.horizontal, FeedChrome.sectionSpacing)
-        .padding(.vertical, FeedChrome.panelSpacing)
-        .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: AppShape.card)
-        .overlay {
-            let paused = selected == nil && !record.canPause && record.status != .complete
-            AppShape.card.fill(selected == true ? Color.accentColor.opacity(0.08) : Color.primary.opacity(paused ? 0.04 : 0))
+        LibraryGalleryCard(gallery: record.gallery, pageCount: record.pageCount,
+                           context: "画廊 #\(record.gallery.ref.gid)", selected: selected,
+                           actionSymbol: symbol, progress: progress) {
+            cover
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
-        .overlay { AppShape.card.strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5).allowsHitTesting(false) }
-        .contentShape(AppShape.card)
+    }
+
+    private var coverPlaceholder: some View {
+        Image(systemName: "book.closed")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .tertiarySystemGroupedBackground))
+    }
+
+    private var cover: some View {
+        Group {
+            if let source = record.coverSource(in: library) {
+                if let file = source.localFile {
+                    ZStack {
+                        coverPlaceholder
+                        StaticCover(file: file, contextIdentity: library.owner, requestIdentity: record.id,
+                                    contentMode: .fill, fitsExtremeAspects: true)
+                    }
+                } else {
+                    CoverView(gallery: source.gallery, contentMode: .fill, showsLoadingIndicator: false,
+                              showsRetryButton: false, fitsExtremeAspects: true)
+                }
+            } else {
+                coverPlaceholder
+            }
+        }
     }
 }
 
@@ -546,7 +603,7 @@ struct CloudFavoritesView: View {
                     .overlay(alignment: .top) {
                         if let count = submission.workingCount {
                             ProgressView("正在处理 \(count) 项…")
-                                .font(.footnote)
+                                .font(FeedChrome.labelFont)
                                 .padding(.horizontal, 12).padding(.vertical, 7)
                                 .background(FloatingChrome.background, in: AppShape.control)
                                 .alignmentGuide(.top) { $0[.bottom] + 6 }
@@ -666,7 +723,7 @@ struct CloudFavoritesView: View {
     }
 
     private var favoritesFloatingHeader: some View {
-        LibraryFloatingHeader(selection: $scope, scopeEnabled: !working, identifier: "favorites.header.floating") {
+        LibraryFloatingHeader(selection: $scope, scopeEnabled: !working, identifier: "favorites.header.floating", isSelecting: selecting) {
             VStack(spacing: 0) {
                 if session.hasCredentials || AppMode.qa {
                     if selecting {
@@ -678,11 +735,11 @@ struct CloudFavoritesView: View {
                         }
                     } else {
                         if typeSize.isAccessibilitySize {
-                            LibraryHeaderActions { groupMenu } trailing: {
+                            AccessibilityHeaderActions { groupMenu } trailing: {
                                 HStack(spacing: FeedChrome.panelSpacing) { favoriteSortMenu; favoriteSelectButton }
                             }
                         } else {
-                            FeedHeaderGrid(spans: [2, 1, 1]) {
+                            FeedHeaderGrid(spans: [1, 1, 1]) {
                                 groupMenu
                                 favoriteSortMenu
                                 favoriteSelectButton
@@ -746,7 +803,8 @@ struct CloudFavoritesView: View {
                 }
             }
         } label: {
-            LibraryMenuLabel(title: selectedGroupName, symbol: "folder", fillsWidth: !typeSize.isAccessibilitySize)
+            LibraryMenuLabel(title: selectedGroupName, symbol: "folder")
+                .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
         }
         .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize)).foregroundStyle(.primary)
         .accessibilityLabel("收藏分组").accessibilityValue(selectedGroupName)
@@ -755,17 +813,8 @@ struct CloudFavoritesView: View {
         .disabled(working)
     }
     private var favoriteSelectButton: some View {
-        Button(action: beginSelection) {
-            ViewThatFits(in: .horizontal) {
-                Label("选择", systemImage: "checkmark.square").fixedSize()
-                Image(systemName: "checkmark.square")
-            }
-            .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
-        }
-        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
-        .foregroundStyle(Color.accentColor)
-        .disabled(working || visible.isEmpty)
-        .accessibilityLabel("选择").accessibilityIdentifier("favorites.select")
+        LibraryBatchEntryButton(identifier: "favorites.select", action: beginSelection)
+            .disabled(working || visible.isEmpty)
     }
 
     private var favoriteSortMenu: some View {

@@ -1,52 +1,75 @@
 import SwiftUI
 import ExViewerCore
 
+private enum ReadingHistoryPeriod: String, CaseIterable {
+    case all, today, week, month
+
+    var title: String {
+        switch self {
+        case .all: "全部时间"
+        case .today: "今天"
+        case .week: "最近 7 天"
+        case .month: "最近 30 天"
+        }
+    }
+
+    func startDate(now: Date, calendar: Calendar) -> Date? {
+        let today = calendar.startOfDay(for: now)
+        switch self {
+        case .all: return nil
+        case .today: return today
+        case .week: return calendar.date(byAdding: .day, value: -6, to: today)
+        case .month: return calendar.date(byAdding: .day, value: -29, to: today)
+        }
+    }
+}
+
 struct ReadingHistoryView: View {
-    var libraryScope: Binding<Int>? = nil
+    enum Placement {
+        case library(Binding<Int>)
+        case discovery(tabs: FeedScopePicker)
+    }
+
+    let placement: Placement
     @EnvironmentObject private var library: LibraryStore
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.defaultMinListRowHeight) private var defaultListRowHeight
     @State private var order: LibrarySortOrder = .recent
+    @State private var period: ReadingHistoryPeriod = .all
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
     @StateObject private var batchSelection = LibrarySelectionStore()
     @State private var selecting = false
     private var preferences: LibrarySortPreferences {
         .init(owner: library.owner, defaults: AppMode.qa ? UserDefaults(suiteName: LibrarySortPreferences.qaSuite)! : .standard)
     }
+    private var searchTerm: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
     private var records: [ReadingRecord] {
         let blocked = library.blockedIDs
-        return LibrarySorting.history(library.snapshot.history.filter {
-            TagFilter.decision(tags: $0.gallery.tags, blocked: blocked, complete: $0.gallery.tagsComplete) == .visible
+        let start = period.startDate(now: .now, calendar: .autoupdatingCurrent)
+        let term = searchTerm
+        return LibrarySorting.history(library.snapshot.history.filter { record in
+            (term.isEmpty || record.gallery.title.localizedStandardContains(term)) &&
+                (start.map { record.date >= $0 } ?? true) &&
+                TagFilter.decision(tags: record.gallery.tags, blocked: blocked, complete: record.gallery.tagsComplete) == .visible
         }, order: order)
     }
     var body: some View {
         FloatingFeedLayout { headerHeight in
             historyList(topInset: headerHeight)
         } header: {
-            if let libraryScope {
-                LibraryFloatingHeader(selection: libraryScope, identifier: "reading-history.header.floating") { historyControls }
-            } else {
-                FloatingHeaderPanel(identifier: "reading-history.header.floating") {
-                    Group {
-                        if selecting {
-                            LibraryBatchSelectionHeader(source: .history, store: batchSelection, summary: batchSelection.summary,
-                                                        compact: true, onExit: endSelection)
-                        } else {
-                            FloatingPageTitleRow(title: "阅读历史", identifier: "reading-history.title") {
-                                Button { dismiss() } label: { Image(systemName: "chevron.left") }
-                                    .buttonStyle(FeedHeaderButtonStyle())
-                                    .accessibilityLabel("返回")
-                                    .accessibilityIdentifier("reading-history.close")
-                            } trailing: {
-                                sortMenu
-                            }
-                        }
-                    }
-                    .environment(\.feedHeaderRow, .single)
+            switch placement {
+            case .library(let scope):
+                LibraryFloatingHeader(selection: scope, identifier: "reading-history.header.floating", isSelecting: selecting) { historyControls }
+            case .discovery(let tabs):
+                FloatingTwoRowHeader(identifier: "discover.header.floating", transitionID: "discover",
+                                     primaryLayout: "lanes", secondaryLayout: selecting ? "history-selection" : "history") {
+                    tabs
+                } secondary: {
+                    historyControls
                 }
             }
         }
-        .appNavigationChrome(backButton: libraryScope == nil, showsToolbarBackButton: false)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if selecting {
                 LibraryBatchToolbar(source: .history, summary: batchSelection.summary, galleries: {
@@ -56,7 +79,13 @@ struct ReadingHistoryView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .onAppear { order = preferences.order(for: .history) }
-        .onChange(of: library.owner) { _, _ in order = preferences.order(for: .history); endSelection() }
+        .onChange(of: library.owner) { _, _ in
+            order = preferences.order(for: .history)
+            period = .all
+            query = ""
+            searchFocused = false
+            endSelection()
+        }
         .onChange(of: records.map(\.id)) { _, ids in
             if selecting { batchSelection.updateLoadedIDs(Set(ids)) }
         }
@@ -66,54 +95,80 @@ struct ReadingHistoryView: View {
     private var historyControls: some View {
         if selecting {
             LibraryBatchSelectionHeader(source: .history, store: batchSelection, summary: batchSelection.summary, onExit: endSelection)
-        } else if typeSize.isAccessibilitySize {
-            LibraryHeaderActions { countLabel } trailing: { sortMenu }
         } else {
-            FeedHeaderGrid(spans: [3, 1]) {
-                countLabel
+            browsingControls
+        }
+    }
+
+    @ViewBuilder
+    private var browsingControls: some View {
+        if typeSize.isAccessibilitySize {
+            AccessibilityHeaderActions { searchField } trailing: {
+                HStack(spacing: FeedChrome.panelSpacing) { periodMenu; sortMenu }
+            }
+        } else {
+            FeedHeaderGrid(spans: [2, 1, 1]) {
+                searchField
+                periodMenu
                 sortMenu
             }
         }
     }
 
-    private func historyList(topInset: CGFloat) -> some View {
-        let entries = records
-        return List {
-            if let error = library.error { Text(error).font(.subheadline).foregroundStyle(.secondary) }
-            if libraryScope == nil && !entries.isEmpty {
-                let summary = historySummary(entries)
-                HStack {
-                    Text(summary.count)
-                    Spacer(minLength: FeedChrome.panelSpacing)
-                    if let latest = summary.latest { Text(latest).multilineTextAlignment(.trailing) }
-                }
-                .font(.caption)
+    private var searchField: some View {
+        HStack(spacing: FeedChrome.controlSpacing) {
+            Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-                .padding(.bottom, FeedChrome.contentSpacing)
-                .listRowInsets(EdgeInsets())
-                .listRowSeparator(.hidden)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("reading-history.summary")
-            }
-            if entries.isEmpty {
-                ContentUnavailableView("暂无阅读记录", systemImage: "clock", description: Text(library.snapshot.history.isEmpty
-                    ? "开始阅读后，作品与阅读进度会保存在这里。"
-                    : "记录暂时被屏蔽标签隐藏，可在标签设置中调整。"))
-                    .listRowSeparator(.hidden)
-            }
-            ForEach(entries) { record in
-                GallerySelectionLink(gallery: record.gallery, store: batchSelection,
-                                     entry: batchSelection.entry(for: record.id), isSelecting: selecting,
-                                     openIdentifier: "reading-history.item.\(record.gallery.ref.gid)",
-                                     selectionIdentifier: "reading-history.select.\(record.gallery.ref.gid)",
-                                     selectionLabel: { record.gallery.title }, onLongPressSelect: { beginSelection(record.id) }) {
-                    ReadingHistoryRowLabel(record: record, selected: $0, isFirst: record.id == entries.first?.id)
+                .accessibilityHidden(true)
+            TextField("作品名", text: $query)
+                .focused($searchFocused)
+                .submitLabel(.search)
+                .onSubmit { searchFocused = false }
+                .accessibilityIdentifier("reading-history.search-field")
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
                 }
-                .listRowInsets(EdgeInsets())
+                .buttonStyle(.plain)
+                .accessibilityLabel("清空作品名")
+                .accessibilityIdentifier("reading-history.clear-search")
             }
         }
-        .listStyle(.plain)
-        .environment(\.defaultMinListRowHeight, libraryScope == nil ? 0 : defaultListRowHeight)
+        .feedHeaderControl(typeSize: typeSize, expandsHorizontally: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reading-history.search")
+    }
+
+    private var emptyTitle: String {
+        if !searchTerm.isEmpty { return "没有匹配的阅读记录" }
+        if period != .all { return "这段时间暂无阅读记录" }
+        return library.snapshot.history.isEmpty ? "暂无阅读记录" : "阅读记录已被屏蔽"
+    }
+
+    private func historyList(topInset: CGFloat) -> some View {
+        let entries = records
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
+                if let error = library.error { Text(error).font(.subheadline).foregroundStyle(.secondary) }
+                if entries.isEmpty {
+                    ContentUnavailableView(emptyTitle, systemImage: "clock")
+                }
+                LibraryCardRows(items: entries, cover: { LibraryCardCover(gallery: $0.gallery) }) { record in
+                    GallerySelectionLink(gallery: record.gallery, store: batchSelection,
+                                         entry: batchSelection.entry(for: record.id), isSelecting: selecting,
+                                         openIdentifier: "reading-history.item.\(record.gallery.ref.gid)",
+                                         selectionIdentifier: "reading-history.select.\(record.gallery.ref.gid)",
+                                         selectionLabel: { record.gallery.title }, onLongPressSelect: { beginSelection(record.id) }) { selected in
+                        let lastRead = record.date.formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
+                        LibraryGalleryCard(gallery: record.gallery, context: "读到第 \(record.page) 页 · \(lastRead)", selected: selected) {
+                            CoverView(gallery: record.gallery, contentMode: .fill, fitsExtremeAspects: true)
+                        }
+                    }
+                }
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
         .contentMargins(.top, topInset + FeedChrome.contentTopGap, for: .scrollContent)
         .padding(.horizontal, FeedChrome.contentInset)
         .accessibilityIdentifier("reading-history")
@@ -129,18 +184,9 @@ struct ReadingHistoryView: View {
         batchSelection.clear()
     }
 
-    private var countLabel: some View {
-        let summary = historySummary(records)
-        return LibraryHeaderCount(title: summary.count, symbol: "clock",
-                                  fillsWidth: !typeSize.isAccessibilitySize, detail: summary.latest)
-            .accessibilityIdentifier("reading-history.count")
-    }
-
-    private func historySummary(_ entries: [ReadingRecord]) -> (count: String, latest: String?) {
-        let latest = entries.lazy.map(\.date).max().map {
-            "最近阅读 \($0.formatted(.dateTime.month().day().hour().minute()))"
-        }
-        return ("\(entries.count) 条阅读记录", latest)
+    private var periodMenu: some View {
+        LibraryFilterMenu(selection: $period, options: ReadingHistoryPeriod.allCases, title: \.title,
+                          label: "阅读时间筛选", identifier: "reading-history.period", symbol: "calendar")
     }
 
     private var sortMenu: some View {
@@ -151,46 +197,9 @@ struct ReadingHistoryView: View {
                 }
             }
         } label: {
-            if libraryScope == nil {
-                Image(systemName: "arrow.up.arrow.down")
-            } else {
-                LibrarySortControlLabel(title: order.title)
-            }
+            LibrarySortControlLabel(title: order.title)
         }
-        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: libraryScope != nil && !typeSize.isAccessibilitySize))
+        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
         .accessibilityLabel("阅读历史排序").accessibilityValue(order.title).accessibilityIdentifier("reading-history.sort")
-    }
-}
-
-private struct ReadingHistoryRowLabel: View {
-    let record: ReadingRecord
-    let selected: Bool?
-    let isFirst: Bool
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    var body: some View {
-        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
-        layout {
-            GalleryRow(gallery: record.gallery, horizontalInset: 0,
-                       topInset: isFirst ? 0 : FeedChrome.contentSpacing,
-                       bottomInset: FeedChrome.contentSpacing)
-            Text("第 \(record.page) 页")
-                .font(.caption).foregroundStyle(.secondary)
-                .padding(.horizontal, typeSize.isAccessibilitySize ? 0 : 8)
-                .padding(.bottom, typeSize.isAccessibilitySize ? FeedChrome.contentSpacing : 0)
-        }
-        .background(selected == true ? Color.accentColor.opacity(0.10) : .clear, in: AppShape.control)
-        .overlay(alignment: .topLeading) {
-            if let selected {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                    .frame(width: 26, height: 26)
-                    .background(FloatingChrome.background, in: Circle())
-                    .padding(5)
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
-            }
-        }
-        .contentShape(Rectangle())
     }
 }

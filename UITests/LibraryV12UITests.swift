@@ -20,7 +20,7 @@ final class LibraryV12UITests: XCTestCase {
     }
 
     private func waitCount(_ expected: Int, app: XCUIApplication, timeout: TimeInterval = 8) {
-        XCTAssertTrue(app.staticTexts["已选 \(expected) 项"].waitForExistence(timeout: timeout),
+        XCTAssertTrue(app.batchSelection("已选 \(expected) 项").waitForExistence(timeout: timeout),
                       "Selection counter did not reach \(expected)")
     }
 
@@ -105,9 +105,9 @@ final class LibraryV12UITests: XCTestCase {
     func testLargeLibraryScrollAndBatchSelectionMetrics() {
         let app = launchQA()
         enterSelection(app)
-        let initialCount = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已选 ")).firstMatch
+        let initialCount = app.buttons["favorites.select-all"]
         XCTAssertTrue(initialCount.waitForExistence(timeout: 5))
-        if (initialCount.label != "已选 1 项") {
+        if (initialCount.value as? String != "已选 1 项") {
             let first = app.buttons["favorites.select.\(firstID)"]
             first.tap()
             waitCount(1, app: app)

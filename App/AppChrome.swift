@@ -137,6 +137,7 @@ struct AppActionButtonStyle: ButtonStyle {
     var tone: Tone = .neutral
     var singleLine = false
     var minSurfaceHeight: CGFloat = 32
+    var labelFont = Font.subheadline.weight(.medium)
     @Environment(\.isEnabled) private var enabled
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -150,7 +151,7 @@ struct AppActionButtonStyle: ButtonStyle {
         configuration.label
             .lineLimit(singleLine ? 1 : nil)
             .fixedSize(horizontal: singleLine, vertical: false)
-            .font(.subheadline.weight(.medium))
+            .font(labelFont)
             .foregroundStyle(ink)
             .padding(.horizontal, 12)
             .frame(minHeight: minSurfaceHeight)

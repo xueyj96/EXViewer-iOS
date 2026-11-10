@@ -20,7 +20,7 @@ final class SelectionPerfV13UITests: XCTestCase {
         let first = app.buttons["favorites.gallery.10000"]
         XCTAssertTrue(first.waitForExistence(timeout: 15))
         first.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         let initialState = XCTAttachment(screenshot: app.screenshot())
         initialState.name = "selection-perf-v13-before-toggle"
         initialState.lifetime = .keepAlways
@@ -33,7 +33,7 @@ final class SelectionPerfV13UITests: XCTestCase {
         let selected = NSPredicate(format: "value == %@", "已选中")
         expectation(for: selected, evaluatedWith: target)
         waitForExpectations(timeout: 8)
-        XCTAssertTrue(app.staticTexts["已选 2 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 2 项").waitForExistence(timeout: 5))
         let axObserved = ProcessInfo.processInfo.systemUptime
         print("SELECTION_PERF_XCTEST tap-to-accessibility-state=\(String(format: "%.6f", axObserved - actionStart))s; includes XCTest dispatch/query/wait")
 

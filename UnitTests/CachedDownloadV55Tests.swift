@@ -238,8 +238,9 @@ final class CachedDownloadV55Tests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(1, forKey: DownloadLoadPolicy.concurrencyKey)
+        let knownTag = GalleryTag(namespace: "language", name: "english")
         let gallery = Gallery(ref: .init(site: .eh, gid: 158, token: "fixture"), title: "Transfer fixture",
-                              pages: OfflineTraffic.pageCount)
+                              pages: OfflineTraffic.pageCount, tags: [knownTag])
 
         func finish(_ manager: DownloadManager) async throws {
             let deadline = ProcessInfo.processInfo.systemUptime + 20
@@ -280,6 +281,8 @@ final class CachedDownloadV55Tests: XCTestCase {
         let completed = try XCTUnwrap(LibraryStore(qa: true, storageRoot: root).download(for: gallery.ref))
         XCTAssertEqual(completed.status, .complete, completed.error ?? "")
         XCTAssertNil(completed.error)
+        XCTAssertEqual(completed.gallery.tags, [knownTag])
+        XCTAssertFalse(completed.gallery.tagsComplete, "A response without a tag list must not confirm the existing partial tags")
         XCTAssertEqual(OfflineTraffic.imageRequests(), ["/1.png", "/2.png"] + (2...OfflineTraffic.pageCount).map { "/\($0).png" })
         let files = reopened.downloadedPages(completed)
         XCTAssertEqual(files.map(\.index), Array(1...OfflineTraffic.pageCount))

@@ -44,12 +44,15 @@ final class CompactHeadersV42UITests: XCTestCase {
         capture(app, large ? "compact42.search.large-before-bounds" : "compact42.search.before-bounds")
         XCTAssertLessThanOrEqual(header.frame.height, large ? 190 : 100)
         XCTAssertEqual(summary.frame.minX, header.frame.minX + 4, accuracy: 1)
-        XCTAssertEqual(summary.frame.midY, common.frame.midY, accuracy: 1)
+        XCTAssertLessThan(summary.frame.midY, common.frame.midY)
+        XCTAssertEqual(summary.frame.height, common.frame.height, accuracy: 1)
         XCTAssertGreaterThanOrEqual(summary.frame.height, 44)
         XCTAssertGreaterThanOrEqual(common.frame.width, 44)
         XCTAssertEqual(common.frame.maxX, header.frame.maxX - 4, accuracy: 1)
         XCTAssertFalse(app.buttons["discover.sort-order"].exists)
-        XCTAssertLessThanOrEqual(summary.frame.maxX, common.frame.minX)
+        let history = app.buttons["discover.lane.2"]
+        XCTAssertEqual(history.frame.midY, summary.frame.midY, accuracy: 1)
+        XCTAssertLessThanOrEqual(summary.frame.maxX, history.frame.minX)
         XCTAssertTrue((summary.value as? String)?.contains("language:chinese") == true, "Full criteria stay available to accessibility")
         XCTAssertFalse(app.scrollViews["discover.rule-chips"].exists)
         XCTAssertFalse(app.scrollViews["discover.saved-shortcuts"].exists)
@@ -62,6 +65,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         assertContentWidth(app, header: header, leading: app.buttons["gallery.open.1"], trailing: app.buttons["gallery.open.2"])
         capture(app, "feed-alignment.discover")
         loadFirstPreset(app); app.buttons["compose.cancel"].tap()
+        XCTAssertTrue(app.buttons["compose.cancel"].waitForNonExistence(timeout: 5))
         XCTAssertFalse(app.buttons["discover.condition-summary"].exists)
         XCTAssertFalse(app.buttons["discover.back"].exists)
         loadFirstPreset(app); app.buttons["compose.apply"].tap()
@@ -100,7 +104,6 @@ final class CompactHeadersV42UITests: XCTestCase {
     func testComposerFilterKeepsOneRowWithFiveConditions() {
         let app = launch()
         loadFirstPreset(app)
-        app.buttons["compose.filters"].tap()
         let phrase = app.switches["匹配完整短语"]
         for _ in 0..<6 { if phrase.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(phrase.isHittable)
@@ -118,11 +121,13 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertTrue(filter.waitForExistence(timeout: 5))
         filter.tap()
         let title = app.staticTexts["compose.filters.title"]
-        let count = app.staticTexts["compose.filters.count"]
+        let preview = app.staticTexts["compose.filters.preview"]
+        let limits = app.staticTexts["compose.filters.limits"]
         let common = app.buttons["compose.save-favorite"]
-        XCTAssertTrue(filter.isHittable && count.exists && common.isHittable)
-        XCTAssertTrue(count.label.contains("5 项条件"))
-        XCTAssertEqual(title.frame.midY, count.frame.midY, accuracy: 1)
+        XCTAssertTrue(filter.isHittable && preview.exists && common.isHittable)
+        XCTAssertTrue((filter.value as? String)?.contains("5 项条件") == true)
+        XCTAssertEqual(limits.label, "≥3 星")
+        XCTAssertEqual(title.frame.midY, limits.frame.midY, accuracy: 1)
         XCTAssertFalse(app.staticTexts["compose.current-summary"].exists)
         XCTAssertEqual(filter.frame.height, 44, accuracy: 1)
         capture(app, "composer.single-row.light.collapsed")
@@ -140,13 +145,15 @@ final class CompactHeadersV42UITests: XCTestCase {
     func testComposerFilterKeepsOneRowInDarkLargeType() {
         let app = launch(["--qa-dark", "--qa-large-type"])
         loadFirstPreset(app)
+        app.buttons["compose.filters"].tap()
         let title = app.staticTexts["compose.filters.title"]
-        let count = app.staticTexts["compose.filters.count"]
+        let limits = app.staticTexts["compose.filters.limits"]
+        let detail = limits.exists ? limits : app.staticTexts["compose.filters.count"]
         let common = app.buttons["compose.save-favorite"]
         for _ in 0..<4 { if common.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(title.exists && count.exists && common.isHittable)
-        XCTAssertEqual(title.frame.midY, count.frame.midY, accuracy: 1)
-        XCTAssertLessThanOrEqual(title.frame.maxX, count.frame.minX)
+        XCTAssertTrue(title.exists && detail.exists && common.isHittable)
+        XCTAssertEqual(title.frame.midY, detail.frame.midY, accuracy: 1)
+        XCTAssertLessThanOrEqual(title.frame.maxX, detail.frame.minX)
         XCTAssertTrue(common.label.contains("常用"))
         XCTAssertGreaterThanOrEqual(common.frame.height, 44)
         // Form exposes the full cell hit area; visible label alignment is checked in the retained screenshots.
@@ -156,8 +163,8 @@ final class CompactHeadersV42UITests: XCTestCase {
     func testLibraryToolbarAlignsWithCoversAndOffersExplicitMultiSelection() throws {
         let app = launch(["--qa-stored-bookmark-covers", "--qa-library-sort", "--qa-reset-library-sort"])
         let discover = app.descendants(matching: .any)["discover.header.floating"].firstMatch
-        let discoverFirstRow = app.buttons["discover.search-entry"]
-        let discoverSecondRow = app.buttons["discover.saved-menu"]
+        let search = app.buttons["discover.search-entry"]
+        let common = app.buttons["discover.saved-menu"]
         let discoverCard = app.buttons["gallery.open.1"]
         XCTAssertTrue(discoverCard.waitForExistence(timeout: 6))
         let discoverFrame = discover.frame
@@ -168,16 +175,18 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertEqual(firstTab.height, 44, accuracy: 0.75)
         XCTAssertEqual(firstTab.minX - discoverFrame.minX, 4, accuracy: 0.75)
         XCTAssertEqual(discoverFrame.maxX - lastTab.maxX, 4, accuracy: 0.75)
-        let historyShortcut = app.buttons["discover.history"]
-        XCTAssertEqual(historyShortcut.frame.minX, discoverSecondRow.frame.minX, accuracy: 0.75)
-        XCTAssertEqual(historyShortcut.frame.width, discoverSecondRow.frame.width, accuracy: 0.75)
-        let discoverFirstRowFrame = discoverFirstRow.frame
-        let discoverSecondRowFrame = discoverSecondRow.frame
-        let lane = app.descendants(matching: .any)["discover.lane"].firstMatch
-        let latest = app.buttons["discover.lane.0"], popular = app.buttons["discover.lane.1"]
+        let latest = app.buttons["discover.lane.0"], popular = app.buttons["discover.lane.1"], historyShortcut = app.buttons["discover.lane.2"]
+        let discoverFirstRowFrame = historyShortcut.frame
+        let discoverSecondRowFrame = search.frame
+        XCTAssertLessThan(discoverFirstRowFrame.midY, discoverSecondRowFrame.midY)
+        XCTAssertEqual(common.frame.midY, discoverSecondRowFrame.midY, accuracy: 1)
+        let discoverRightEdge = common.frame.maxX
+        XCTAssertEqual(discoverRightEdge, historyShortcut.frame.maxX, accuracy: 1)
         XCTAssertEqual(latest.frame.width, popular.frame.width, accuracy: 0.75)
-        XCTAssertEqual(discoverSecondRowFrame.minX - lane.frame.maxX, 4, accuracy: 1)
-        XCTAssertEqual(lane.frame.width, 3 * discoverSecondRowFrame.width + 8, accuracy: 1)
+        XCTAssertEqual(latest.frame.width, historyShortcut.frame.width, accuracy: 0.75)
+        for control in [common, latest, popular, historyShortcut] {
+            XCTAssertEqual(control.frame.height, discoverFirstRowFrame.height, accuracy: 1)
+        }
         let discoverGap = discoverCard.frame.minY - discoverFrame.maxY + panelOverhang
         XCTAssertEqual(app.buttons["gallery.open.2"].frame.minX - discoverCard.frame.maxX, discoverGap, accuracy: 0.75)
         capture(app, "feed-alignment.discover")
@@ -185,6 +194,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         let local = app.descendants(matching: .any)["library.header.floating"].firstMatch
         let choose = app.buttons["read-later.select"], sort = app.buttons["library.sort.bookmarks"]
         XCTAssertTrue(choose.waitForExistence(timeout: 5)); XCTAssertTrue(sort.isHittable)
+        XCTAssertEqual(choose.label, "批量管理")
         XCTAssertEqual(choose.frame.midY, sort.frame.midY, accuracy: 1)
         XCTAssertEqual(local.frame.height, 88, accuracy: 0.75)
         assertContentWidth(app, header: local, leading: app.buttons["favorites.gallery.7201"], trailing: app.buttons["favorites.gallery.7204"])
@@ -206,18 +216,25 @@ final class CompactHeadersV42UITests: XCTestCase {
         let libraryFirstRow = app.buttons["library.scope.0"]
         XCTAssertEqual(libraryFirstRow.frame.midY, discoverFirstRowFrame.midY, accuracy: 0.75)
         XCTAssertEqual(libraryFirstRow.frame.height, discoverFirstRowFrame.height, accuracy: 0.75)
+        XCTAssertEqual(app.buttons["library.scope.1"].frame.minX - libraryFirstRow.frame.maxX, 4, accuracy: 0.75)
         XCTAssertEqual(choose.frame.midY, discoverSecondRowFrame.midY, accuracy: 0.75)
         XCTAssertEqual(choose.frame.height, discoverSecondRowFrame.height, accuracy: 0.75)
-        XCTAssertEqual(choose.frame.maxX, discoverSecondRowFrame.maxX, accuracy: 0.75)
-        let localCount = app.descendants(matching: .any)["library.count.bookmarks"].firstMatch
-        XCTAssertEqual(localCount.label, "已保存 4 个作品")
-        let countFrame = localCount.frame
-        XCTAssertEqual(sort.frame.minX - countFrame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(choose.frame.maxX, discoverRightEdge, accuracy: 0.75)
+        let readLaterFilter = app.buttons["read-later.filter"]
+        XCTAssertEqual(readLaterFilter.value as? String, "全部作品")
+        let filterFrame = readLaterFilter.frame
+        XCTAssertEqual(sort.frame.minX - filterFrame.maxX, 4, accuracy: 1)
         XCTAssertEqual(choose.frame.minX - sort.frame.maxX, 4, accuracy: 1)
         XCTAssertEqual(sort.frame.width, choose.frame.width, accuracy: 1)
-        XCTAssertEqual(countFrame.width, 2 * choose.frame.width + 4, accuracy: 1)
-        let sortColumnWidth = sort.frame.width
+        XCTAssertEqual(filterFrame.width, choose.frame.width, accuracy: 1)
         capture(app, "compact42.library.read-later")
+        readLaterFilter.tap()
+        app.buttons["read-later.filter.unread"].tap()
+        XCTAssertTrue(app.buttons["favorites.gallery.7204"].waitForExistence(timeout: 5))
+        XCTAssertFalse(readLater.exists)
+        readLaterFilter.tap()
+        app.buttons["read-later.filter.all"].tap()
+        XCTAssertTrue(readLater.waitForExistence(timeout: 5))
         choose.tap()
         XCTAssertTrue(app.buttons["read-later.exit"].waitForExistence(timeout: 5))
         app.buttons["read-later.exit"].tap()
@@ -225,6 +242,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         app.buttons["library.scope.1"].tap()
         let group = app.buttons["favorites.group-filter"], select = app.buttons["favorites.select"]
         XCTAssertTrue(group.waitForExistence(timeout: 5)); XCTAssertTrue(select.isHittable && select.isEnabled)
+        XCTAssertEqual(select.label, "批量管理")
         let favorites = app.descendants(matching: .any)["favorites.header.floating"].firstMatch
         assertContentWidth(app, header: favorites, leading: app.buttons["favorites.gallery.1"], trailing: app.buttons["favorites.gallery.2"])
         XCTAssertEqual(favorites.frame.height, libraryHeaderFrame.height, accuracy: 1)
@@ -240,22 +258,20 @@ final class CompactHeadersV42UITests: XCTestCase {
         let favoriteSort = app.buttons["favorites.sort"]
         XCTAssertEqual(favoriteSort.frame.minX - group.frame.maxX, 4, accuracy: 1)
         XCTAssertEqual(select.frame.minX - favoriteSort.frame.maxX, 4, accuracy: 1)
-        XCTAssertEqual(select.frame.width, discoverSecondRowFrame.width, accuracy: 1)
         XCTAssertEqual(favoriteSort.frame.width, select.frame.width, accuracy: 1)
-        XCTAssertEqual(group.frame.width, 2 * select.frame.width + 4, accuracy: 1)
-        for (control, column) in [(favoriteSort, 2), (select, 3)] {
-            let tab = app.buttons["library.scope.\(column)"]
-            XCTAssertEqual(control.frame.midX, tab.frame.midX, accuracy: 1)
-        }
+        XCTAssertEqual(group.frame.width, select.frame.width, accuracy: 1)
         XCTAssertLessThanOrEqual(group.frame.maxX, select.frame.minX)
         XCTAssertLessThan(app.descendants(matching: .any)["favorites.header.floating"].firstMatch.frame.height, 100)
+        let favoriteActionWidth = select.frame.width
         capture(app, "compact42.library.site-favorites")
         select.tap()
-        let count = app.staticTexts["favorites.selection-count"]
-        XCTAssertEqual(count.label, "已选 0 项")
+        let selectAll = app.buttons["favorites.select-all"]
+        XCTAssertFalse(app.staticTexts["favorites.selection-count"].exists)
+        XCTAssertEqual(selectAll.frame.width, app.buttons["favorites.edit"].frame.width, accuracy: 1)
+        XCTAssertEqual(selectAll.value as? String, "已选 0 项")
         let card = app.buttons["favorites.select.1"]
         XCTAssertTrue(card.waitForExistence(timeout: 5)); card.tap()
-        XCTAssertEqual(count.label, "已选 1 项")
+        XCTAssertEqual(selectAll.value as? String, "已选 1 项")
         XCTAssertTrue(app.buttons["favorites.manage"].isEnabled)
         app.buttons["favorites.edit"].tap()
         XCTAssertEqual(group.value as? String, "全部分组")
@@ -267,12 +283,20 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertEqual(history.frame.minY, libraryHeaderFrame.minY, accuracy: 1)
         XCTAssertEqual(historyRow.frame.minY - history.frame.maxY + panelOverhang, topGap, accuracy: 0.75)
         let historySort = app.buttons["reading-history.sort"]
-        let historyCount = app.descendants(matching: .any)["reading-history.count"].firstMatch
-        XCTAssertEqual(historyCount.label, "3 条阅读记录")
-        XCTAssertTrue((historyCount.value as? String)?.hasPrefix("最近阅读 ") == true)
-        XCTAssertEqual(historyCount.frame.height, historySort.frame.height, accuracy: 1)
-        XCTAssertEqual(historySort.frame.width, sortColumnWidth, accuracy: 1)
-        XCTAssertEqual(historySort.frame.minX - historyCount.frame.maxX, 4, accuracy: 1)
+        let historyPeriod = app.buttons["reading-history.period"]
+        XCTAssertEqual(historyPeriod.value as? String, "全部时间")
+        let historySearch = app.descendants(matching: .any)["reading-history.search"].firstMatch
+        XCTAssertEqual(historyPeriod.frame.height, historySort.frame.height, accuracy: 1)
+        XCTAssertEqual(historyPeriod.frame.height, app.buttons["library.scope.2"].frame.height, accuracy: 1)
+        XCTAssertEqual(historySearch.frame.height, historyPeriod.frame.height, accuracy: 1)
+        XCTAssertEqual(historySort.frame.width, historyPeriod.frame.width, accuracy: 1)
+        XCTAssertEqual(historySearch.frame.width, 2 * historyPeriod.frame.width + 4, accuracy: 1)
+        XCTAssertEqual(historyPeriod.frame.minX - historySearch.frame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(historySort.frame.minX - historyPeriod.frame.maxX, 4, accuracy: 1)
+        let historyCardFrame = historyRow.frame
+        XCTAssertEqual(historyCardFrame.height, 3 * discoverFirstRowFrame.height, accuracy: 1)
+        XCTAssertTrue(historyRow.label.contains("读到第 3 页"))
+        XCTAssertTrue(historyRow.label.contains("分数: 3.0"), historyRow.label)
         capture(app, "feed-alignment.history")
 
         app.buttons["library.scope.3"].tap()
@@ -281,15 +305,23 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertEqual(local.frame.height, libraryHeaderFrame.height, accuracy: 1)
         XCTAssertEqual(local.frame.minY, libraryHeaderFrame.minY, accuracy: 1)
         XCTAssertEqual(download.frame.minY - local.frame.maxY + panelOverhang, topGap, accuracy: 0.75)
-        let help = app.buttons["downloads.help"], downloadSort = app.buttons["library.sort.downloads"]
-        let downloadCount = app.descendants(matching: .any)["library.count.downloads"].firstMatch
+        let downloadSelect = app.buttons["downloads.select"], downloadSort = app.buttons["library.sort.downloads"]
+        let downloadFilter = app.buttons["downloads.filter"]
         XCTAssertEqual(app.buttons["library.scope.3"].label, "离线下载")
-        XCTAssertEqual(downloadSort.frame.minX - downloadCount.frame.maxX, 4, accuracy: 1)
-        XCTAssertEqual(help.frame.minX - downloadSort.frame.maxX, 4, accuracy: 1)
-        XCTAssertEqual(downloadCount.label, "4 项 · 0 项已下载")
-        XCTAssertEqual(downloadSort.frame.width, sortColumnWidth, accuracy: 1)
-        XCTAssertEqual(help.frame.width, sortColumnWidth, accuracy: 1)
-        XCTAssertEqual(downloadCount.frame.width, 2 * sortColumnWidth + 4, accuracy: 1)
+        XCTAssertEqual(downloadSort.frame.minX - downloadFilter.frame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(downloadSelect.frame.minX - downloadSort.frame.maxX, 4, accuracy: 1)
+        XCTAssertEqual(downloadFilter.value as? String, "全部下载")
+        XCTAssertEqual(downloadSelect.label, "批量管理")
+        for control in [downloadFilter, downloadSort, downloadSelect] {
+            XCTAssertEqual(control.frame.height, app.buttons["library.scope.3"].frame.height, accuracy: 1)
+        }
+        XCTAssertEqual(download.frame, historyCardFrame)
+        XCTAssertTrue(download.label.contains("页数: 10 页"))
+        XCTAssertTrue(download.label.contains("分数: 4.5"), download.label)
+        XCTAssertTrue(download.label.contains("画廊 #7204"))
+        XCTAssertEqual(downloadSort.frame.width, downloadSelect.frame.width, accuracy: 1)
+        XCTAssertEqual(downloadFilter.frame.width, downloadSelect.frame.width, accuracy: 1)
+        XCTAssertEqual(downloadSelect.frame.width, favoriteActionWidth, accuracy: 1)
         capture(app, "feed-alignment.downloads")
     }
 
@@ -312,6 +344,19 @@ final class CompactHeadersV42UITests: XCTestCase {
         app.buttons["discover.back"].tap()
         XCTAssertTrue(popular.waitForExistence(timeout: 5)); XCTAssertTrue(popular.isSelected)
         XCTAssertTrue(app.buttons["discover.saved-menu"].isHittable)
+
+        app.buttons["discover.search-entry"].tap()
+        XCTAssertTrue(text.waitForExistence(timeout: 5)); text.tap(); text.typeText("coast")
+        app.buttons["compose.apply"].tap()
+        let summary = app.buttons["discover.condition-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        app.buttons["discover.lane.2"].tap()
+        XCTAssertTrue(app.textFields["reading-history.search-field"].waitForExistence(timeout: 5))
+        let latest = app.buttons["discover.lane.0"]
+        latest.tap()
+        XCTAssertTrue(app.buttons["gallery.open.1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(latest.isSelected)
+        XCTAssertFalse(summary.exists)
     }
 
     func testDetailTagChipsRetainTheirSearchAction() {

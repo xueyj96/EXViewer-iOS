@@ -207,7 +207,7 @@ private struct DetailSearchFlow: View {
         ZStack {
             if let navigation {
                 NavigationStack(path: $path) {
-                    DiscoverView(navigation: navigation, onClose: close)
+                    DiscoverView(navigation: navigation, showsReadingHistory: .constant(false), onClose: close)
                         .navigationDestination(for: Gallery.self) { gallery in
                             GalleryDetailView(gallery: gallery, searchTarget: DetailSearchTarget(
                                 navigation: navigation, generation: session.generation, origin: .currentSearch

@@ -48,77 +48,70 @@ private enum LibraryBatchAction: String, Identifiable {
     }
 }
 
+struct LibraryBatchEntryButton: View {
+    let identifier: String
+    let action: () -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        Button(action: action) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: FeedChrome.iconLabelSpacing) {
+                    Image(systemName: "checkmark.square").accessibilityHidden(true)
+                    Text("批量管理")
+                }
+                .fixedSize()
+                Text("批量管理").fixedSize()
+                Image(systemName: "checkmark.square")
+            }
+            .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
+        }
+        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
+        .foregroundStyle(Color.accentColor)
+        .accessibilityLabel("批量管理")
+        .accessibilityIdentifier(identifier)
+    }
+}
+
 struct LibraryBatchSelectionHeader: View {
     let source: LibraryBatchSource
     let store: LibrarySelectionStore
     @ObservedObject var summary: LibrarySelectionSummary
     var busy = false
-    var compact = false
     let onExit: () -> Void
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        if compact {
-            HStack(spacing: FeedChrome.panelSpacing) {
-                selectionCount
-                Spacer(minLength: 0)
-                selectAllButton
-                exitButton
-            }
-        } else if typeSize.isAccessibilitySize {
-            LibraryHeaderActions { selectionCount } trailing: {
-                HStack(spacing: FeedChrome.panelSpacing) {
-                    selectAllButton
-                    exitButton
-                }
-            }
-        } else {
-            FeedHeaderGrid(spans: [2, 1, 1]) {
-                selectionCount
-                selectAllButton
-                exitButton
-            }
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
+            : AnyLayout(FeedHeaderGrid(spans: [1, 1]))
+        layout {
+            selectAllButton
+            exitButton
         }
-    }
-
-    private var selectionCount: some View {
-        Text("已选 \(summary.value.count) 项")
-            .monospacedDigit().lineLimit(1)
-            .frame(maxWidth: compact || typeSize.isAccessibilitySize ? nil : .infinity, alignment: .leading)
-            .foregroundStyle(.secondary)
-            .feedHeaderControl(typeSize: typeSize)
-            .accessibilityIdentifier("\(source.rawValue).selection-count")
     }
 
     private var selectAllButton: some View {
         let all = summary.value.allLoadedSelected
-        let title = all ? "取消全选" : "全选已加载"
-        let symbol = all ? "minus.square" : "checkmark.square"
         return Button { store.toggleAllLoaded() } label: {
-            ViewThatFits(in: .horizontal) {
-                if !compact && !typeSize.isAccessibilitySize { Label(title, systemImage: symbol).fixedSize() }
-                Image(systemName: symbol)
-            }
-            .frame(maxWidth: compact || typeSize.isAccessibilitySize ? nil : .infinity)
+            Text(all ? "取消全选" : "全选列表")
+                .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
         }
-        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !compact && !typeSize.isAccessibilitySize))
+        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
         .disabled(busy)
-        .accessibilityLabel(title)
+        .accessibilityValue("已选 \(summary.value.count) 项")
+        .accessibilityHint(all ? "清除当前选择" : "选中当前列表已加载的项目")
         .accessibilityIdentifier("\(source.rawValue).select-all")
     }
 
     private var exitButton: some View {
         Button(action: onExit) {
-            ViewThatFits(in: .horizontal) {
-                if !compact { Label("退出", systemImage: "xmark").fixedSize() }
-                Image(systemName: "xmark")
-            }
-            .frame(maxWidth: compact || typeSize.isAccessibilitySize ? nil : .infinity)
+            Text("退出多选")
+                .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
         }
-        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !compact && !typeSize.isAccessibilitySize))
+        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
         .foregroundStyle(Color.accentColor)
         .disabled(busy)
-        .accessibilityLabel("退出多选")
         .accessibilityIdentifier(source == .favorites ? "favorites.edit" : "\(source.rawValue).exit")
     }
 }
@@ -169,7 +162,7 @@ struct LibraryBatchToolbar: View {
                     Button { perform(action) } label: {
                         ZStack {
                             HStack(spacing: 5) {
-                                Image(systemName: symbol).imageScale(.small)
+                                Image(systemName: symbol).imageScale(FeedChrome.iconScale)
                                 if !typeSize.isAccessibilitySize || source == .downloads {
                                     Text(title).lineLimit(1).minimumScaleFactor(0.80)
                                 }
@@ -179,7 +172,8 @@ struct LibraryBatchToolbar: View {
                         }
                         .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(AppActionButtonStyle(tone: action.tone, minSurfaceHeight: FeedChrome.rowSurfaceHeight))
+                    .buttonStyle(AppActionButtonStyle(tone: action.tone, minSurfaceHeight: FeedChrome.rowSurfaceHeight,
+                                                     labelFont: FeedChrome.labelFont))
                     .accessibilityLabel(accessibilityTitle(action, title: title))
                     .accessibilityIdentifier("\(source.rawValue).\(action.rawValue)")
                     .disabled(busy || (summary.value.count == 0 && action != .back))
@@ -189,7 +183,7 @@ struct LibraryBatchToolbar: View {
             .overlay(alignment: .top) {
                 if let notice {
                     Text(notice.text)
-                        .font(.footnote)
+                        .font(FeedChrome.labelFont)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 12).padding(.vertical, 7)
                         .background(Color(uiColor: .secondarySystemGroupedBackground), in: AppShape.control)
@@ -339,7 +333,7 @@ struct FavoriteGroupPicker: View {
                     catch { confirmError = ErrorMessages.message(error) }
                 } label: {
                     Label(moving ? "移动 \(count) 项" : "收藏 \(count) 项", systemImage: moving ? "folder" : "heart")
-                        .font(.subheadline.weight(.semibold))
+                        .font(FeedChrome.emphasizedLabelFont)
                         .frame(maxWidth: .infinity, minHeight: FeedChrome.rowSurfaceHeight)
                         .foregroundStyle(.white)
                         .background(Color.accentColor.opacity(selected == nil ? 0.38 : 1), in: AppShape.control)

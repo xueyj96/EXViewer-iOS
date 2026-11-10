@@ -108,7 +108,6 @@ private enum BrowserPreferenceDefaults {
 }
 
 struct RootView: View {
-    private enum DiscoveryPage: Hashable { case readingHistory }
 
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var session: SiteSession
@@ -117,6 +116,7 @@ struct RootView: View {
     @StateObject private var discovery: DiscoveryNavigation
     @AppStorage("browser.site", store: BrowserPreferenceDefaults.store) private var browserSiteRaw = GallerySite.ex.rawValue
     @State private var discoveryPath = NavigationPath()
+    @State private var showsDiscoveryHistory = false
     @State private var libraryPath = NavigationPath()
     @State private var accountPath = NavigationPath()
 
@@ -143,13 +143,10 @@ struct RootView: View {
         CompactMainTabs(selection: $selection) {
             TabView(selection: $selection) {
                 NavigationStack(path: $discoveryPath) {
-                    DiscoverView(navigation: discovery, onSiteChange: { browserSite = $0 },
-                                 onOpenHistory: { discoveryPath.append(DiscoveryPage.readingHistory) })
-                        .navigationDestination(for: DiscoveryPage.self) { _ in
-                            ReadingHistoryView()
-                        }
+                    DiscoverView(navigation: discovery, showsReadingHistory: $showsDiscoveryHistory, onSiteChange: { browserSite = $0 })
                         .navigationDestination(for: Gallery.self) { gallery in
-                            GalleryDetailView(gallery: gallery, searchTarget: searchTarget(discoveryPath.count > 1 ? .discoverSearch : .currentSearch))
+                            let origin: DetailTagSearchDraft.Origin = showsDiscoveryHistory || discoveryPath.count > 1 ? .discoverSearch : .currentSearch
+                            GalleryDetailView(gallery: gallery, searchTarget: searchTarget(origin))
                         }
                 }
                 .toolbar(.hidden, for: .tabBar)
@@ -176,7 +173,7 @@ struct RootView: View {
         .id(session.generation)
         .overlay(alignment: .bottom) {
             if let notice = library.readLaterNotice {
-                Text(notice.text).font(.caption).padding(.horizontal, 16).padding(.vertical, 10)
+                Text(notice.text).font(FeedChrome.labelFont).padding(.horizontal, 16).padding(.vertical, 10)
                     .background(FloatingChrome.background, in: AppShape.control).padding(.bottom, 68)
                     .allowsHitTesting(false).accessibilityIdentifier("read-later.feedback")
                     .task(id: notice.id) {
@@ -226,6 +223,7 @@ struct RootView: View {
 
     private func showDiscovery(_ site: GallerySite) {
         browserSite = site
+        showsDiscoveryHistory = false
         discoveryPath = NavigationPath()
         selection = 0
     }

@@ -15,6 +15,7 @@ final class ToolbarTextV20UITests: XCTestCase {
     }
 
     func testCancelAndAdjacentActionsStayHorizontalInAllSearchSheets() {
+        continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--qa", "--qa-tags-offline", "--qa-dark"]
         app.launch()
@@ -54,21 +55,26 @@ final class ToolbarTextV20UITests: XCTestCase {
         entry.tap()
         let input = app.textFields["compose.text"]
         XCTAssertTrue(input.waitForExistence(timeout: 6)); input.tap(); input.typeText("coast")
-        app.buttons["compose.apply"].tap()
-        entry.tap()
         let save = app.buttons["compose.save-favorite"]
         XCTAssertTrue(save.waitForExistence(timeout: 8)); save.tap()
         let navigation = app.descendants(matching: .any)["search.save.header"].firstMatch
         XCTAssertTrue(navigation.waitForExistence(timeout: 6))
-        horizontal(navigation.buttons["取消"], app: app, name: "save.cancel")
+        horizontal(app.buttons["search.save.cancel"], app: app, name: "save.cancel")
         horizontal(app.buttons["search.save.confirm"], app: app, name: "save.confirm")
-        navigation.buttons["取消"].tap()
+        app.buttons["search.save.cancel"].tap()
+        XCTAssertTrue(navigation.waitForNonExistence(timeout: 6))
+        XCTAssertTrue(app.searchComposerTitle("搜索").exists)
+        app.buttons["compose.cancel"].tap()
         XCTAssertTrue(entry.waitForExistence(timeout: 6))
-        XCTAssertFalse(navigation.exists)
     }
 }
 
 extension XCUIApplication {
+    func batchSelection(_ value: String, source: String = "favorites") -> XCUIElement {
+        buttons.matching(NSPredicate(format: "identifier == %@ AND value == %@", "\(source).select-all", value)).firstMatch
+    }
+
+
     func selectTagNamespace(_ namespace: String) {
         let menu = buttons["tag.namespace-filter"]
         XCTAssertTrue(menu.waitForExistence(timeout: 5))

@@ -88,6 +88,29 @@ import ExViewerCore
         XCTAssertEqual(SearchPresentation.headerTitle(SearchQuery(), savedName: nil), "关键词、标签与条件")
     }
 
+    func testPresetPreviewKeepsLimitsVisibleAndPreservesTagOperators() {
+        var query = SearchQuery()
+        query.rules = [
+            .init(tag: .init(namespace: "language", name: "chinese")),
+            .init(tag: .init(namespace: "other", name: "animation"), match: .exclude),
+            .init(tag: .init(namespace: "other", name: "watercolor"), match: .any)
+        ]
+        query.minRating = 4; query.minPages = 50
+        let preview = SearchPresentation.presetPreview(query)
+        XCTAssertFalse(preview.conditions.contains("包含"))
+        XCTAssertTrue(preview.conditions.contains("排除"))
+        XCTAssertTrue(preview.conditions.hasSuffix("…"))
+        XCTAssertEqual(preview.limits, "≥4 星 · ≥50 页")
+
+        query.rules.removeFirst()
+        query.maxPages = 120
+        let range = SearchPresentation.presetPreview(query)
+        XCTAssertTrue(range.conditions.contains("任一"))
+        XCTAssertFalse(range.conditions.hasSuffix("…"))
+        XCTAssertEqual(range.limits, "≥4 星 · 50–120 页")
+        XCTAssertEqual(SearchPresentation.presetPreview(SearchQuery()).conditions, "全部画廊")
+    }
+
     func testFilterPreviewAndBadgeUseTheSameFiveItemsAndExposeEveryCondition() throws {
         var query = SearchQuery()
         query.rules = ["chinese", "english", "japanese", "spanish", "french"].map {

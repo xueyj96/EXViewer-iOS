@@ -3,8 +3,8 @@ import ExViewerCore
 
 struct DiscoverView: View {
     @ObservedObject var navigation: DiscoveryNavigation
+    @Binding var showsReadingHistory: Bool
     var onSiteChange: (GallerySite) -> Void = { _ in }
-    var onOpenHistory: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
 
     @EnvironmentObject private var session: SiteSession
@@ -25,6 +25,35 @@ struct DiscoverView: View {
     private var filterConditionCount: Int { SearchPresentation.conditionCount(entry.query) }
 
     var body: some View {
+        Group {
+            if showsReadingHistory {
+                ReadingHistoryView(placement: .discovery(tabs: lanePicker))
+            } else {
+                feedLayout
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if selecting {
+                LibraryBatchToolbar(source: .discover, summary: batchSelection.summary, galleries: {
+                    entry.pager.items.filter { batchSelection.selectedIDs.contains($0.id) }
+                })
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .sheet(item: $web) { OfficialWebView(destination: $0) }
+        .navigationDestination(item: $composerStart) { composerSheet(startAt: $0) }
+        .onChange(of: session.hasCredentials) { _, value in if value { startCurrent() } }
+        .onChange(of: entry.id) { _, _ in
+            showsReadingHistory = false
+            endSelection(resume: false)
+        }
+        .onChange(of: library.blockedIDs) { _, _ in endSelection() }
+        .task(id: entry.id) {
+            if !entry.didStart && (AppMode.qa || session.hasCredentials || hasActiveConditions) { startCurrent() }
+        }
+    }
+
+    private var feedLayout: some View {
         FloatingFeedLayout { headerHeight in
             Group {
                 if !session.hasCredentials && !AppMode.qa && !started && !entry.didStart {
@@ -56,47 +85,56 @@ struct DiscoverView: View {
         } header: {
             discoverFloatingHeader
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if selecting {
-                LibraryBatchToolbar(source: .discover, summary: batchSelection.summary, galleries: {
-                    entry.pager.items.filter { batchSelection.selectedIDs.contains($0.id) }
-                })
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-        .sheet(item: $web) { OfficialWebView(destination: $0) }
-        .navigationDestination(item: $composerStart) { composerSheet(startAt: $0) }
-        .onChange(of: session.hasCredentials) { _, value in if value { startCurrent() } }
-        .onChange(of: entry.id) { _, _ in endSelection(resume: false) }
-        .onChange(of: library.blockedIDs) { _, _ in endSelection() }
-        .task(id: entry.id) {
-            if !entry.didStart && (AppMode.qa || session.hasCredentials || hasActiveConditions) { startCurrent() }
-        }
     }
 
     private var discoverFloatingHeader: some View {
-        FloatingHeaderPanel(identifier: "discover.header.floating", twoRows: true) {
-            VStack(spacing: FeedChrome.rowSpacing(for: typeSize)) {
-                if let error = navigation.submissionError { StatusMessage(title: error) }
-                FeedHeaderRows {
-                    searchEntryRow
-                } secondary: {
-                    if selecting {
-                        LibraryBatchSelectionHeader(source: .discover, store: batchSelection, summary: batchSelection.summary) {
-                            endSelection()
-                        }
-                    } else {
-                        let layout = typeSize.isAccessibilitySize
-                            ? AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
-                            : AnyLayout(FeedHeaderGrid(spans: [3, 1]))
-                        layout {
-                            if hasActiveConditions { conditionSummary }
-                            else { lanePicker }
-                            commonSearchControl
-                        }
-                    }
-                }
+        let isMainDiscovery = onClose == nil
+        return FloatingTwoRowHeader(identifier: "discover.header.floating",
+                                    transitionID: isMainDiscovery ? "discover" : "discover-results",
+                                    primaryLayout: isMainDiscovery ? browsingHeaderLayout : "search",
+                                    secondaryLayout: isMainDiscovery ? "search" : browsingHeaderLayout,
+                                    note: navigation.submissionError.map { AnyView(StatusMessage(title: $0)) }) {
+            if isMainDiscovery { browsingHeaderRow }
+            else { searchEntryRow(row: .primary) }
+        } secondary: {
+            if isMainDiscovery { searchEntryRow(row: .secondary) }
+            else { browsingHeaderRow }
+        }
+    }
+
+    private var browsingHeaderLayout: String {
+        if selecting { return "selection" }
+        return hasActiveConditions ? "conditions" : "lanes"
+    }
+
+    @ViewBuilder private var browsingHeaderRow: some View {
+        if selecting {
+            LibraryBatchSelectionHeader(source: .discover, store: batchSelection, summary: batchSelection.summary) {
+                endSelection()
             }
+        } else if onClose != nil {
+            let layout = typeSize.isAccessibilitySize
+                ? AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
+                : AnyLayout(FeedHeaderGrid(spans: [3, 1]))
+            layout {
+                if hasActiveConditions { conditionSummary }
+                else { lanePicker }
+                commonSearchControl
+            }
+        } else if hasActiveConditions {
+            let layout = typeSize.isAccessibilitySize
+                ? AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
+                : AnyLayout(FeedHeaderGrid(spans: [2, 1]))
+            layout {
+                conditionSummary
+                Button { showsReadingHistory = true } label: {
+                    shortcutLabel("历史", symbol: "clock.arrow.circlepath")
+                }
+                .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
+                .accessibilityLabel("历史").accessibilityIdentifier("discover.lane.2")
+            }
+        } else {
+            lanePicker
         }
     }
 
@@ -116,25 +154,20 @@ struct DiscoverView: View {
         if resume, entry.pager.interrupted { entry.pager.retry(session: session) }
     }
 
-    private var searchEntryRow: some View {
+    private func searchEntryRow(row: FeedHeaderRow) -> some View {
         let layout = !typeSize.isAccessibilitySize
             ? AnyLayout(FeedHeaderGrid(spans: [3, 1]))
             : AnyLayout(HStackLayout(spacing: FeedChrome.panelSpacing))
         return layout {
-            searchInputControls.disabled(selecting)
+            searchInputControls(row: row).disabled(selecting)
             if let onClose {
                 Button(action: onClose) {
                     shortcutLabel("关闭", symbol: "xmark")
                 }
                 .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
                 .accessibilityLabel("关闭搜索结果").accessibilityIdentifier("search.results.close")
-            } else if let onOpenHistory {
-                Button(action: onOpenHistory) {
-                    shortcutLabel("历史", symbol: "clock")
-                }
-                .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
-                .disabled(selecting)
-                .accessibilityLabel("阅读历史").accessibilityIdentifier("discover.history")
+            } else {
+                commonSearchControl.disabled(selecting)
             }
         }
     }
@@ -142,7 +175,7 @@ struct DiscoverView: View {
     private func shortcutLabel(_ title: String, symbol: String) -> some View {
         ViewThatFits(in: .horizontal) {
             if !typeSize.isAccessibilitySize {
-                HStack(spacing: 4) {
+                HStack(spacing: FeedChrome.iconLabelSpacing) {
                     shortcutIcon(symbol)
                     Text(title).font(FeedChrome.labelFont)
                 }
@@ -156,12 +189,12 @@ struct DiscoverView: View {
     private func shortcutIcon(_ symbol: String) -> some View {
         Image(systemName: symbol)
             .font(FeedChrome.labelFont)
-            .imageScale(.medium)
+            .imageScale(FeedChrome.iconScale)
             .frame(width: 16)
     }
 
-    private var searchInputControls: some View {
-        let insets = FeedChrome.surfaceInsets(for: typeSize, row: .primary)
+    private func searchInputControls(row: FeedHeaderRow) -> some View {
+        let insets = FeedChrome.surfaceInsets(for: typeSize, row: row)
         let contentOffset = FeedChrome.contentOffset(for: insets)
         return HStack(spacing: 0) {
             if navigation.canGoBack {
@@ -182,7 +215,7 @@ struct DiscoverView: View {
                 HStack(spacing: FeedChrome.controlSpacing) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     Text(SearchPresentation.headerTitle(entry.query, savedName: currentSaved?.name))
-                        .lineLimit(1).foregroundStyle(hasActiveConditions ? .primary : .secondary)
+                        .lineLimit(1).truncationMode(.tail).foregroundStyle(hasActiveConditions ? .primary : .secondary)
                     Spacer(minLength: 0)
                 }.padding(.horizontal, FeedChrome.controlSpacing)
                     .offset(y: contentOffset)
@@ -209,6 +242,7 @@ struct DiscoverView: View {
             .accessibilityIdentifier("discover.filters")
         }
         .font(FeedChrome.labelFont)
+        .imageScale(FeedChrome.iconScale)
         .appControlSurface(insets: insets)
     }
 
@@ -223,7 +257,7 @@ struct DiscoverView: View {
     private var conditionSummary: some View {
         Button { composerStart = .filters } label: {
             HStack(spacing: 5) {
-                Text(headerDetails).lineLimit(1)
+                Text(headerDetails).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).accessibilityHidden(true)
                 Spacer(minLength: 0)
             }
@@ -236,20 +270,36 @@ struct DiscoverView: View {
         .accessibilityIdentifier("discover.condition-summary")
     }
 
-    private var lanePicker: some View {
-        FeedScopePicker(selection: laneBinding, options: [.init(id: 0, title: "最新", symbol: "clock"), .init(id: 1, title: "热门", symbol: "flame")], identifier: "discover.lane")
+    private var lanePicker: FeedScopePicker {
+        let lanes: [FeedScopeOption] = [
+            .init(id: 0, title: "最新", symbol: "clock"),
+            .init(id: 1, title: "热门", symbol: "flame")
+        ]
+        let options = onClose == nil ? lanes + [.init(id: 2, title: "历史", symbol: "clock.arrow.circlepath")] : lanes
+        return FeedScopePicker(selection: laneBinding, options: options, identifier: "discover.lane",
+                               alignsToHeaderGrid: onClose == nil)
     }
 
     private var laneBinding: Binding<Int> {
-        Binding(get: { entry.lane }, set: { lane in submit(entry.query, site: entry.site, lane: lane, savedID: entry.savedID) })
+        Binding(get: { showsReadingHistory ? 2 : entry.lane }, set: { lane in
+            if lane == 2 {
+                showsReadingHistory = true
+            } else {
+                showsReadingHistory = false
+                if lane != entry.lane {
+                    submit(SearchQuery(), site: entry.site, lane: lane, savedID: nil)
+                }
+            }
+        })
     }
 
     private func composerSheet(startAt: SearchComposerStart) -> some View {
         DiscoveryComposerView(query: entry.query, site: entry.site, savedID: currentSaved?.id,
                               startAt: startAt, loadedPreset: currentSaved, updatesResults: hasActiveConditions || onClose != nil,
-                              usesParentNavigation: true) { query, site, savedID in
+                              usesParentNavigation: true, onCancel: { composerStart = nil }) { query, site, savedID in
             try navigation.execute(query: query, site: site, savedID: savedID, session: session, library: library)
             started = true
+            showsReadingHistory = false
             onSiteChange(navigation.current.site)
         }
         .environmentObject(library)

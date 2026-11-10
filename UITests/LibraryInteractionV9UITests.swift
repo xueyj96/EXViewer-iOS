@@ -21,28 +21,29 @@ final class LibraryInteractionV9UITests: XCTestCase {
         first.press(forDuration: 0.8)
         XCTAssertEqual(selectedCount(app), 1)
         app.buttons["favorites.select.1"].tap()
-        XCTAssertTrue(app.staticTexts["已选 0 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 0 项").waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["favorites.select.1"].waitForExistence(timeout: 5))
         return app
     }
 
     private func waitForSelection(_ expected: String, in app: XCUIApplication, timeout: TimeInterval = 3) {
-        let count = app.staticTexts[expected]
+        let count = app.batchSelection(expected)
         let visible = NSPredicate { _, _ in count.exists && count.isHittable }
         expectation(for: visible, evaluatedWith: count)
         waitForExpectations(timeout: timeout)
     }
 
     private func selectionCounter(_ app: XCUIApplication) -> XCUIElement {
-        app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已选 ")).firstMatch
+        app.buttons["favorites.select-all"]
     }
 
     private func selectedCount(_ app: XCUIApplication) -> Int {
         let counter = selectionCounter(app)
         XCTAssertTrue(counter.waitForExistence(timeout: 3))
-        let pieces = counter.label.split(separator: " ")
+        let value = counter.value as? String ?? ""
+        let pieces = value.split(separator: " ")
         guard pieces.count >= 2, let count = Int(pieces[1]) else {
-            XCTFail("Unexpected selection counter: \(counter.label)")
+            XCTFail("Unexpected selection counter: \(value)")
             return -1
         }
         return count
@@ -120,7 +121,7 @@ final class LibraryInteractionV9UITests: XCTestCase {
         let firstFavorite = app.buttons["favorites.gallery.1"]
         XCTAssertTrue(firstFavorite.waitForExistence(timeout: 5))
         firstFavorite.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         capture(app, "build9.library-selection")
     }
 
@@ -164,7 +165,7 @@ final class LibraryInteractionV9UITests: XCTestCase {
         let gallery = app.buttons["favorites.gallery.1"]
         XCTAssertTrue(gallery.waitForExistence(timeout: 5))
         gallery.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["画廊详情"].exists)
         XCTAssertEqual(app.buttons["favorites.select.1"].value as? String, "已选中")
         XCTAssertFalse(app.staticTexts["画廊详情"].exists, "A long press selects the gallery without following the navigation link")

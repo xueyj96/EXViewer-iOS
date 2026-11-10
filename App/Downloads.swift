@@ -206,7 +206,13 @@ enum DownloadLoadPolicy {
                 try checkCurrent(run)
                 let detail = try EHParser.detail(html, reference: record.gallery.ref, pageURL: url)
                 current.total = detail.gallery.pages ?? current.total
-                if record.replaces != nil { current.gallery = detail.gallery.stored }
+                if record.replaces != nil {
+                    current.gallery = detail.gallery.stored
+                } else if !current.gallery.tagsComplete, detail.gallery.tagsComplete, !detail.gallery.tags.isEmpty {
+                    let knownIDs = Set(current.gallery.tags.map(\.id))
+                    current.gallery.tags += detail.gallery.tags.filter { !knownIDs.contains($0.id) }
+                    current.gallery.tagsComplete = true
+                }
                 backgroundWork?.report(completed: current.completed.count, total: current.total)
                 try await savePages(detail.pages, to: directory, run: run, reuse: reuse) { saved in
                     verifiedPages.insert(saved.index)

@@ -128,10 +128,15 @@ final class TagSelectionV28UITests: XCTestCase {
         let shortcut = app.buttons["compose.favorite-tag.language:english"]
         XCTAssertTrue(shortcut.waitForExistence(timeout: 5))
         XCTAssertFalse(shortcut.isEnabled)
-        XCTAssertGreaterThanOrEqual(shortcut.frame.minY, common.frame.maxY - 1)
+        XCTAssertEqual(shortcut.frame.minY - common.frame.maxY, 4, accuracy: 1)
+        XCTAssertEqual(common.frame.minX - add.frame.maxX, 4, accuracy: 1)
         XCTAssertEqual(shortcut.frame.minX, add.frame.minX, accuracy: 1)
         XCTAssertEqual(shortcut.frame.maxX, common.frame.maxX, accuracy: 1)
         XCTAssertEqual(common.value as? String, "已展开")
+        let expandedShot = XCTAttachment(screenshot: app.screenshot())
+        expandedShot.name = "search-common-tags-expanded"
+        expandedShot.lifetime = .keepAlways
+        self.add(expandedShot)
         common.tap()
         XCTAssertTrue(shortcut.waitForNonExistence(timeout: 5))
         app.buttons["compose.add-tag"].tap()

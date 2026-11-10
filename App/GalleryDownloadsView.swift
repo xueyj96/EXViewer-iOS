@@ -158,7 +158,6 @@ struct GalleryDownloadsView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var downloads: DownloadManager
     @Environment(\.dismiss) private var dismiss
-    @State private var help = false
     @State private var pendingUpdate: GalleryOfflineUpdate?
 
     private var query: GalleryDownloadVersions.Query? {
@@ -183,10 +182,8 @@ struct GalleryDownloadsView: View {
                 Button("关闭") { dismiss() }.buttonStyle(FeedHeaderButtonStyle())
                     .accessibilityIdentifier("downloads.options.close")
             } trailing: {
-                Button { help = true } label: { Image(systemName: "info.circle") }
-                    .buttonStyle(FeedHeaderButtonStyle()).accessibilityLabel("下载说明")
+                EmptyView()
             }
-            .sheet(isPresented: $help) { DownloadHelpView() }
             .task(id: query) { await versions.refresh(gallery, query: query, session: session) }
             .confirmOfflineUpdate($pendingUpdate) { update in
                 if downloads.enqueueUpdate(update, from: gallery) { dismiss() }

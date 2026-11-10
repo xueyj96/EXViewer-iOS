@@ -50,9 +50,39 @@ private struct SearchPresetRow: View {
         return generated.contains(where: { String($0.prefix(80)) == title }) ? (summary.isEmpty ? "全部画廊" : summary) : title
     }
 
-    private var presetDetails: String {
-        let conditions = SearchPresentation.conditions(query)
-        return conditions.isEmpty ? "全部画廊" : conditions
+    private var savedPresetContent: some View {
+        let preview = SearchPresentation.presetPreview(query)
+        let fullConditions = SearchPresentation.conditions(query)
+        return VStack(alignment: .leading, spacing: FeedChrome.panelSpacing) {
+            HStack(spacing: FeedChrome.contentSpacing) {
+                Text(title).font(FeedChrome.labelFont)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(site == .ex ? "EX" : "EH")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, FeedChrome.panelSpacing * 2)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.06), in: AppShape.control)
+                    .fixedSize()
+                if let selection {
+                    Image(systemName: selection == "已修改" ? "pencil.circle" : "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(Color.accentColor).accessibilityHidden(true)
+                }
+            }
+            HStack(spacing: FeedChrome.contentSpacing) {
+                if !preview.conditions.isEmpty {
+                    Text(preview.conditions)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if !preview.limits.isEmpty {
+                    Text(preview.limits).monospacedDigit().layoutPriority(1)
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .lineLimit(1).truncationMode(.tail)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(fullConditions.isEmpty ? "全部画廊" : fullConditions))
+        }
     }
 
     private var loadOrEdit: some Gesture {
@@ -87,27 +117,12 @@ private struct SearchPresetRow: View {
                         }.font(.caption2).foregroundStyle(.secondary)
                     }
                 } else {
-                    HStack(spacing: FeedChrome.contentSpacing) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(title).font(FeedChrome.labelFont).foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Text(presetDetails)
-                                .font(.caption).foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        Text(site == .ex ? "EX" : "EH")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize()
-                        if let selection {
-                            Image(systemName: selection == "已修改" ? "pencil.circle" : "checkmark.circle.fill")
-                                .font(.caption).foregroundStyle(Color.accentColor).accessibilityHidden(true)
-                        }
-                    }
+                    savedPresetContent
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, FeedChrome.panelSpacing)
-            .frame(minHeight: FeedChrome.rowHeight)
+            .frame(minHeight: date == nil ? FeedChrome.rowHeight + FeedChrome.contentSpacing : FeedChrome.rowHeight)
             .padding(.horizontal, date == nil ? FeedChrome.contentSpacing : 0)
             .background {
                 if date == nil {
@@ -145,6 +160,7 @@ private struct SearchPresetsView: View {
     let list: SearchPresetList
     var source: LoadedSearchSource?
     var sourceModified: Bool
+    var onClose: (() -> Void)? = nil
     var onLoad: (LoadedSearchSource) -> Void
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var session: SiteSession
@@ -234,7 +250,9 @@ private struct SearchPresetsView: View {
         .environment(\.editMode, .constant(reordering ? .active : .inactive))
         .appNavigationChrome(backButton: list == .recent, showsToolbarBackButton: false)
         .floatingPageHeader(list.title, identifier: "search-presets", pinned: true) {
-            Button { dismiss() } label: { Image(systemName: list == .recent ? "chevron.left" : "xmark") }
+            Button {
+                if let onClose { onClose() } else { dismiss() }
+            } label: { Image(systemName: list == .recent ? "chevron.left" : "xmark") }
                 .buttonStyle(FeedHeaderButtonStyle())
                 .accessibilityLabel(list == .recent ? "返回" : "关闭")
                 .accessibilityIdentifier("search-presets.close")
@@ -323,7 +341,7 @@ struct SaveSearchSheet: View {
             .font(.footnote)
             .floatingGroupedPageContent()
             .floatingPageHeader(replacing == nil ? "保存搜索组合" : "编辑搜索组合",
-                                 identifier: "search.save", titleFont: .footnote.weight(.semibold)) {
+                                 identifier: "search.save") {
                 Button { dismiss() } label: { Text("取消").frame(minWidth: 34) }
                     .buttonStyle(FeedHeaderButtonStyle()).accessibilityIdentifier("search.save.cancel")
             } trailing: {
@@ -408,7 +426,7 @@ struct DiscoveryComposerView: View {
         else { _savedName = State(initialValue: "") }
         _draft = State(initialValue: SearchDraft(query: query, site: site))
         _draftSavedID = State(initialValue: savedID)
-        _filtersExpanded = State(initialValue: startAt == .filters)
+        _filtersExpanded = State(initialValue: startAt != .main)
         _startsWithFavorites = State(initialValue: startAt == .favorites)
         _loadedSource = State(initialValue: loadedPreset.map { LoadedSearchSource($0) })
         _detailTagSource = State(initialValue: detailTagSource)
@@ -450,7 +468,7 @@ struct DiscoveryComposerView: View {
 
     @ViewBuilder private var page: some View {
         if startsWithFavorites {
-            SearchPresetsView(list: .favorite, source: loadedSource, sourceModified: sourceModified) { source in
+            SearchPresetsView(list: .favorite, source: loadedSource, sourceModified: sourceModified, onClose: onCancel) { source in
                 load(source); startsWithFavorites = false
             }
         } else {
@@ -511,8 +529,8 @@ struct DiscoveryComposerView: View {
         if clearedDraft || detailTagSource != nil || loadedSource != nil {
             composerStatus.searchComposerCardSurface(allowsMultiline: true)
         }
-        filterCard
         if !isSavedEditor { favoriteDraftCard }
+        filterCard
         if filtersExpanded { filterSections }
         if showsRecentSearches {
             Text("最近搜索")
@@ -594,10 +612,7 @@ struct DiscoveryComposerView: View {
                     .layoutPriority(1)
                     .accessibilityIdentifier("compose.filters.title")
                 Spacer(minLength: 0)
-                Text(filterCount)
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("compose.filters.count")
+                filterCardDetail
                 Image(systemName: filtersExpanded ? "chevron.up" : "chevron.down")
                     .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
@@ -607,6 +622,28 @@ struct DiscoveryComposerView: View {
             .accessibilityValue("\(filtersExpanded ? "已展开" : "已收起") · \(filterCount) · \(fullFilterSummary)")
             .accessibilityHint(filtersExpanded ? "收起筛选条件" : "展开查看全部筛选条件")
             .buttonStyle(.plain)
+    }
+
+    private var filterCardDetail: some View {
+        ViewThatFits(in: .horizontal) {
+            if !filtersExpanded, let query = try? draft.validatedQuery(),
+               SearchPresentation.conditionCount(query) > 0 {
+                let preview = SearchPresentation.presetPreview(query, includeText: false)
+                HStack(spacing: FeedChrome.panelSpacing) {
+                    if !preview.conditions.isEmpty {
+                        Text(preview.conditions).truncationMode(.tail)
+                            .accessibilityIdentifier("compose.filters.preview")
+                    }
+                    if !preview.limits.isEmpty {
+                        Text(preview.limits).monospacedDigit().fixedSize()
+                            .accessibilityIdentifier("compose.filters.limits")
+                    }
+                }
+            }
+            Text(filterCount).accessibilityIdentifier("compose.filters.count")
+        }
+        .lineLimit(1)
+        .foregroundStyle(.secondary)
     }
 
     private var favoriteDraftCard: some View {
@@ -640,7 +677,7 @@ struct DiscoveryComposerView: View {
     private var composerHeader: some View {
         FloatingHeaderPanel(identifier: "compose.header") {
             FloatingPageTitleRow(title: isSavedEditor ? "编辑常用组合" : detailNavigationTitle ?? "搜索",
-                                 identifier: "compose.title", titleFont: .footnote.weight(.semibold)) {
+                                 identifier: "compose.title") {
                 Button {
                     if let onCancel { onCancel() } else { dismiss() }
                 } label: { Text("取消").frame(minWidth: 34) }
@@ -807,7 +844,7 @@ struct DiscoveryComposerView: View {
                 Text("添加标签").lineLimit(1).minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: true))
+            .buttonStyle(SearchFilterActionStyle())
             .accessibilityLabel("添加标签")
             .accessibilityHint("支持中文名和原名，可一次添加多个标签")
             .accessibilityIdentifier("compose.add-tag")
@@ -824,7 +861,7 @@ struct DiscoveryComposerView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: true))
+            .buttonStyle(SearchFilterActionStyle())
             .disabled(library.snapshot.favoriteTags.isEmpty)
             .accessibilityLabel("常用标签")
             .accessibilityValue(commonTagsExpanded ? "已展开" : "已收起")
@@ -837,7 +874,7 @@ struct DiscoveryComposerView: View {
             .padding(FeedChrome.panelSpacing)
             .frame(maxWidth: .infinity, alignment: .leading)
             .formRowSurface(outer: true)
-            .padding(.vertical, FeedChrome.panelSpacing)
+            .padding(.vertical, FeedChrome.panelSpacing / 2)
     }
 
     private var categoryIDs: Set<Int> { Set(GalleryCategory.all.map(\.id)) }
@@ -851,6 +888,7 @@ struct DiscoveryComposerView: View {
             Button { draft.query.excludedCategories.removeAll() } label: {
                 Text("全选").frame(maxWidth: .infinity)
             }
+            .buttonStyle(SearchFilterActionStyle(highlighted: true))
             .disabled(selectedCategoryCount == GalleryCategory.all.count)
             .accessibilityIdentifier("compose.categories.select-all")
             Button {
@@ -858,9 +896,9 @@ struct DiscoveryComposerView: View {
             } label: {
                 Text("反选").frame(maxWidth: .infinity)
             }
+            .buttonStyle(SearchFilterActionStyle())
             .accessibilityIdentifier("compose.categories.invert")
         }
-        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: true))
     }
 
     private var categorySection: some View {
@@ -1046,6 +1084,22 @@ private extension View {
             .padding(.horizontal, FeedChrome.contentSpacing)
             .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .leading)
             .formRowSurface(shape: AppShape.control)
+    }
+}
+
+private struct SearchFilterActionStyle: ButtonStyle {
+    var highlighted = false
+    @Environment(\.isEnabled) private var enabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let accented = highlighted && enabled
+        configuration.label
+            .font(FeedChrome.labelFont)
+            .foregroundStyle(accented ? Color.accentColor : Color.primary)
+            .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
+            .frame(minHeight: FeedChrome.rowHeight)
+            .contentShape(Rectangle())
+            .appControlSurface(selected: accented)
     }
 }
 

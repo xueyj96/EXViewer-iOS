@@ -290,7 +290,7 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         XCTAssertTrue(card.isHittable)
         XCTAssertEqual(card.frame.midY, position, accuracy: 2)
         card.press(forDuration: 0.7)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["detail.tags.search-menu"].exists)
     }
 }

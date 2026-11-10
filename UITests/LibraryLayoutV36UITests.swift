@@ -17,7 +17,7 @@ final class LibraryLayoutV36UITests: XCTestCase {
 
     private func selectFirst(_ app: XCUIApplication) {
         app.buttons["favorites.gallery.10000"].press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         let tabs = app.descendants(matching: .any)["main.tabs.compact"].firstMatch
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: tabs)
         waitForExpectations(timeout: 5)

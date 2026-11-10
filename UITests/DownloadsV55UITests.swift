@@ -16,7 +16,7 @@ final class DownloadsV55UITests: XCTestCase {
         if scopeMenu.exists { scopeMenu.tap() }
         XCTAssertTrue(downloadScope.waitForExistence(timeout: 5))
         downloadScope.tap()
-        XCTAssertTrue(app.buttons["downloads.help"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["downloads.select"].waitForExistence(timeout: 5))
     }
     private func options(_ app: XCUIApplication) {
         let gallery = app.buttons["gallery.open.1"]
@@ -31,18 +31,24 @@ final class DownloadsV55UITests: XCTestCase {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
-    func testDownloadPageKeepsOnlyStatusAndPutsInstructionsBehindInfo() {
+    func testDownloadPageUsesSelectionAndKeepsTheSortMenuConcise() {
         let app = launch(); downloads(app)
         XCTAssertTrue(app.staticTexts["暂无下载"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["清理浏览缓存不会移除已保存的离线副本。"].exists)
-        XCTAssertGreaterThanOrEqual(app.buttons["downloads.help"].frame.width, 44)
-        shot(app, "downloads55.quiet-empty")
-        app.buttons["downloads.help"].tap()
-        XCTAssertTrue(app.staticTexts["downloads.help-page.title"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "缓存")).firstMatch.exists)
-        app.buttons["完成"].tap()
-        XCTAssertTrue(app.buttons["downloads.help"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["downloads.select"].isEnabled)
+        XCTAssertFalse(app.buttons["downloads.help"].exists)
+        app.buttons["library.sort.downloads"].tap()
+        let recent = app.buttons["library.sort.downloads.recent"]
+        XCTAssertTrue(recent.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["最近阅读：无记录的作品置后，保留原序。"].exists)
+        recent.tap()
+        XCTAssertEqual(app.buttons["library.sort.downloads"].value as? String, "最近阅读")
+        let filter = app.buttons["downloads.filter"]
+        filter.tap()
+        app.buttons["downloads.filter.complete"].tap()
+        XCTAssertEqual(filter.value as? String, "已下载")
+        XCTAssertTrue(app.staticTexts["没有符合该状态的下载"].waitForExistence(timeout: 5))
     }
+
     func testExistingOfflineCopyOpensDownloadOptionsWhenDetailFails() {
         XCUIDevice.shared.orientation = .portrait
         let app = launch(["--qa-offline-layout", "--qa-detail-failure"])
@@ -106,11 +112,11 @@ final class DownloadsV55UITests: XCTestCase {
         downloads(app)
         let row = app.buttons["library.download.item.1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
-        XCTAssertEqual(row.value as? String, "等待中")
+        XCTAssertEqual(row.value as? String, "等待中，已保存 0/3 页")
         row.tap()
-        XCTAssertEqual(row.value as? String, "已暂停")
+        XCTAssertEqual(row.value as? String, "已暂停，已保存 0/3 页")
         row.tap()
-        XCTAssertEqual(row.value as? String, "等待中")
+        XCTAssertEqual(row.value as? String, "等待中，已保存 0/3 页")
         shot(app, "downloads55.image-queued")
     }
 
@@ -151,8 +157,25 @@ final class DownloadsV55UITests: XCTestCase {
         let first = app.buttons["library.download.item.7204"]
         let second = app.buttons["library.download.item.7202"]
         XCTAssertTrue(first.waitForExistence(timeout: 5))
-        first.press(forDuration: 0.8)
+        app.buttons["downloads.select"].tap()
         let remove = app.buttons["downloads.remove"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        XCTAssertFalse(remove.isEnabled)
+        let selectAll = app.buttons["downloads.select-all"]
+        XCTAssertEqual(selectAll.label, "全选列表")
+        shot(app, "downloads.batch.select-all")
+        selectAll.tap()
+        XCTAssertEqual(selectAll.label, "取消全选")
+        XCTAssertTrue(remove.isEnabled)
+        shot(app, "downloads.batch.deselect-all")
+        selectAll.tap()
+        XCTAssertEqual(selectAll.label, "全选列表")
+        XCTAssertFalse(remove.isEnabled)
+        let exit = app.buttons["downloads.exit"]
+        XCTAssertEqual(exit.label, "退出多选")
+        exit.tap()
+        XCTAssertTrue(app.buttons["downloads.select"].waitForExistence(timeout: 5))
+        first.press(forDuration: 0.8)
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
         XCTAssertEqual(first.value as? String, "已选中")
         second.tap()
@@ -213,10 +236,17 @@ final class DownloadsV55UITests: XCTestCase {
         downloads(app)
         let row = app.buttons["library.download.item.1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
-        XCTAssertEqual(row.value as? String, "下载失败")
+        XCTAssertEqual(row.value as? String, "下载失败，已保存 1/3 页")
+        let filter = app.buttons["downloads.filter"]
+        filter.tap()
+        app.buttons["downloads.filter.needsAttention"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
         shot(app, "download-retry.library")
         row.tap()
-        let queued = NSPredicate(format: "value == %@", "等待中")
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5))
+        filter.tap()
+        app.buttons["downloads.filter.active"].tap()
+        let queued = NSPredicate(format: "value == %@", "等待中，已保存 1/3 页")
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: queued, object: row)], timeout: 5), .completed)
     }
 }

@@ -49,6 +49,14 @@ enum QASamples {
         result.history = [0, 2, 1].map { index in
             .init(gallery: values[index], page: index + 1, date: Date(timeIntervalSince1970: Double((index == 2 ? 3 : index + 1) * 100)))
         }
+        if ProcessInfo.processInfo.arguments.contains("--qa-library-long-history") {
+            result.history += (0..<8).map { index in
+                var gallery = values[0]
+                gallery.ref.gid = Int64(7300 + index)
+                gallery.title = "History Study \(index + 1)"
+                return ReadingRecord(gallery: gallery, page: 1, date: Date(timeIntervalSince1970: Double(90 - index)))
+            }
+        }
         result.bookmarks = [0, 3, 2, 1].map { values[$0] }
         result.downloads = [3, 1, 0, 2].map { .init(gallery: values[$0], status: .paused, total: 10) }
         return result

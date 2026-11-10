@@ -752,12 +752,12 @@ final class ChromeV17UITests: XCTestCase {
         XCTAssertEqual(app.buttons["main.tab.library"].label, "资料库")
         XCTAssertEqual(app.buttons["main.tab.account"].label, "我的")
         authorComposer(app, text: "coast"); app.buttons["compose.apply"].tap()
-        app.buttons["discover.history"].tap()
-        XCTAssertTrue(app.staticTexts["阅读历史"].waitForExistence(timeout: 5))
+        app.buttons["discover.lane.2"].tap()
+        XCTAssertTrue(app.textFields["reading-history.search-field"].waitForExistence(timeout: 5))
         let row = app.buttons["reading-history.item.7203"]
         XCTAssertTrue(row.waitForExistence(timeout: 5)); row.tap()
         XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5)); app.buttons["BackButton"].tap()
-        app.buttons["reading-history.close"].tap()
+        app.buttons["discover.lane.0"].tap()
         let search = app.buttons["discover.search-entry"]
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         XCTAssertTrue((search.value as? String)?.contains("coast") == true)
@@ -765,7 +765,7 @@ final class ChromeV17UITests: XCTestCase {
         app.buttons["library.scope.2"].tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         app.buttons["main.tab.discover"].tap()
-        app.buttons["discover.history"].tap()
+        app.buttons["discover.lane.2"].tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5)); row.tap()
         let author = app.buttons["detail.tag.artist:preview studio"]
         for _ in 0..<6 { if author.isHittable { break }; app.swipeUp() }

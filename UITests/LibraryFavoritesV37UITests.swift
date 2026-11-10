@@ -101,7 +101,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         chooseGroup("稍后阅读", app: app)
         let card = app.buttons["favorites.gallery.1"]
         XCTAssertTrue(card.waitForExistence(timeout: 5)); card.press(forDuration: 0.8)
-        XCTAssertTrue(app.staticTexts["已选 1 项"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["favorites.group-filter"].exists)
         app.buttons["favorites.edit"].tap()
         let filter = app.buttons["favorites.group-filter"]
@@ -196,7 +196,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: 5)); first.press(forDuration: 0.8)
         let second = app.buttons["discover.select.2"]
         XCTAssertTrue(second.waitForExistence(timeout: 5)); second.tap()
-        XCTAssertTrue(app.staticTexts["已选 2 项"].exists)
+        XCTAssertTrue(app.batchSelection("已选 2 项", source: "discover").exists)
         app.buttons["discover.favorite"].tap()
         let group = app.buttons["favorites.add-to.1"]
         XCTAssertTrue(group.waitForExistence(timeout: 5)); group.tap()
@@ -204,7 +204,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         let feedback = app.staticTexts["discover.feedback"]
         XCTAssertTrue(feedback.waitForExistence(timeout: 5))
         XCTAssertTrue(feedback.label.contains("已加入收藏同步队列 2 项"))
-        XCTAssertTrue(app.staticTexts["已选 2 项"].exists)
+        XCTAssertTrue(app.batchSelection("已选 2 项", source: "discover").exists)
         app.buttons["discover.download"].tap()
         XCTAssertTrue(feedback.label.contains("已加入下载队列 2 项"))
         app.buttons["discover.exit"].tap()
@@ -216,22 +216,26 @@ final class LibraryFavoritesV37UITests: XCTestCase {
     }
 
     func testReadingHistoryLongPressShowsOnlyTheThreeBatchActions() {
-        let app = launch(["--qa-library-sort", "--qa-reset-library-sort"])
+        let app = launch(["--qa-library-sort", "--qa-reset-library-sort", "--qa-library-long-history"])
         let discoverHeader = app.descendants(matching: .any)["discover.header.floating"].firstMatch
-        let headerY = discoverHeader.frame.minY
-        app.buttons["discover.history"].tap()
-        let header = app.descendants(matching: .any)["reading-history.header.floating"].firstMatch
-        XCTAssertTrue(header.waitForExistence(timeout: 5))
-        XCTAssertEqual(header.frame.minY - headerY, 3, accuracy: 1)
+        let headerFrame = discoverHeader.frame
+        app.buttons["discover.lane.2"].tap()
+        XCTAssertTrue(app.textFields["reading-history.search-field"].waitForExistence(timeout: 5))
+        XCTAssertEqual(discoverHeader.frame, headerFrame)
         let mainTab = app.buttons["main.tab.discover"]
         XCTAssertTrue(mainTab.isHittable)
         let bottomFrame = mainTab.frame
         let bottomBarFrame = app.descendants(matching: .any)["main.tabs.compact"].firstMatch.frame
-        capture(app, "reading-history-full-page")
-        let item = app.buttons["reading-history.item.7202"]
-        XCTAssertTrue(item.waitForExistence(timeout: 5)); item.press(forDuration: 0.8)
-        XCTAssertTrue(app.buttons["reading-history.select.7202"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.buttons["reading-history.select.7202"].value as? String, "已选中")
+        capture(app, "reading-history-inline")
+        let item = app.buttons["reading-history.item.7304"]
+        let list = app.descendants(matching: .any)["reading-history"].firstMatch
+        for _ in 0..<7 {
+            if item.isHittable { break }
+            list.swipeUp()
+        }
+        XCTAssertTrue(item.isHittable); item.press(forDuration: 0.8)
+        XCTAssertTrue(app.buttons["reading-history.select.7304"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["reading-history.select.7304"].value as? String, "已选中")
         let actionBar = app.descendants(matching: .any)["reading-history.actions"].firstMatch
         XCTAssertEqual(actionBar.frame, bottomBarFrame)
         for action in ["add-read-later", "favorite", "download"] {
@@ -245,7 +249,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         XCTAssertTrue(mainTab.isHittable)
         XCTAssertEqual(mainTab.frame, bottomFrame)
         app.buttons["BackButton"].tap()
-        app.buttons["reading-history.close"].tap()
+        app.buttons["discover.lane.0"].tap()
         XCTAssertTrue(app.buttons["main.tab.discover"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["main.tab.discover"].isHittable)
     }

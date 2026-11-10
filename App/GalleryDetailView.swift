@@ -2,7 +2,6 @@ import SwiftUI
 import ExViewerCore
 
 struct GalleryDetailView: View {
-    private static let categoryTranslations = TagTranslationCatalog.bundled?.namespaces["reclass"] ?? [:]
 
     let gallery: Gallery
     private let onResumeReading: (() -> Void)?
@@ -181,21 +180,12 @@ struct GalleryDetailView: View {
     }
 
     @ViewBuilder private var galleryFacts: some View {
-        let category = current.category.trimmingCharacters(in: .whitespacesAndNewlines)
-        if current.rating != nil || !category.isEmpty || current.pages != nil {
+        let facts = GalleryFact.items(for: current)
+        if !facts.isEmpty {
             TagWrapLayout(spacing: FeedChrome.DetailCard.inset, rowSpacing: FeedChrome.panelSpacing) {
-                if let rating = current.rating {
-                    factChip("分数", value: String(format: "%.1f", rating))
-                        .accessibilityIdentifier("detail.info.rating")
-                }
-                if !category.isEmpty {
-                    let key = category.lowercased().filter { !$0.isWhitespace }
-                    factChip("类别", value: Self.categoryTranslations[key] ?? category)
-                        .accessibilityIdentifier("detail.info.category")
-                }
-                if let pages = current.pages {
-                    factChip("页数", value: "\(pages) 页")
-                        .accessibilityIdentifier("detail.info.pages")
+                ForEach(facts) { fact in
+                    factChip(fact.label, value: fact.value)
+                        .accessibilityIdentifier("detail.info.\(fact.id)")
                 }
             }
         }

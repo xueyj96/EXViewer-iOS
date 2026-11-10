@@ -266,7 +266,7 @@ struct ReaderView: View {
                     }
                 }
                 .alert("跳转到页码", isPresented: $jump) { TextField("页码", text: $jumpText).keyboardType(.numberPad); Button("跳转") { if let page = Int(jumpText) { Task { await seek(page) } } }; Button("取消", role: .cancel) { } } message: { Text("动图完整播放，按一张图片计算一页。") }
-                .overlay(alignment: .top) { if findingPage { ProgressView("正在定位页面").font(.caption).padding(8).allowsHitTesting(false) } }
+                .overlay(alignment: .top) { if findingPage { ProgressView("正在定位页面").font(FeedChrome.labelFont).padding(8).allowsHitTesting(false) } }
                 .sheet(isPresented: $settings, onDismiss: {
                     if favoriteAfterSettings { favoriteAfterSettings = false; favoriteEditing = true }
                 }) { readerSettings }
@@ -720,7 +720,7 @@ struct ReaderView: View {
                 Text("正在加载第 \(target) 页…")
             }
         }
-        .font(.caption)
+        .font(FeedChrome.labelFont)
         .padding(.horizontal, FeedChrome.contentSpacing)
         .frame(minHeight: FeedChrome.compactFormRowHeight)
         .foregroundStyle(.white)
@@ -788,7 +788,7 @@ struct ReaderView: View {
             }
             Button { jumpText = String(current); jump = true } label: {
                 Text("\(current) / \(model.total.map(String.init) ?? "未知")")
-                    .font(.caption.weight(.semibold).monospacedDigit()).lineLimit(1).minimumScaleFactor(0.65)
+                    .font(FeedChrome.emphasizedLabelFont.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.65)
                     .foregroundStyle(.white).padding(.horizontal, 5)
                     .frame(minWidth: 54, minHeight: 44).fixedSize(horizontal: true, vertical: false)
                     .contentShape(Rectangle())
@@ -850,7 +850,7 @@ struct ReaderView: View {
         HStack(spacing: FeedChrome.panelSpacing) {
             closeButton
             Text(gallery.title)
-                .font(.subheadline.weight(.medium))
+                .font(FeedChrome.labelFont)
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .truncationMode(.tail)

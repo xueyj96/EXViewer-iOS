@@ -5,7 +5,9 @@ final class SearchContractV43UITests: XCTestCase {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-favorites.load."))
     }
     private func openFavorites(_ app: XCUIApplication) {
-        app.buttons["discover.saved-menu"].tap()
+        let common = app.buttons["discover.saved-menu"]
+        XCTAssertTrue(common.waitForExistence(timeout: 5)); common.tap()
+        XCTAssertTrue(favoriteRows(app).firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(favoriteRows(app).count, 3)
     }
     private func replace(_ field: XCUIElement, with text: String) {
@@ -18,14 +20,38 @@ final class SearchContractV43UITests: XCTestCase {
     }
     func testFavoritesTapLoadsWhileLongPressEditsOriginalAndKeepsFilters() {
         let app = launch(["--qa-saved-search-management"])
+        let filterShortcut = app.buttons["discover.filters"]
+        XCTAssertTrue(filterShortcut.waitForExistence(timeout: 5)); filterShortcut.tap()
+        let filters = app.buttons["compose.filters"]
+        XCTAssertTrue(filters.waitForExistence(timeout: 5))
+        XCTAssertTrue((filters.value as? String)?.hasPrefix("已展开") == true)
+        app.buttons["compose.cancel"].tap()
+        XCTAssertTrue(app.buttons["compose.cancel"].waitForNonExistence(timeout: 5))
+
         openFavorites(app)
         let initial = favoriteRows(app).element(boundBy: 0)
         let id = initial.identifier
+        // XCTest includes the list row’s 4 pt bottom inset around the 52 pt card.
+        XCTAssertEqual(initial.frame.height, 56, accuracy: 1)
         initial.tap()
         XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 4))
         XCTAssertEqual(app.textFields["compose.text"].value as? String, "coast")
+        XCTAssertTrue((filters.value as? String)?.hasPrefix("已展开") == true)
+        let favoriteAction = app.buttons["compose.save-favorite"]
+        let firstFilter = app.staticTexts["搜索范围"]
+        XCTAssertTrue(firstFilter.exists)
+        XCTAssertLessThan(favoriteAction.frame.maxY, filters.frame.midY)
+        XCTAssertLessThan(filters.frame.maxY, firstFilter.frame.midY)
+        filters.tap()
+        let filterPreview = app.staticTexts["compose.filters.preview"]
+        let filterLimits = app.staticTexts["compose.filters.limits"]
+        XCTAssertTrue(filterPreview.waitForExistence(timeout: 5))
+        XCTAssertFalse(filterPreview.label.contains("coast"))
+        XCTAssertEqual(filterLimits.label, "≥3 星")
+        XCTAssertTrue((app.buttons["compose.filters"].value as? String)?.contains("language:chinese") == true)
         XCTAssertFalse(app.textFields["saved-editor.name"].exists)
         app.buttons["compose.cancel"].tap()
+        XCTAssertTrue(app.buttons["compose.cancel"].waitForNonExistence(timeout: 5))
         XCTAssertFalse(app.buttons["discover.back"].exists, "Loading must not execute the query")
 
         openFavorites(app)
@@ -44,7 +70,8 @@ final class SearchContractV43UITests: XCTestCase {
         XCTAssertTrue(updated.label.contains("≥3星"))
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "saved-search42.updated-original"; shot.lifetime = .keepAlways; add(shot)
         app.buttons["search-presets.close"].tap()
-        app.buttons["discover.saved-menu"].tap()
+        XCTAssertTrue(app.buttons["search-presets.close"].waitForNonExistence(timeout: 5))
+        openFavorites(app)
         let saved = favoriteRows(app).element(boundBy: 0)
         XCTAssertTrue(saved.waitForExistence(timeout: 4)); saved.press(forDuration: 0.8)
         XCTAssertTrue(app.textFields["saved-editor.name"].waitForExistence(timeout: 4))
@@ -78,7 +105,8 @@ final class SearchContractV43UITests: XCTestCase {
         app.buttons["search-favorites.reorder"].tap()
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "saved-search42.reordered"; shot.lifetime = .keepAlways; add(shot)
         app.buttons["search-presets.close"].tap()
-        app.buttons["discover.saved-menu"].tap()
+        XCTAssertTrue(app.buttons["search-presets.close"].waitForNonExistence(timeout: 5))
+        openFavorites(app)
         let reopened = favoriteRows(app)
         XCTAssertEqual(reopened.count, 3)
         XCTAssertTrue(reopened.element(boundBy: 0).label.contains("短篇优先"))

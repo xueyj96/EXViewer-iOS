@@ -289,16 +289,17 @@ private struct RecentSearchFile: Codable {
         guard TagFilter.decision(tags: metadata.tags, blocked: blockedIDs, complete: metadata.tagsComplete) == .visible else { return nil }
         return record
     }
+    func downloadedPage(_ index: Int, in record: DownloadRecord) -> GalleryPage? {
+        guard index > 0, let name = record.completed[index], name == "page-\(index).media" else { return nil }
+        let url = offlineDirectory(record.gallery).appendingPathComponent(name)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { return nil }
+        return GalleryPage(index: index, url: url)
+    }
+
     func downloadedPages(_ record: DownloadRecord) -> [GalleryPage] {
-        let directory = offlineDirectory(record.gallery)
-        return record.completed.sorted { $0.key < $1.key }.compactMap { index, name in
-            guard index > 0, name == "page-\(index).media" else { return nil }
-            let url = directory.appendingPathComponent(name)
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-                  !isDirectory.boolValue else { return nil }
-            return GalleryPage(index: index, url: url)
-        }
+        record.completed.keys.sorted().compactMap { downloadedPage($0, in: record) }
     }
 
     func pinOfflineReader(_ gallery: GalleryRef, context: UUID) {
@@ -364,6 +365,7 @@ private struct RecentSearchFile: Codable {
 
 enum SearchPresentation {
     private static let headerCatalog = TagTranslationCatalog.bundled
+    private enum ConditionStyle { case full, header, preset }
 
     static func headerTitle(_ query: SearchQuery, savedName: String?) -> String {
         if !query.hasSettings { return "关键词、标签与条件" }
@@ -381,9 +383,17 @@ enum SearchPresentation {
     }
 
     static func compactConditions(_ query: SearchQuery) -> String {
-        let values = conditionItems(query, includeText: false, translatedTags: true)
+        let values = conditionItems(query, includeText: false, style: .header)
         let preview = values.prefix(2).joined(separator: " · ")
         return values.count > 2 ? "\(preview) · 另\(values.count - 2)项条件" : preview
+    }
+
+    static func presetPreview(_ query: SearchQuery, includeText: Bool = true) -> (conditions: String, limits: String) {
+        let items = conditionItems(query, includeText: includeText, style: .preset)
+        let limits = ratingAndPageItems(query, compact: true).joined(separator: " · ")
+        let summary = items.prefix(2).joined(separator: " · ")
+        if summary.isEmpty { return (limits.isEmpty ? "全部画廊" : "", limits) }
+        return (items.count > 2 ? summary + "…" : summary, limits)
     }
 
     static func conditionCount(_ query: SearchQuery, includeText: Bool = false) -> Int {
@@ -408,28 +418,34 @@ enum SearchPresentation {
     }
 
     private static func conditionItems(_ query: SearchQuery, includeText: Bool,
-                                       translatedTags: Bool = false) -> [String] {
+                                       style: ConditionStyle = .full) -> [String] {
         var values: [String] = []
         if includeText && !query.text.isEmpty { values.append(query.text) }
         if query.titleOnly { values.append("仅标题") }
         if query.matchPhrase { values.append("完整短语") }
         if !query.artist.isEmpty { values.append("作者 \(query.artist)") }
         for rule in query.rules {
-            let translated = translatedTags ? headerCatalog?.translation(for: rule.tag) : nil
-            let name = translated.flatMap { $0.isEmpty ? nil : $0 } ?? rule.tag.label
-            values.append("\(rule.match.name) \(name)")
+            let translated = style == .full ? nil : headerCatalog?.translation(for: rule.tag)
+            let name = translated.flatMap { $0.isEmpty ? nil : $0 } ?? (style == .preset ? rule.tag.name : rule.tag.label)
+            values.append(style == .preset && rule.match == .all ? name : "\(rule.match.name) \(name)")
         }
         let categories = GalleryCategory.all.filter { query.excludedCategories.contains($0.id) }.map(\.name)
         if !categories.isEmpty { values.append("排除分类 \(categories.joined(separator: "、"))") }
-        if let rating = query.minRating { values.append("≥\(rating)星") }
-        switch (query.minPages, query.maxPages) {
-        case let (minimum?, maximum?): values.append("\(minimum)–\(maximum) 页")
-        case let (minimum?, nil): values.append("至少 \(minimum) 页")
-        case let (nil, maximum?): values.append("最多 \(maximum) 页")
-        case (nil, nil): break
-        }
+        if style != .preset { values += ratingAndPageItems(query) }
         if !query.uploader.isEmpty { values.append("上传者 \(query.uploader)") }
         if query.requireTorrent { values.append("torrent") }
+        return values
+    }
+
+    private static func ratingAndPageItems(_ query: SearchQuery, compact: Bool = false) -> [String] {
+        var values: [String] = []
+        if let rating = query.minRating { values.append(compact ? "≥\(rating) 星" : "≥\(rating)星") }
+        switch (query.minPages, query.maxPages) {
+        case let (minimum?, maximum?): values.append("\(minimum)–\(maximum) 页")
+        case let (minimum?, nil): values.append(compact ? "≥\(minimum) 页" : "至少 \(minimum) 页")
+        case let (nil, maximum?): values.append(compact ? "≤\(maximum) 页" : "最多 \(maximum) 页")
+        case (nil, nil): break
+        }
         return values
     }
 }

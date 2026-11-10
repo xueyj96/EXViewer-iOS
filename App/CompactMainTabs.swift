@@ -1,7 +1,7 @@
 import SwiftUI
 
 private struct PinnedHeader {
-    let id: String
+    let transitionID: String
     let twoRows: Bool
     let view: AnyView
 }
@@ -64,7 +64,11 @@ enum FeedChrome {
     static let compactFormRowHeight: CGFloat = 36
     static let compactPickerHeight: CGFloat = 32
     static let controlSpacing: CGFloat = 8
-    static let labelFont = Font.footnote.weight(.medium)
+    private static let textSize: Font.TextStyle = .footnote
+    static let labelFont = Font.system(textSize, weight: .medium)
+    static let iconScale: Image.Scale = .small
+    static let iconLabelSpacing: CGFloat = 4
+    static let emphasizedLabelFont = Font.system(textSize, weight: .semibold)
     static let panelSpacing: CGFloat = 4
     static let panelShape = AppShape.aligned(with: AppShape.control, offset: panelSpacing)
     static let rowSurfaceHeight: CGFloat = 34
@@ -153,12 +157,15 @@ struct FloatingHeaderPanel<Content: View>: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.pinsPageChrome) private var pinsPageChrome
     let identifier: String
+    let transitionID: String
     let twoRows: Bool
     let canPin: Bool
     let content: Content
 
-    init(identifier: String, twoRows: Bool = false, canPin: Bool = true, @ViewBuilder content: () -> Content) {
+    init(identifier: String, transitionID: String? = nil, twoRows: Bool = false, canPin: Bool = true,
+         @ViewBuilder content: () -> Content) {
         self.identifier = identifier
+        self.transitionID = transitionID ?? identifier
         self.twoRows = twoRows
         self.canPin = canPin
         self.content = content()
@@ -167,7 +174,7 @@ struct FloatingHeaderPanel<Content: View>: View {
     var body: some View {
         if pinsPageChrome && canPin {
             panel.hidden().accessibilityHidden(true)
-                .preference(key: PinnedHeaderPreference.self, value: [.init(id: identifier, twoRows: twoRows, view: AnyView(panel))])
+                .preference(key: PinnedHeaderPreference.self, value: [.init(transitionID: transitionID, twoRows: twoRows, view: AnyView(panel))])
         } else {
             panel
         }
@@ -199,20 +206,54 @@ private extension View {
     }
 }
 
-struct FeedHeaderRows<Primary: View, Secondary: View>: View {
-    @ViewBuilder let primary: Primary
-    @ViewBuilder let secondary: Secondary
+struct FloatingTwoRowHeader: View {
+    let identifier: String
+    let transitionID: String
+    let primaryLayout: String
+    let secondaryLayout: String
+    let note: AnyView?
+    private let primary: AnyView
+    private let secondary: AnyView
     @Environment(\.dynamicTypeSize) private var typeSize
 
+    init<Primary: View, Secondary: View>(identifier: String, transitionID: String, primaryLayout: String,
+                                         secondaryLayout: String, note: AnyView? = nil,
+                                         @ViewBuilder primary: () -> Primary, @ViewBuilder secondary: () -> Secondary) {
+        self.identifier = identifier
+        self.transitionID = transitionID
+        self.primaryLayout = primaryLayout
+        self.secondaryLayout = secondaryLayout
+        self.note = note
+        self.primary = AnyView(primary())
+        self.secondary = AnyView(secondary())
+    }
+
     var body: some View {
-        VStack(spacing: FeedChrome.rowSpacing(for: typeSize)) {
-            primary
-                .environment(\.feedHeaderRow, .primary)
-                .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight, alignment: .leading)
-            secondary
-                .environment(\.feedHeaderRow, .secondary)
-                .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight, alignment: .leading)
+        FloatingHeaderPanel(identifier: identifier, transitionID: transitionID, twoRows: true) {
+            VStack(spacing: FeedChrome.rowSpacing(for: typeSize)) {
+                note
+                FloatingHeaderRow(layout: primaryLayout, content: primary)
+                    .environment(\.feedHeaderRow, .primary)
+                FloatingHeaderRow(layout: secondaryLayout, content: secondary)
+                    .environment(\.feedHeaderRow, .secondary)
+            }
         }
+    }
+}
+
+private struct FloatingHeaderRow: View {
+    let layout: String
+    let content: AnyView
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            content
+                .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight, alignment: .leading)
+                .id(layout)
+                .transition(.opacity)
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: layout)
     }
 }
 
@@ -220,7 +261,6 @@ struct FloatingPageTitleRow<Leading: View, Trailing: View>: View {
     let title: String
     let identifier: String
     var balancesActions = true
-    var titleFont = Font.subheadline.weight(.semibold)
     @ViewBuilder let leading: () -> Leading
     @ViewBuilder let trailing: () -> Trailing
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -229,7 +269,7 @@ struct FloatingPageTitleRow<Leading: View, Trailing: View>: View {
         PageTitleLayout(balancesActions: balancesActions) {
             HStack(spacing: FeedChrome.panelSpacing, content: leading)
             Text(title)
-                .font(titleFont)
+                .font(FeedChrome.emphasizedLabelFont)
                 .lineLimit(1).minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .feedHeaderControl(typeSize: typeSize, expandsHorizontally: true)
@@ -312,13 +352,16 @@ private struct FloatingBackPageHeader<Trailing: View>: View {
 
 extension View {
     func suppressPinnedChromePreferences(_ suppress: Bool) -> some View {
-        transformPreference(PinnedHeaderPreference.self) { if suppress { $0 = [] } }
-            .transformPreference(PinnedBottomPreference.self) { if suppress { $0 = nil } }
+        replacingPinnedChrome(suppress, bottom: nil)
     }
 
     func hidePinnedChromeForReader(_ showingReader: Bool) -> some View {
-        transformPreference(PinnedHeaderPreference.self) { if showingReader { $0 = [] } }
-            .transformPreference(PinnedBottomPreference.self) { if showingReader { $0 = .hidden } }
+        replacingPinnedChrome(showingReader, bottom: .hidden)
+    }
+
+    private func replacingPinnedChrome(_ replace: Bool, bottom: PinnedBottomContent?) -> some View {
+        transformPreference(PinnedHeaderPreference.self) { if replace { $0 = [] } }
+            .transformPreference(PinnedBottomPreference.self) { if replace { $0 = bottom } }
     }
 
     func localPageChrome() -> some View {
@@ -382,14 +425,13 @@ extension View {
 
     func floatingPageHeader<Leading: View, Trailing: View>(
         _ title: String, identifier: String, balancesActions: Bool = true, pinned: Bool = false,
-        titleFont: Font = .subheadline.weight(.semibold),
         @ViewBuilder leading: @escaping () -> Leading,
         @ViewBuilder trailing: @escaping () -> Trailing
     ) -> some View {
         toolbar(.hidden, for: .navigationBar)
             .safeAreaInset(edge: .top, spacing: 0) {
                 FloatingHeaderPanel(identifier: "\(identifier).header", canPin: pinned) {
-                    FloatingPageTitleRow(title: title, identifier: "\(identifier).title", balancesActions: balancesActions, titleFont: titleFont,
+                    FloatingPageTitleRow(title: title, identifier: "\(identifier).title", balancesActions: balancesActions,
                                          leading: leading, trailing: trailing)
                         .environment(\.feedHeaderRow, .single)
                 }
@@ -397,17 +439,18 @@ extension View {
     }
 }
 
-/// A row shares four column guides with every other row in the header.
+/// Divides the row into equal tracks, with each control spanning one or more tracks.
 struct FeedHeaderGrid: Layout {
     let spans: [Int]
     private let spacing = FeedChrome.panelSpacing
+    private var columnCount: Int { spans.reduce(0, +) }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let column = columnWidth(for: proposal.width)
         let height = zip(subviews, spans).map { view, span in
             view.sizeThatFits(.init(width: width(of: span, column: column), height: nil)).height
         }.max() ?? 0
-        return CGSize(width: width(of: 4, column: column), height: height)
+        return CGSize(width: width(of: columnCount, column: column), height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -422,7 +465,7 @@ struct FeedHeaderGrid: Layout {
     }
 
     private func columnWidth(for width: CGFloat?) -> CGFloat {
-        max(FeedChrome.rowHeight, ((width ?? 0) - 3 * spacing) / 4)
+        max(FeedChrome.rowHeight, ((width ?? 0) - CGFloat(columnCount - 1) * spacing) / CGFloat(columnCount))
     }
 
     private func width(of span: Int, column: CGFloat) -> CGFloat {
@@ -460,11 +503,10 @@ private struct FeedHeaderControlSurface: ViewModifier {
     @Environment(\.feedHeaderRow) private var row
 
     func body(content: Content) -> some View {
-        let compact = row == .secondary && !typeSize.isAccessibilitySize
         let insets = FeedChrome.surfaceInsets(for: typeSize, row: row)
         content
             .font(FeedChrome.labelFont)
-            .imageScale(compact ? .small : .medium)
+            .imageScale(FeedChrome.iconScale)
             .padding(.horizontal, FeedChrome.controlSpacing)
             .offset(y: FeedChrome.contentOffset(for: insets))
             .frame(minWidth: FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight)
@@ -491,47 +533,66 @@ struct FeedScopePicker: View {
 
     var body: some View {
         let surfaceInsets = FeedChrome.surfaceInsets(for: typeSize, row: row)
-        let layout = alignsToHeaderGrid
-            ? AnyLayout(FeedHeaderGrid(spans: [1, 1, 1, 1]))
-            : AnyLayout(HStackLayout(spacing: 2))
-        layout {
-            ForEach(options) { option in
-                Button { selection = option.id } label: {
-                    Group {
-                        if alignsToHeaderGrid {
-                            HStack(spacing: 4) {
-                                Image(systemName: option.symbol).imageScale(.small)
-                                Text(option.title).lineLimit(1).minimumScaleFactor(0.85)
-                            }
-                        } else if showsSymbols {
-                            Label(option.title, systemImage: option.symbol).fixedSize(horizontal: true, vertical: false)
-                        } else {
-                            Text(option.title).fixedSize(horizontal: true, vertical: false)
-                        }
-                    }
-                    .font(FeedChrome.labelFont)
-                    .padding(.horizontal, alignsToHeaderGrid ? 3 : 5)
-                    .offset(y: FeedChrome.contentOffset(for: surfaceInsets))
-                    .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
-                    .background {
+        Group {
+            if alignsToHeaderGrid {
+                FeedHeaderGrid(spans: options.map { _ in 1 }) {
+                    optionButtons(surfaceInsets: surfaceInsets)
+                }
+            } else {
+                HStack(spacing: 2) {
+                    optionButtons(surfaceInsets: surfaceInsets)
+                }
+                .padding(.horizontal, AppShape.segmentInset)
+                .appControlSurface(insets: surfaceInsets)
+            }
+        }
+        .accessibilityElement(children: .contain).accessibilityIdentifier(identifier)
+    }
+
+    private func optionButtons(surfaceInsets: EdgeInsets) -> some View {
+        ForEach(options) { option in
+            let isSelected = selection == option.id
+            Button { selection = option.id } label: {
+                let label = optionLabel(option, surfaceInsets: surfaceInsets)
+                if alignsToHeaderGrid {
+                    label.appControlSurface(selected: isSelected, insets: surfaceInsets)
+                } else {
+                    label.background {
                         AppShape.segment
-                            .fill(selection == option.id ? Color.accentColor.opacity(0.12) : Color.clear)
-                            .padding(.horizontal, alignsToHeaderGrid ? AppShape.segmentInset : 0)
+                            .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
                             .padding(.vertical, AppShape.segmentInset)
                             .padding(surfaceInsets)
                     }
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).foregroundStyle(selection == option.id ? Color.accentColor : Color.primary)
-                .accessibilityLabel(option.title)
-                .accessibilityAddTraits(selection == option.id ? .isSelected : [])
-                .accessibilityIdentifier("\(identifier).\(option.id)")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+            .accessibilityLabel(option.title)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .accessibilityIdentifier("\(identifier).\(option.id)")
+        }
+    }
+
+    private func optionLabel(_ option: FeedScopeOption, surfaceInsets: EdgeInsets) -> some View {
+        Group {
+            if alignsToHeaderGrid {
+                HStack(spacing: FeedChrome.iconLabelSpacing) {
+                    Image(systemName: option.symbol).imageScale(FeedChrome.iconScale)
+                    Text(option.title).lineLimit(1).truncationMode(.tail).minimumScaleFactor(0.85)
+                }
+            } else if showsSymbols {
+                Label(option.title, systemImage: option.symbol).fixedSize(horizontal: true, vertical: false)
+            } else {
+                Text(option.title).fixedSize(horizontal: true, vertical: false)
             }
         }
-        .padding(.horizontal, alignsToHeaderGrid ? 0 : AppShape.segmentInset)
-        .appControlSurface(insets: surfaceInsets)
-        .accessibilityElement(children: .contain).accessibilityIdentifier(identifier)
+        .font(FeedChrome.labelFont)
+        .padding(.horizontal, alignsToHeaderGrid ? 3 : 5)
+        .offset(y: FeedChrome.contentOffset(for: surfaceInsets))
+        .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
+        .contentShape(Rectangle())
     }
+
 }
 
 private struct PinnedHeaderRowTransition: ViewModifier, Animatable {
@@ -605,6 +666,10 @@ struct CompactMainTabs<Content: View>: View {
         self.content = content()
     }
 
+    private var chromeFade: Animation? {
+        reduceMotion ? nil : .easeInOut(duration: 0.16)
+    }
+
     var body: some View {
         content
             .environment(\.pinsPageChrome, true)
@@ -619,7 +684,7 @@ struct CompactMainTabs<Content: View>: View {
                         pinnedHeader(header).transition(.opacity)
                     }
                 }
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: headers.last != nil)
+                .animation(chromeFade, value: headers.last != nil)
             }
             .overlayPreferenceValue(PinnedBottomPreference.self, alignment: .bottom) { replacement in
                 if case .hidden? = replacement {
@@ -633,7 +698,7 @@ struct CompactMainTabs<Content: View>: View {
                                 tabButtons.transition(.opacity)
                             }
                         }
-                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: replacement?.id)
+                        .animation(chromeFade, value: replacement?.id)
                     }
                     .accessibilityElement(children: .contain)
                     .accessibilityAddTraits(replacement == nil ? .isTabBar : [])
@@ -645,39 +710,49 @@ struct CompactMainTabs<Content: View>: View {
     private func pinnedHeader(_ header: PinnedHeader) -> some View {
         let animatesRows = !reduceMotion && !typeSize.isAccessibilitySize
         return ZStack(alignment: .top) {
-            if header.twoRows {
-                ZStack(alignment: .top) {
-                    header.view.id(header.id).transition(.opacity)
+            ZStack(alignment: .top) {
+                if header.twoRows {
+                    headerContent(header)
+                        .transition(animatesRows ? PinnedHeaderRowTransition.transition(insertion: .expand, removal: .collapse) : .opacity)
                 }
-                .transition(animatesRows ? PinnedHeaderRowTransition.transition(insertion: .expand, removal: .collapse) : .opacity)
-            } else {
-                ZStack(alignment: .top) {
-                    header.view.id(header.id).transition(.opacity)
-                }
-                .transition(animatesRows ? PinnedHeaderRowTransition.transition(insertion: .showSingle, removal: .hideSingle) : .opacity)
-                .zIndex(1)
             }
+            .allowsHitTesting(header.twoRows)
+
+            ZStack(alignment: .top) {
+                if !header.twoRows {
+                    headerContent(header)
+                        .transition(animatesRows ? PinnedHeaderRowTransition.transition(insertion: .showSingle, removal: .hideSingle) : .opacity)
+                }
+            }
+            .allowsHitTesting(!header.twoRows)
+            .zIndex(1)
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: animatesRows ? 0.26 : 0.16), value: header.twoRows)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: header.id)
+        .animation(animatesRows ? .easeInOut(duration: 0.26) : chromeFade, value: header.twoRows)
+        .animation(chromeFade, value: header.transitionID)
+    }
+
+    private func headerContent(_ header: PinnedHeader) -> some View {
+        ZStack(alignment: .top) {
+            header.view.id(header.transitionID).transition(.opacity)
+        }
     }
 
     private var tabButtons: some View {
         HStack(spacing: 0) {
             ForEach(destinations, id: \.id) { destination in
                 Button { selection = destination.id } label: {
-                    VStack(spacing: 2) {
+                    VStack(spacing: 1) {
                         Image(systemName: destination.symbol)
-                            .font(.system(size: 17, weight: .medium))
-                            .frame(height: 17)
+                            .imageScale(FeedChrome.iconScale)
+                            .frame(height: 16)
                         Text(destination.title)
-                            .font(.caption2.weight(selection == destination.id ? .semibold : .regular))
                             .lineLimit(1)
                             .minimumScaleFactor(0.65)
                             .padding(.horizontal, 4)
                     }
+                    .font(FeedChrome.labelFont)
                     .frame(height: FeedChrome.rowSurfaceHeight)
-                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
                     .foregroundStyle(selection == destination.id ? Color.accentColor : .secondary)
                     .contentShape(Rectangle())
                 }

@@ -291,7 +291,7 @@ struct GalleryGridCell: View {
                 }
                 .accessibilityElement(children: .contain).accessibilityIdentifier("gallery.cover.\(gallery.ref.gid)")
             Text(gallery.title).font(.subheadline.weight(.medium)).foregroundStyle(.primary)
-                .lineLimit(2).multilineTextAlignment(.leading)
+                .lineLimit(2).truncationMode(.tail).multilineTextAlignment(.leading)
                 .accessibilityIdentifier("gallery.title.\(gallery.ref.gid)")
             if !gallery.category.isEmpty || gallery.pages != nil {
                 HStack(spacing: 6) {
@@ -342,6 +342,162 @@ struct GalleryGridCell: View {
     private func key(for gallery: Gallery) -> String { "\(gallery.id)|\(gallery.cover?.absoluteString ?? "")" }
 }
 
+struct GalleryFact: Identifiable {
+    let id: String
+    let label: String
+    let value: String
+    var text: String { "\(label): \(value)" }
+
+    private static let categoryTranslations = TagTranslationCatalog.bundled?.namespaces["reclass"] ?? [:]
+
+    static func items(for gallery: Gallery, pageCount: Int? = nil) -> [Self] {
+        var facts: [Self] = []
+        if let rating = gallery.rating {
+            facts.append(.init(id: "rating", label: "分数", value: String(format: "%.1f", rating)))
+        }
+        let category = gallery.category.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !category.isEmpty {
+            let key = category.lowercased().filter { !$0.isWhitespace }
+            facts.append(.init(id: "category", label: "类别", value: categoryTranslations[key] ?? category))
+        }
+        if let pages = pageCount ?? gallery.pages {
+            facts.append(.init(id: "pages", label: "页数", value: "\(pages) 页"))
+        }
+        return facts
+    }
+}
+
+private enum LibraryCardMetrics {
+    static let height = FeedChrome.rowHeight * 3
+    static let coverSize = CGSize(width: 72, height: height - 2 * FeedChrome.sectionSpacing)
+}
+
+struct LibraryCardCover: Hashable {
+    let gallery: Gallery
+    var localFile: URL? = nil
+}
+
+struct LibraryCardRows<Item: Identifiable, Row: View>: View {
+    let items: [Item]
+    let cover: (Item) -> LibraryCardCover?
+    @ViewBuilder let row: (Item) -> Row
+
+    @State private var visibleIDs: Set<Item.ID> = []
+    @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var session: SiteSession
+    @Environment(\.displayScale) private var displayScale
+
+    private struct CoverRequest: Hashable {
+        let cover: LibraryCardCover
+        let owner: String
+        let generation: UUID
+        let pixelSize: Int
+    }
+
+    var body: some View {
+        LazyVStack(spacing: FeedChrome.contentSpacing) {
+            ForEach(items) { item in
+                row(item)
+                    .onGeometryChange(for: Bool.self) { geometry in
+                        guard let scrollBounds = geometry.bounds(of: .scrollView) else { return false }
+                        let viewport = CGRect(origin: .zero, size: scrollBounds.size)
+                        return geometry.frame(in: .scrollView).intersects(viewport)
+                    } action: { visible in
+                        if visible { visibleIDs.insert(item.id) } else { visibleIDs.remove(item.id) }
+                    }
+                    .onDisappear { visibleIDs.remove(item.id) }
+            }
+        }
+        .background {
+            ForEach(prefetchRequests, id: \.cover.gallery.id) { request in
+                Color.clear.frame(width: 0, height: 0)
+                    .task(id: request) { await prefetch(request) }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var prefetchRequests: [CoverRequest] {
+        guard !visibleIDs.isEmpty,
+              let first = items.firstIndex(where: { visibleIDs.contains($0.id) }),
+              let last = items.lastIndex(where: { visibleIDs.contains($0.id) }) else { return [] }
+        let before = items[max(0, first - 1)..<first]
+        let after = items.dropFirst(last + 1).prefix(3)
+        let pixelSize = StaticCover.thumbnailPixelSize(for: LibraryCardMetrics.coverSize, scale: displayScale)
+        return (Array(before) + after).compactMap { item in
+            cover(item).map { CoverRequest(cover: $0, owner: library.owner, generation: session.generation, pixelSize: pixelSize) }
+        }
+    }
+
+    private func prefetch(_ request: CoverRequest) async {
+        let file: URL?
+        if let localFile = request.cover.localFile {
+            file = localFile
+        } else if AppMode.qa {
+            file = request.cover.gallery.cover ?? QASamples.cover(seed: Int(request.cover.gallery.ref.gid))
+        } else {
+            file = try? await GalleryCoverLoader.file(for: request.cover.gallery, owner: request.owner,
+                                                       generation: request.generation, session: session,
+                                                       priority: .thumbnailPrefetch)
+        }
+        guard let file, !Task.isCancelled, library.owner == request.owner, session.generation == request.generation else { return }
+        _ = await StaticCoverImageCache.shared.thumbnail(for: file, maxPixelSize: request.pixelSize)
+    }
+}
+
+struct LibraryGalleryCard<Cover: View>: View {
+    let gallery: Gallery
+    var pageCount: Int? = nil
+    let context: String
+    var selected: Bool? = nil
+    var actionSymbol = "chevron.right"
+    var progress: CGFloat = 0
+    @ViewBuilder let cover: () -> Cover
+
+    var body: some View {
+        HStack(spacing: FeedChrome.sectionSpacing) {
+            cover()
+                .frame(width: LibraryCardMetrics.coverSize.width, height: LibraryCardMetrics.coverSize.height)
+                .clipShape(AppShape.control)
+            VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
+                Text(gallery.title)
+                    .font(.subheadline.weight(.semibold))
+                Text(GalleryFact.items(for: gallery, pageCount: pageCount).map(\.text).joined(separator: " · "))
+                    .foregroundStyle(.secondary)
+                Text(context)
+                    .foregroundStyle(.secondary)
+            }
+            .font(FeedChrome.DetailCard.metadataFont)
+            .lineLimit(1).truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: selected.map { $0 ? "checkmark.circle.fill" : "circle" } ?? actionSymbol)
+                .font(FeedChrome.labelFont)
+                .foregroundStyle(selected == true ? Color.accentColor : Color.secondary)
+                .frame(width: 24)
+                .accessibilityHidden(true)
+        }
+        .padding(FeedChrome.sectionSpacing)
+        .frame(maxWidth: .infinity, minHeight: LibraryCardMetrics.height, alignment: .leading)
+        .background {
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.12))
+                    .frame(width: geometry.size.width * progress)
+            }
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .clipShape(AppShape.card)
+        }
+        .overlay {
+            AppShape.card.strokeBorder(selected == true ? Color.accentColor : Color.primary.opacity(0.10),
+                                       lineWidth: selected == true ? 1 : 0.5)
+                .allowsHitTesting(false)
+        }
+        .contentShape(AppShape.card)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct GalleryRow: View {
     static let standardVerticalInset: CGFloat = 16
 
@@ -357,12 +513,10 @@ struct GalleryRow: View {
                 Text(gallery.category.isEmpty ? "画廊" : gallery.category.uppercased())
                     .font(.system(size: categorySize, weight: .semibold, design: .monospaced))
                     .tracking(0.6).foregroundStyle(Palette.accent)
-                Text(gallery.title).font(.subheadline.weight(.medium)).lineLimit(3)
+                Text(gallery.title).font(.subheadline.weight(.medium)).lineLimit(3).truncationMode(.tail)
                     .foregroundStyle(.primary).multilineTextAlignment(.leading)
-                HStack(spacing: 8) {
-                    if let pages = gallery.pages { Text("\(pages) 页") }
-                    if let rating = gallery.rating { Label(String(format: "%.2f", rating), systemImage: "star.fill") }
-                }.font(.caption).foregroundStyle(.secondary)
+                Text(GalleryFact.items(for: gallery).filter { $0.id != "category" }.map(\.text).joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 if !gallery.uploader.isEmpty { Text(gallery.uploader).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 Text(gallery.tags.prefix(3).map(\.name).joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
@@ -376,6 +530,7 @@ struct CoverView: View {
     var contentMode: ContentMode = .fit
     var alignment: Alignment = .center
     var showsLoadingIndicator = true
+    var showsRetryButton = true
     var fitsExtremeAspects = false
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
@@ -390,7 +545,7 @@ struct CoverView: View {
     var body: some View {
         ZStack {
             Color(uiColor: fitsExtremeAspects ? .tertiarySystemGroupedBackground : .secondarySystemGroupedBackground)
-            if let file, fileContext == contextIdentity {
+            if let file, fileContext == contextIdentity, failure == nil || showsRetryButton {
                 StaticCover(file: file,
                             contextIdentity: contextIdentity,
                             requestIdentity: "\(gallery.id)|\(gallery.cover?.absoluteString ?? "none")|\(retry.uuidString)",
@@ -398,7 +553,7 @@ struct CoverView: View {
                             fitsExtremeAspects: fitsExtremeAspects,
                             onDecodeFailure: { failure = ErrorMessages.message(ViewerError.unsupported) })
                     .overlay(alignment: .bottom) {
-                        if let failure {
+                        if let failure, showsRetryButton {
                             Button {
                                 Task {
                                     let owner = library.owner, generation = session.generation
@@ -414,12 +569,15 @@ struct CoverView: View {
                     }
             }
             else if AppMode.qa && !storedCoverQA { QACover(seed: Int(gallery.ref.gid)) }
-            else if let failure {
+            else if let failure, showsRetryButton {
                 VStack(spacing: 4) {
                     Text(failure).font(.caption2).lineLimit(3).multilineTextAlignment(.center).foregroundStyle(.secondary)
                     Button { retry = UUID() } label: { Label("重试", systemImage: "arrow.clockwise").font(.caption).frame(minHeight: 44) }
                         .buttonStyle(.borderless).accessibilityLabel("重新载入封面").accessibilityHint(failure)
                 }.padding(5)
+            }
+            else if !showsRetryButton {
+                Image(systemName: "book.closed").font(.caption).foregroundStyle(.secondary)
             }
             else if showsLoadingIndicator { ProgressView() }
         }
