@@ -156,10 +156,6 @@ struct SponsorshipView: View {
                 }
                 .accountPageCard()
             }
-            Text("此页只展示站点当前返回并能识别的内容。不会代替你操作付款，也不会推断未显示的权益、金额或付款地址。")
-                .font(.caption).foregroundStyle(.secondary)
-                .padding(.horizontal, FeedChrome.contentSpacing)
-                .accountPageListRow()
         }
         .accountSubpageHeader("赞助与权益", identifier: "account.sponsorship-page") {
             Button { Task { await load() } } label: {

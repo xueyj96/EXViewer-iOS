@@ -42,13 +42,15 @@ enum FavoriteSyncPhase: String, Codable {
         let client: GalleryFavoriteClient
         let title: String
         let groupName: String
+        var group: Int? = nil
     }
     private struct Value: Codable {
         var known: Bool
         var group: String?
-        init(_ state: GalleryFavoriteState) {
+        var groupIndex: Int?
+        init(_ state: GalleryFavoriteState, groupIndex: Int? = nil) {
             known = state != .unknown
-            if case let .favorited(name) = state { group = name }
+            if case let .favorited(name) = state { group = name; self.groupIndex = groupIndex }
         }
         var state: GalleryFavoriteState { !known ? .unknown : group.map(GalleryFavoriteState.favorited) ?? .notFavorited }
     }
@@ -85,6 +87,8 @@ enum FavoriteSyncPhase: String, Codable {
     private var checks = Set<String>()
     private var lastChecks: [String: Date] = [:]
     private var mutationEpochs: [String: UUID] = [:]
+    private var groupNameEpochs: [GallerySite: UUID] = [:]
+    private var groupNames: [GallerySite: [String]] = [:]
     private var worker: Task<Void, Never>?
     private var workerID = UUID()
     private var activeKey: String?
@@ -110,6 +114,7 @@ enum FavoriteSyncPhase: String, Codable {
         let wasUnreadable = storageUnreadable
         self.owner = owner; self.generation = generation
         forms = [:]; runtimes = [:]; observers = [:]; queue = []; checks = []; lastChecks = [:]; mutationEpochs = [:]; activeKey = nil; storageUnreadable = false
+        groupNameEpochs = [:]; groupNames = [:]
         if !sameOwner { records = [:]; restore() } else { storageUnreadable = wasUnreadable }
         confirmedRemovals = [:]
         revision = UUID()
@@ -142,7 +147,8 @@ enum FavoriteSyncPhase: String, Codable {
         if let form { remember(form, key: key) }
         else if state == .unknown { forms.removeValue(forKey: key) }
         var copy = records
-        copy[key] = .init(site: scope.reference.site, gid: scope.reference.gid, confirmed: Value(state), date: clock())
+        copy[key] = .init(site: scope.reference.site, gid: scope.reference.gid,
+                          confirmed: confirmedValue(state, site: scope.reference.site, form: form, previous: records[key]?.confirmed), date: clock())
         trim(&copy); records = copy; changed(); return true
     }
     func register(_ id: UUID, scope: GalleryFavoriteScope, client: GalleryFavoriteClient) {
@@ -206,6 +212,7 @@ enum FavoriteSyncPhase: String, Codable {
         var seen = Set<String>()
         let eligible = try additions.filter { addition in
             guard valid(addition.scope), addition.client.isCurrent() else { throw ViewerError.stale }
+            guard (0...9).contains(addition.group ?? group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组。") }
             _ = try GalleryFavoriteForm.endpoint(for: addition.scope.reference)
             let key = addition.scope.reference.id
             return seen.insert(key).inserted && records[key]?.pending == nil
@@ -219,7 +226,7 @@ enum FavoriteSyncPhase: String, Codable {
         for addition in eligible {
             let ref = addition.scope.reference
             var record = copy[ref.id] ?? .init(site: ref.site, gid: ref.gid, confirmed: Value(.unknown), date: clock())
-            record.pending = Intent(group: group, groupName: addition.groupName, title: String(addition.title.prefix(300)), addIfMissing: true)
+            record.pending = Intent(group: addition.group ?? group, groupName: addition.groupName, title: String(addition.title.prefix(300)), addIfMissing: true)
             record.version = UUID()
             copy[ref.id] = record
         }
@@ -235,6 +242,38 @@ enum FavoriteSyncPhase: String, Codable {
         revision = UUID()
         return eligible.count
     }
+    func updateGroupNames(site: GallerySite, before: [String], after: [String]) throws {
+        guard before.count == 10, after.count == 10 else { throw ViewerError.layoutChanged }
+        var copy = records
+        for key in Array(copy.keys) where copy[key]?.site == site {
+            guard var record = copy[key] else { continue }
+            if let name = record.confirmed.group {
+                let matches = before.indices.filter { before[$0] == name }
+                let group = record.confirmed.groupIndex ?? forms[key]?.value.selectedGroup ?? (matches.count == 1 ? matches.first : nil)
+                if let group, after.indices.contains(group) {
+                    record.confirmed.group = after[group]; record.confirmed.groupIndex = group
+                } else if matches.count > 1 {
+                    // Older caches did not store category IDs; duplicate names
+                    // cannot identify membership. Preserve the favorite itself.
+                    record.confirmed.group = "站点收藏"
+                }
+            }
+            if let group = record.pending?.group, after.indices.contains(group) {
+                record.pending?.groupName = after[group]
+            }
+            record.version = UUID(); copy[key] = record
+        }
+        try persist(copy)
+        records = copy
+        groupNames[site] = after; groupNameEpochs[site] = UUID()
+        for key in Set(records.keys).union(runtimes.keys)
+            where records[key]?.site == site || runtimes[key]?.scope.reference.site == site {
+            mutationEpochs[key] = UUID()
+        }
+        for key in Array(forms.keys) where records[key]?.site == site { forms.removeValue(forKey: key) }
+        revision = UUID()
+    }
+
     func invalidate(_ refs: [GalleryRef], scopeOwner: String, generation: UUID) {
         guard owner == scopeOwner, self.generation == generation else { return }
         for ref in refs where records[ref.id]?.pending == nil { records.removeValue(forKey: ref.id); forms.removeValue(forKey: ref.id); mutationEpochs[ref.id] = UUID() }
@@ -249,7 +288,9 @@ enum FavoriteSyncPhase: String, Codable {
             let named = category.flatMap { categories[$0] }.map(GalleryFavoriteState.favorited)
             let state: GalleryFavoriteState
             if let named { state = named } else if let existing, case .favorited = existing { state = existing } else { state = .favorited("站点收藏") }
-            records[gallery.id] = .init(site: gallery.ref.site, gid: gallery.ref.gid, confirmed: Value(state), date: clock())
+            let value = confirmedValue(state, site: gallery.ref.site, previous: records[gallery.id]?.confirmed,
+                                       groupIndex: category.flatMap(Int.init))
+            records[gallery.id] = .init(site: gallery.ref.site, gid: gallery.ref.gid, confirmed: value, date: clock())
         }
         trim(&records); changed()
     }
@@ -275,6 +316,7 @@ enum FavoriteSyncPhase: String, Codable {
     }
     private func run(_ key: String, checkOnly: Bool, workerID: UUID) async {
         guard let runtime = runtimes[key], valid(runtime.scope), runtime.client.isCurrent() else { return }
+        let namesEpoch = groupNameEpochs[runtime.scope.reference.site]
         defer {
             if self.workerID == workerID, records[key]?.pending == nil, !observers.values.contains(key) { runtimes.removeValue(forKey: key) }
         }
@@ -282,7 +324,8 @@ enum FavoriteSyncPhase: String, Codable {
         func current() -> Bool { self.workerID == workerID && valid(runtime.scope) && runtime.client.isCurrent() && !Task.isCancelled }
         do {
             var form: GalleryFavoriteForm
-            if !checkOnly, target?.addIfMissing != true, formIsFresh(runtime.scope, now: clock()), let memo = forms[key]?.value { form = memo }
+            if !checkOnly, target?.addIfMissing != true, (target?.note != nil || target?.action == .remove),
+               formIsFresh(runtime.scope, now: clock()), let memo = forms[key]?.value { form = memo }
             else { lastChecks[key] = clock(); form = try await runtime.client.read() }
             guard current() else { return }
             guard form.reference == runtime.scope.reference else { throw ViewerError.restricted }
@@ -319,10 +362,14 @@ enum FavoriteSyncPhase: String, Codable {
                 }
             }
             guard current() else { return }
+            if namesEpoch != groupNameEpochs[runtime.scope.reference.site], let names = groupNames[runtime.scope.reference.site] {
+                form = form.replacingGroupNames(names)
+            }
             remember(form, key: key)
             if var record = records[key] {
                 var removal: UUID?
-                record.confirmed = Value(form.state); record.date = clock(); record.version = UUID()
+                record.confirmed = confirmedValue(form.state, site: runtime.scope.reference.site, form: form)
+                record.date = clock(); record.version = UUID()
                 if let target, record.pending?.id == targetID {
                     if satisfies(target, form: form) {
                         if target.action == .remove { removal = target.id }
@@ -356,6 +403,14 @@ enum FavoriteSyncPhase: String, Codable {
     private func satisfies(_ intent: Intent, form: GalleryFavoriteForm) -> Bool {
         if intent.addIfMissing == true { return form.selectedGroup != nil }
         return form.confirms(intent.action, note: intent.note ?? form.note)
+    }
+    private func confirmedValue(_ state: GalleryFavoriteState, site: GallerySite,
+                                form: GalleryFavoriteForm? = nil, previous: Value? = nil, groupIndex: Int? = nil) -> Value {
+        guard case let .favorited(name) = state else { return Value(state) }
+        let matches = groupNames[site]?.indices.filter { groupNames[site]?[$0] == name } ?? []
+        let index = form?.selectedGroup ?? groupIndex ?? (previous?.group == name ? previous?.groupIndex : nil)
+            ?? (matches.count == 1 ? matches.first : nil)
+        return Value(state, groupIndex: index)
     }
     private func remember(_ form: GalleryFavoriteForm, key: String) {
         forms[key] = (form, clock())
@@ -391,7 +446,8 @@ enum FavoriteSyncPhase: String, Codable {
             guard size <= 2_000_000 else { throw ViewerError.storage }
             let saved = try JSONDecoder().decode(File.self, from: Data(contentsOf: file))
             guard saved.version == 1, saved.records.count <= limit, Set(saved.records.map(\.id)).count == saved.records.count,
-                  saved.records.allSatisfy({ $0.gid > 0 && ($0.pending?.group.map { (0...9).contains($0) } ?? true) }) else { throw ViewerError.storage }
+                  saved.records.allSatisfy({ $0.gid > 0 && ($0.pending?.group.map { (0...9).contains($0) } ?? true)
+                      && ($0.confirmed.groupIndex.map { (0...9).contains($0) } ?? true) }) else { throw ViewerError.storage }
             records = Dictionary(uniqueKeysWithValues: saved.records.map { value in
                 var value = value
                 if value.pending?.phase == .sending || value.pending?.phase == .checking { value.pending?.phase = .uncertain }

@@ -203,15 +203,19 @@ final class SearchContractV43UITests: XCTestCase {
         app.buttons["discover.search-entry"].tap(); app.buttons["compose.save-favorite"].tap()
         XCTAssertTrue(app.textFields["search.save.name"].waitForExistence(timeout: 5))
         app.buttons["search.save.confirm"].tap()
+        XCTAssertEqual(app.buttons["compose.save-favorite"].value as? String, "已保存")
+        XCTAssertFalse(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.exists)
         replace(app.textFields["compose.text"], with: "notes")
-        XCTAssertEqual(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.value as? String, "已修改")
+        XCTAssertFalse(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.exists)
         app.buttons["compose.cancel"].tap()
         XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("coast") == true)
         app.buttons["discover.saved-menu"].tap()
         let common = favoriteRows(app).firstMatch
         XCTAssertTrue(common.waitForExistence(timeout: 5)); XCTAssertTrue(common.label.contains("coast")); common.tap()
-        let loaded = app.descendants(matching: .any)["compose.loaded-state"].firstMatch
-        XCTAssertTrue(loaded.waitForExistence(timeout: 5)); XCTAssertEqual(loaded.value as? String, "已载入")
+        let keyword = app.textFields["compose.text"]
+        XCTAssertTrue(keyword.waitForExistence(timeout: 5))
+        XCTAssertEqual(keyword.value as? String, "coast")
+        XCTAssertFalse(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.exists)
         replace(app.textFields["compose.text"], with: "notes"); app.buttons["compose.apply"].tap()
         XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("notes") == true)
         app.buttons["discover.search-entry"].tap(); app.buttons["compose.records"].tap()
@@ -225,52 +229,48 @@ final class SearchContractV43UITests: XCTestCase {
         XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("notes") == true)
     }
 
-    func testCurrentBookmarkRemovesSavedConditionsWithoutRemovingTheirHistory() {
+    func testSavedSearchIsReadOnlyOutsideFavoritesAndDeletionKeepsSearchHistory() {
         let app = launch(); startDraft(app)
         app.buttons["compose.apply"].tap()
         app.buttons["discover.search-entry"].tap()
         let bookmark = app.buttons["compose.save-favorite"]
         XCTAssertEqual(bookmark.value as? String, "未保存")
-        bookmark.tap(); app.buttons["search.save.confirm"].tap()
+        bookmark.tap()
+        let confirm = app.buttons["search.save.confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5)); confirm.tap()
         expectation(for: NSPredicate(format: "value == %@", "已保存"), evaluatedWith: bookmark)
         waitForExpectations(timeout: 5)
-        bookmark.tap()
-        let dialog = app.sheets["将这组条件移出常用？"]
-        XCTAssertTrue(dialog.waitForExistence(timeout: 5))
-        let remove = dialog.buttons["compose.remove-favorite"].firstMatch
-        XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()
-        expectation(for: NSPredicate(format: "value == %@", "未保存"), evaluatedWith: bookmark)
-        waitForExpectations(timeout: 5)
-        app.buttons["compose.cancel"].tap()
-        app.buttons["discover.saved-menu"].tap()
-        XCTAssertTrue(app.staticTexts["search-favorites.empty"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["搜索记录"].exists)
-        app.buttons["search-presets.close"].tap()
-        app.buttons["discover.search-entry"].tap()
-        app.buttons["compose.records"].tap()
-        let history = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-history.load.")).firstMatch
-        XCTAssertTrue(history.waitForExistence(timeout: 5)); XCTAssertTrue(history.label.contains("coast"))
-    }
+        XCTAssertEqual(bookmark.label, "已存常用")
+        XCTAssertFalse(bookmark.isEnabled)
 
-    func testRemovingPresetFromHistoryReturnsDraftActionToSaveNew() {
-        let app = launch(); startDraft(app)
-        app.buttons["compose.apply"].tap()
-        app.buttons["discover.search-entry"].tap()
-        let save = app.buttons["compose.save-favorite"]
-        save.tap()
-        app.buttons["search.save.confirm"].tap()
         app.buttons["compose.records"].tap()
         let historyAction = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-history.save.")).firstMatch
         XCTAssertTrue(historyAction.waitForExistence(timeout: 5))
-        historyAction.tap()
-        let remove = app.sheets.buttons["移出常用"].firstMatch
-        XCTAssertTrue(remove.waitForExistence(timeout: 5))
-        remove.tap()
+        XCTAssertEqual(historyAction.label, "已存常用")
+        XCTAssertFalse(historyAction.isEnabled)
         app.buttons["search-presets.close"].tap()
-        XCTAssertEqual(save.label, "存为常用")
-        save.tap()
-        XCTAssertTrue(app.staticTexts["保存搜索组合"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["另存为新组合"].exists)
+        app.buttons["compose.cancel"].tap()
+
+        app.buttons["discover.saved-menu"].tap()
+        let row = favoriteRows(app).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.press(forDuration: 0.8)
+        let delete = app.buttons["saved-editor.delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 5)); delete.tap()
+        let confirmDelete = app.sheets["删除这个常用组合？"].buttons["saved-editor.confirm-delete"].firstMatch
+        XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5)); confirmDelete.tap()
+        XCTAssertTrue(app.staticTexts["search-favorites.empty"].waitForExistence(timeout: 5))
+        app.buttons["search-presets.close"].tap()
+
+        app.buttons["discover.search-entry"].tap()
+        XCTAssertTrue(bookmark.waitForExistence(timeout: 5))
+        XCTAssertEqual(bookmark.label, "存为常用")
+        XCTAssertTrue(bookmark.isEnabled)
+        app.buttons["compose.records"].tap()
+        let history = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-history.load.")).firstMatch
+        XCTAssertTrue(history.waitForExistence(timeout: 5))
+        XCTAssertTrue(history.label.contains("coast"))
+        XCTAssertTrue(historyAction.isEnabled)
     }
 
     func testRealRatingFilterRemainsReachableInDarkLargeType() {

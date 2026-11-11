@@ -167,17 +167,17 @@ struct TagEntryView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             FloatingHeaderPanel(identifier: "tag.header") {
                 FloatingPageTitleRow(title: "添加标签", identifier: "tag.title") {
-                    Button { dismiss() } label: { Text("取消").frame(minWidth: 34, maxWidth: .infinity) }
-                        .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: true))
+                    Button { dismiss() } label: { Label("取消", systemImage: "xmark") }
+                        .buttonStyle(FeedHeaderButtonStyle())
                         .accessibilityIdentifier("tag.cancel")
                 } trailing: {
                     Button {
                         onCommit(pending.map { TagRule(tag: $0.tag, match: $0.match) })
                         dismiss()
                     } label: {
-                        Text("完成").frame(minWidth: 34, maxWidth: .infinity)
+                        Label("完成", systemImage: "checkmark")
                     }
-                    .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: true))
+                    .buttonStyle(FeedHeaderButtonStyle())
                     .foregroundStyle(Color.accentColor)
                     .disabled(pending.isEmpty && !allowsEmptyCommit)
                     .accessibilityIdentifier("tag.confirm")

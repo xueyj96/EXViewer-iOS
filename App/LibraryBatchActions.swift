@@ -129,18 +129,11 @@ struct LibraryBatchToolbar: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var managing = false
-    @State private var favoriteBatch: FavoriteBatch?
     @State private var notice: Notice?
 
     private struct Notice: Identifiable {
         let id = UUID()
         let text: String
-    }
-
-    private struct FavoriteBatch: Hashable {
-        let galleries: [Gallery]
-        let owner: String
-        let generation: UUID
     }
 
     private var actions: [LibraryBatchAction] {
@@ -199,11 +192,6 @@ struct LibraryBatchToolbar: View {
                 }
             }
         }
-        .navigationDestination(item: $favoriteBatch) { batch in
-            FavoriteGroupPicker(count: batch.galleries.count, moving: false, load: { try await loadGroups(for: batch) }) { choice in
-                try queueFavorites(batch, choice: choice)
-            }
-        }
     }
 
     private func accessibilityTitle(_ action: LibraryBatchAction, title: String) -> String {
@@ -229,51 +217,14 @@ struct LibraryBatchToolbar: View {
             show(count.map { resultText("已加入下载队列", $0, of: selected.count, skipped: "已有记录") } ?? "下载队列未能保存，请重试。")
         case .favorite:
             guard session.hasCredentials || AppMode.qa else { show("登录站点账号后可批量收藏。"); return }
+            guard session.owner == library.owner else { show(ErrorMessages.message(ViewerError.stale)); return }
             let selected = galleries()
             guard !selected.isEmpty else { return }
-            favoriteBatch = FavoriteBatch(galleries: selected, owner: session.owner, generation: session.generation)
+            do {
+                let count = try session.addToDefaultFavorites(selected)
+                show(resultText("已加入收藏同步队列", count, of: selected.count, skipped: "已有待处理操作"))
+            } catch { show(ErrorMessages.message(error)) }
         }
-    }
-
-    private func checkScope(_ batch: FavoriteBatch) throws {
-        guard batch.owner == session.owner, batch.generation == session.generation, batch.owner == library.owner else {
-            throw ViewerError.stale
-        }
-    }
-
-    private func loadGroups(for batch: FavoriteBatch) async throws -> [FavoriteGroupChoice] {
-        try checkScope(batch)
-        var groups: [Int: [GallerySite: String]] = [:]
-        for site in GallerySite.allCases {
-            guard let gallery = batch.galleries.first(where: { $0.ref.site == site }) else { continue }
-            let form = try await favoriteClient(for: gallery, session: session).read()
-            try Task.checkCancellation()
-            try checkScope(batch)
-            guard form.reference == gallery.ref else { throw ViewerError.restricted }
-            for group in form.groups { groups[group.id, default: [:]][site] = group.name }
-        }
-        return groups.keys.sorted().map { index in
-            let names = groups[index, default: [:]]
-            let label: String
-            if let first = names.values.first, names.values.allSatisfy({ $0 == first }) { label = first }
-            else {
-                label = GallerySite.allCases.compactMap { site in
-                    names[site].map { "\(site.name) · \($0)" }
-                }.joined(separator: "\n")
-            }
-            return FavoriteGroupChoice(id: index, name: label, siteNames: names)
-        }
-    }
-
-    private func queueFavorites(_ batch: FavoriteBatch, choice: FavoriteGroupChoice) throws {
-        try checkScope(batch)
-        let additions = try batch.galleries.map { gallery in
-            guard let name = choice.siteNames[gallery.ref.site] else { throw ViewerError.stale }
-            return SiteFavoriteCache.BatchAddition(scope: .init(gallery, session), client: favoriteClient(for: gallery, session: session),
-                                                   title: gallery.title, groupName: name)
-        }
-        let count = try session.favoriteStateCache.enqueueAdditions(additions, group: choice.id)
-        show(resultText("已加入收藏同步队列", count, of: batch.galleries.count, skipped: "已有待处理操作"))
     }
 
     private func resultText(_ action: String, _ count: Int, of total: Int, skipped: String) -> String {
@@ -337,7 +288,7 @@ struct FavoriteGroupPicker: View {
                         .frame(maxWidth: .infinity, minHeight: FeedChrome.rowSurfaceHeight)
                         .foregroundStyle(.white)
                         .background(Color.accentColor.opacity(selected == nil ? 0.38 : 1), in: AppShape.control)
-                        .frame(minHeight: 44).contentShape(Rectangle())
+                        .frame(minHeight: FeedChrome.rowHeight).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(selected == nil)
@@ -382,7 +333,7 @@ struct FavoriteGroupPicker: View {
                     .foregroundStyle(active ? Color.accentColor : Color.secondary.opacity(0.45))
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .frame(minHeight: 44)
+            .frame(minHeight: FeedChrome.rowHeight)
             .background(active ? Color.accentColor.opacity(0.10) : .clear, in: AppShape.control)
             .contentShape(Rectangle())
         }

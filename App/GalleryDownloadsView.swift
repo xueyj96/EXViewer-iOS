@@ -179,7 +179,7 @@ struct GalleryDownloadsView: View {
             }
             .accountSubpageContent()
             .floatingPageHeader("下载方式", identifier: "downloads.options") {
-                Button("关闭") { dismiss() }.buttonStyle(FeedHeaderButtonStyle())
+                Button { dismiss() } label: { Label("关闭", systemImage: "xmark") }.buttonStyle(FeedHeaderButtonStyle())
                     .accessibilityIdentifier("downloads.options.close")
             } trailing: {
                 EmptyView()

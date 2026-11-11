@@ -85,7 +85,7 @@ for config in ['Debug', 'Release']:
     INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-    CURRENT_PROJECT_VERSION = 114; MARKETING_VERSION = 1.0.0;
+    CURRENT_PROJECT_VERSION = 118; MARKETING_VERSION = 1.0.0;
     TARGETED_DEVICE_FAMILY = "1,2"; CODE_SIGN_STYLE = Automatic;
     "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
     "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = YES;

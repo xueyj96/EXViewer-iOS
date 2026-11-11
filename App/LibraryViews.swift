@@ -101,11 +101,6 @@ struct TagsView: View {
                     .foregroundStyle(.secondary)
                     .accountPageCard()
             }
-            Text("屏蔽应用于本机列表、详情和离线阅读。站点收藏和文件会保留。标签不完整的结果暂时隐藏，可重试补查。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, FeedChrome.sectionSpacing)
-                .accountPageListRow()
         }
             .scrollDismissesKeyboard(.interactively)
             .accountSubpageHeader("标签与屏蔽", identifier: "account.tags-page") {

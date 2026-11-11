@@ -33,7 +33,8 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["常用组合"].waitForExistence(timeout: 5))
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-favorites.load."))
         XCTAssertEqual(rows.count, 3); rows.element(boundBy: 0).tap()
-        XCTAssertEqual(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.value as? String, "已载入")
+        XCTAssertTrue(app.textFields["compose.text"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["compose.loaded-state"].firstMatch.exists)
     }
 
     private func assertActiveHeader(_ app: XCUIApplication, large: Bool) {

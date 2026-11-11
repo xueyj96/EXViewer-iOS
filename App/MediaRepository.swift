@@ -349,6 +349,7 @@ actor MediaRepository {
         return directory.appendingPathComponent(key)
     }
     private static func cachedImageExists(at file: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: file.path) else { return false }
         guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return false }
         return CGImageSourceGetCount(source) > 0
     }
@@ -557,6 +558,7 @@ actor MediaRepository {
     }
 
     private static func isDecodableImage(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else { return false }
         return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
     }

@@ -99,8 +99,8 @@ import ExViewerCore
             if !canContinue { shortExpiration = expired }
         }
 
-        func requestContinuation(expired: @escaping @MainActor () -> Void) {
-            continuedExpiration = expired
+        func requestContinuation(stopped: @escaping @MainActor () -> Void) {
+            continuedExpiration = stopped
             shortExpiration = nil
         }
 
@@ -405,7 +405,7 @@ import ExViewerCore
         XCTAssertEqual(PageProtocol.total(), 2, "Recovering saved files should only fetch the two gallery indexes")
     }
 
-    func testDownloadKeepsRunningOnForegroundReturnAndResumesAfterBackgroundExpiration() async throws {
+    func testDownloadKeepsRunningOnForegroundReturnButStopsOnSystemCancellation() async throws {
         let gallery = Gallery(ref: .init(site: .eh, gid: 58, token: "fixture"), title: "Background fixture", pages: 1)
         let preview = """
         <h1 id="gn">Fixture</h1><table id="gdd"><tr><td class="gdt1">Length:</td><td class="gdt2">1 page</td></tr></table>
@@ -429,16 +429,15 @@ import ExViewerCore
         download.suspendForBackground()
         XCTAssertEqual(library.download(for: gallery.ref)?.status, .downloading)
         download.resumeQueuedDownloads()
-        background.expireContinuation()
         XCTAssertEqual(download.running, gallery.id)
         XCTAssertEqual(library.download(for: gallery.ref)?.status, .downloading)
-        XCTAssertTrue(background.canContinue, "A late expiration should restore the short background grant")
         XCTAssertEqual(PageProtocol.total(), 1, "Returning to the app should keep the original request")
-
-        download.suspendForBackground()
-        XCTAssertEqual(download.running, gallery.id)
-        background.expireShort()
+        background.expireContinuation()
         XCTAssertNil(download.running)
+        XCTAssertFalse(background.canContinue)
+        download.resumeQueuedDownloads()
+        XCTAssertNil(download.running, "System cancellation must not immediately restart the foreground queue")
+        download.suspendForBackground()
         let persisted = LibraryStore(qa: true, storageRoot: root)
         XCTAssertEqual(persisted.download(for: gallery.ref)?.status, .waiting)
         download.resumeQueuedDownloads()

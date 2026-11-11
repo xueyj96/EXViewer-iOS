@@ -294,7 +294,7 @@ struct DiscoverView: View {
     }
 
     private func composerSheet(startAt: SearchComposerStart) -> some View {
-        DiscoveryComposerView(query: entry.query, site: entry.site, savedID: currentSaved?.id,
+        DiscoveryComposerView(query: entry.query, site: entry.site,
                               startAt: startAt, loadedPreset: currentSaved, updatesResults: hasActiveConditions || onClose != nil,
                               usesParentNavigation: true, onCancel: { composerStart = nil }) { query, site, savedID in
             try navigation.execute(query: query, site: site, savedID: savedID, session: session, library: library)

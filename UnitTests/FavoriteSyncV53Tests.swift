@@ -78,6 +78,17 @@ import ExViewerCore
         let done = await wait { cache.entry(s)?.phase == nil }; XCTAssertTrue(done)
         XCTAssertEqual(server.posts, 1); XCTAssertEqual(cache.entry(s)?.state, .favorited("待阅读"))
     }
+    func testMovingGroupPreservesServerNoteChangedAfterCachedForm() async throws {
+        let cache = SiteFavoriteCache(), s = scope(), server = Server(ref)
+        server.group = 2; server.note = "Cached note"
+        let cached = try server.form(); cache.put(cached.state, form: cached, scope: s)
+        server.note = "Newer server note"
+        try cache.enqueue(scope: s, client: server.client, form: cached, action: .move(1), note: cached.note, title: "Fixture")
+        let done = await wait { cache.entry(s)?.phase == nil }
+        XCTAssertTrue(done); XCTAssertEqual(server.group, 1)
+        XCTAssertEqual(server.note, "Newer server note"); XCTAssertEqual(server.posts, 1)
+    }
+
     func testBatchAdditionReadsFreshMembershipAndPreservesExistingGroupAndNote() async throws {
         let cache = SiteFavoriteCache(), existingScope = scope(), existing = Server(ref)
         let newReference = GalleryRef(site: .eh, gid: 84, token: "newFixture")
@@ -104,6 +115,22 @@ import ExViewerCore
         XCTAssertEqual(fresh.posts, 1)
         XCTAssertEqual(fresh.group, 1)
         XCTAssertEqual(cache.entry(newScope)?.state, .favorited("待阅读"))
+    }
+
+    func testBatchUsesEachSitesDefaultGroup() async throws {
+        let cache = SiteFavoriteCache(), firstScope = scope(), first = Server(ref)
+        cache.activate(owner: firstScope.owner, generation: firstScope.generation)
+        let otherRef = GalleryRef(site: .eh, gid: 87, token: "fixture")
+        let secondScope = scope(firstScope.generation, reference: otherRef), second = Server(otherRef)
+        let additions: [SiteFavoriteCache.BatchAddition] = [
+            .init(scope: firstScope, client: first.client, title: "First", groupName: "画集", group: 3),
+            .init(scope: secondScope, client: second.client, title: "Second", groupName: "关注", group: 6),
+        ]
+        XCTAssertEqual(try cache.enqueueAdditions(additions, group: 0), 2)
+        let done = await wait { cache.entry(firstScope)?.phase == nil && cache.entry(secondScope)?.phase == nil }
+        XCTAssertTrue(done)
+        XCTAssertEqual(first.group, 3)
+        XCTAssertEqual(second.group, 6)
     }
 
     func testBatchOverCapacityDoesNotPartiallyQueue() throws {
@@ -138,11 +165,11 @@ import ExViewerCore
         let done = await wait { cache.entry(s)?.phase == nil }; XCTAssertTrue(done); XCTAssertEqual(server.posts, 1)
     }
     func testUnknownResultOnlyChecksAndDoesNotBlindlyResubmit() async throws {
-        let cache = SiteFavoriteCache(), s = scope(), server = Server(ref); server.failures = [1, 2]
+        let cache = SiteFavoriteCache(), s = scope(), server = Server(ref); server.failures = [2, 3]
         cache.put(.notFavorited, scope: s); try enqueue(cache, server, s, .move(2))
         let uncertain = await wait { cache.entry(s)?.phase == .uncertain }; XCTAssertTrue(uncertain)
         XCTAssertEqual(server.posts, 1); cache.check(ref.id)
-        let checked = await wait { server.reads == 2 }; XCTAssertTrue(checked)
+        let checked = await wait { server.reads == 3 }; XCTAssertTrue(checked)
         XCTAssertEqual(cache.entry(s)?.phase, .uncertain); XCTAssertEqual(server.posts, 1)
         cache.check(ref.id)
         let done = await wait { cache.entry(s)?.phase == nil }; XCTAssertTrue(done); XCTAssertEqual(server.posts, 1)

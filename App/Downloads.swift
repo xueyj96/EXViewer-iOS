@@ -10,12 +10,16 @@ struct GalleryOfflineUpdate: Equatable {
 
 enum DownloadLoadPolicy {
     static let concurrencyKey = "download.pageConcurrency"
+    static let backgroundKey = "download.backgroundEnabled"
     static let defaultConcurrency = 2
     static let concurrencyRange = 1...32
 
     static func configuredConcurrency(defaults: UserDefaults) -> Int {
         let value = defaults.integer(forKey: concurrencyKey)
         return concurrencyRange.contains(value) ? value : defaultConcurrency
+    }
+    static func backgroundEnabled(defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: backgroundKey) == nil || defaults.bool(forKey: backgroundKey)
     }
 }
 
@@ -25,6 +29,9 @@ enum DownloadLoadPolicy {
     private var task: Task<Void, Never>?
     private var settling: Task<Void, Never>?
     private var isInBackground = false
+    private var backgroundEpoch = UUID()
+    private var finishedBackgroundPages = 0
+    private var continuationStopped = false
     private let session: SiteSession
     private let library: LibraryStore
     private let repository: MediaRepository
@@ -65,24 +72,29 @@ enum DownloadLoadPolicy {
                                      completed: record?.completed ?? [:], total: record?.total ?? gallery.pages,
                                      replaces: old ?? record?.replaces))
         guard library.error == nil else { return false }
+        continuationStopped = false
         if running == nil { startNext() }
-        if running == gallery.id { requestBackgroundContinuation() }
         return true
     }
 
     func enqueueNew(_ galleries: [Gallery]) -> Int? {
         guard library.owner == session.owner, let count = library.addDownloadJobs(galleries) else { return nil }
         if count > 0 {
+            continuationStopped = false
             startNext()
-            requestBackgroundContinuation()
         }
         return count
     }
 
     private func requestBackgroundContinuation() {
-        if !isInBackground, let run = activeRun, isCurrent(run) {
+        if DownloadLoadPolicy.backgroundEnabled(defaults: preferences), !isInBackground, let run = activeRun, isCurrent(run) {
+            let epoch = backgroundEpoch
             backgroundWork?.requestContinuation { [weak self] in
-                self?.backgroundTimeExpired(for: run)
+                guard let self, self.backgroundEpoch == epoch else { return }
+                // Continued processing may have been cancelled from the
+                // system UI. Never immediately renew it in the foreground.
+                self.continuationStopped = true
+                self.stopActive(as: .waiting)
             }
         }
     }
@@ -108,24 +120,54 @@ enum DownloadLoadPolicy {
     func pauseAll() { stopActive(as: .paused) }
     func suspendForBackground() {
         isInBackground = true
-        if let run = activeRun, backgroundWork?.canContinue != true { backgroundTimeExpired(for: run) }
+        if activeRun != nil, !DownloadLoadPolicy.backgroundEnabled(defaults: preferences) || backgroundWork?.canContinue != true {
+            backgroundTimeExpired()
+        }
     }
     func resumeQueuedDownloads() {
+        if isInBackground { continuationStopped = false }
         isInBackground = false
-        if let run = activeRun, isCurrent(run) { beginShortBackgroundTime(for: run) }
+        guard !continuationStopped else { return }
+        if let run = activeRun, isCurrent(run) { beginShortBackgroundTime(); requestBackgroundContinuation() }
         else { startNext() }
     }
 
-    private func beginShortBackgroundTime(for run: Run) {
+    private func beginShortBackgroundTime() {
+        guard DownloadLoadPolicy.backgroundEnabled(defaults: preferences), let run = activeRun, isCurrent(run) else { return }
+        let epoch = backgroundEpoch
         backgroundWork?.beginShort("离线下载") { [weak self] in
-            self?.backgroundTimeExpired(for: run)
+            guard let self, self.backgroundEpoch == epoch else { return }
+            self.backgroundTimeExpired()
         }
     }
 
-    private func backgroundTimeExpired(for run: Run) {
-        guard isCurrent(run) else { return }
+    private func backgroundTimeExpired() {
+        guard let run = activeRun, isCurrent(run) else { return }
         if isInBackground { stopActive(as: .waiting) }
-        else { beginShortBackgroundTime(for: run) }
+        else { beginShortBackgroundTime() }
+    }
+
+    func updateBackgroundDownloadPreference() {
+        if !DownloadLoadPolicy.backgroundEnabled(defaults: preferences) {
+            if isInBackground { stopActive(as: .waiting) }
+            else { finishBackgroundWork(success: false) }
+        } else if !isInBackground, let run = activeRun, isCurrent(run) {
+            beginShortBackgroundTime()
+            requestBackgroundContinuation()
+        }
+    }
+
+    private func finishBackgroundWork(success: Bool) {
+        backgroundEpoch = UUID()
+        finishedBackgroundPages = 0
+        backgroundWork?.finish(success: success)
+    }
+
+    private func reportBackgroundProgress(completed: Int, total: Int?) {
+        let queued = library.snapshot.downloads.filter { $0.status == .waiting && $0.id != running }
+        let queuedPages = queued.reduce(0) { $0 + max(0, $1.total ?? $1.gallery.pages ?? 0) }
+        backgroundWork?.report(completed: finishedBackgroundPages + completed,
+                               total: total.map { finishedBackgroundPages + $0 + queuedPages })
     }
 
     private func stopActive(as status: DownloadRecord.Status) {
@@ -142,7 +184,7 @@ enum DownloadLoadPolicy {
             record.status = status
             library.updateDownload(record)
         }
-        backgroundWork?.finish(success: false)
+        finishBackgroundWork(success: false)
     }
     func remove(_ ids: Set<String>) async -> Bool {
         let owner = library.owner, generation = session.generation
@@ -155,20 +197,23 @@ enum DownloadLoadPolicy {
         if stoppedActive, removed { startNext() }
         return removed
     }
-    private func startNext() {
-        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-download-actions") { return }
-        guard !isInBackground, library.error == nil, running == nil, library.owner == session.owner,
-              let record = library.snapshot.downloads.first(where: { $0.status == .waiting }) else { return }
+    @discardableResult private func startNext() -> Bool {
+        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-download-actions") { return false }
+        let canRun = !isInBackground || (DownloadLoadPolicy.backgroundEnabled(defaults: preferences) && backgroundWork?.canContinue == true)
+        guard canRun, !continuationStopped, library.error == nil, running == nil, library.owner == session.owner,
+              let record = library.snapshot.downloads.first(where: { $0.status == .waiting }) else { return false }
         let run = Run(galleryID: record.id, owner: library.owner, generation: session.generation)
         activeRun = run
-        beginShortBackgroundTime(for: run)
-        backgroundWork?.report(completed: record.completed.count, total: record.total)
+        beginShortBackgroundTime()
+        requestBackgroundContinuation()
+        reportBackgroundProgress(completed: record.completed.count, total: record.total)
         let directory = library.offlineDirectory(record.gallery)
         let previous = settling
         task = Task {
             await previous?.value
             await download(record, to: directory, run: run)
         }
+        return true
     }
 
     private func isCurrent(_ run: Run) -> Bool {
@@ -213,7 +258,7 @@ enum DownloadLoadPolicy {
                     current.gallery.tags += detail.gallery.tags.filter { !knownIDs.contains($0.id) }
                     current.gallery.tagsComplete = true
                 }
-                backgroundWork?.report(completed: current.completed.count, total: current.total)
+                reportBackgroundProgress(completed: current.completed.count, total: current.total)
                 try await savePages(detail.pages, to: directory, run: run, reuse: reuse) { saved in
                     verifiedPages.insert(saved.index)
                     guard current.completed[saved.index] != saved.filename else { return }
@@ -222,7 +267,7 @@ enum DownloadLoadPolicy {
                     let checkpoint = pagesSinceCheckpoint == 8
                     library.updateDownload(current, checkpoint: checkpoint)
                     if library.error != nil { throw ViewerError.storage }
-                    backgroundWork?.report(completed: current.completed.count, total: current.total)
+                    reportBackgroundProgress(completed: current.completed.count, total: current.total)
                     if checkpoint { pagesSinceCheckpoint = 0 }
                 }
                 cursor = detail.next
@@ -255,8 +300,13 @@ enum DownloadLoadPolicy {
         }
         let success = canCommit && current.status == .complete && library.error == nil
         if success, current.replaces != nil { library.retireReplacedDownloads() }
-        backgroundWork?.finish(success: success)
-        if success || (canCommit && failedImageOnly) { startNext() }
+        // One user-started queue shares the current grant. Completing a gallery
+        // must not end background work while the next queued gallery can run.
+        if success || (canCommit && failedImageOnly) {
+            finishedBackgroundPages += current.completed.count
+            if startNext() { return }
+        }
+        finishBackgroundWork(success: success)
     }
 
     private func savePages(_ pages: [GalleryPage], to directory: URL, run: Run, reuse: OfflinePageReuse?,

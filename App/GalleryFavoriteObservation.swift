@@ -18,6 +18,11 @@ struct GalleryFavoriteScope: Hashable {
 @MainActor final class GalleryFavoriteObservation: ObservableObject {
     @Published private(set) var state: GalleryFavoriteState = .unknown
     @Published private(set) var phase: FavoriteSyncPhase?
+    var needsManagement: Bool {
+        if phase != nil { return true }
+        if case .favorited = state { return true }
+        return false
+    }
     private let observerID = UUID()
     private var client: GalleryFavoriteClient?
     private var reference: GalleryRef?

@@ -15,6 +15,14 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         let card = app.buttons["gallery.open.1"]; XCTAssertTrue(card.waitForExistence(timeout: 8)); card.tap()
         XCTAssertTrue(app.buttons["detail.site-favorite"].waitForExistence(timeout: 8))
     }
+    private func openGroupMenu(_ app: XCUIApplication) {
+        let picker = app.descendants(matching: .any)["favorite.editor.group-picker"].firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 8)); picker.tap()
+        XCTAssertTrue(group(0, app: app).waitForExistence(timeout: 8))
+    }
+    private func group(_ index: Int, app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["favorite.editor.group.\(index)"].firstMatch
+    }
     private func reveal(_ app: XCUIApplication, _ element: XCUIElement) {
         for _ in 0..<6 { if element.exists && element.isHittable { return }; app.swipeUp() }
         XCTAssertTrue(element.exists && element.isHittable)
@@ -145,7 +153,8 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         XCTAssertEqual(reopened.buttons["favorites.sort"].value as? String, "收藏时间")
     }
     func testLoadingGroupIsCenteredInPortraitAndLandscapeWithoutChangingFormRowAlignment() {
-        let app = launch(["--qa-favorite-loading"]); detail(app); app.buttons["detail.site-favorite"].tap()
+        let app = launch(["--qa-favorite-loading", "--qa-favorite-existing"]); detail(app)
+        app.buttons["detail.site-favorite"].tap()
         let loading = app.descendants(matching: .any)["favorite.editor.loading"].firstMatch
         XCTAssertTrue(loading.waitForExistence(timeout: 5))
         for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
@@ -198,9 +207,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         XCTAssertTrue(second.waitForExistence(timeout: 5)); second.tap()
         XCTAssertTrue(app.batchSelection("已选 2 项", source: "discover").exists)
         app.buttons["discover.favorite"].tap()
-        let group = app.buttons["favorites.add-to.1"]
-        XCTAssertTrue(group.waitForExistence(timeout: 5)); group.tap()
-        app.buttons["favorites.confirm-add"].tap()
+        XCTAssertFalse(app.buttons["favorites.confirm-add"].exists, "Batch additions use the configured default directly")
         let feedback = app.staticTexts["discover.feedback"]
         XCTAssertTrue(feedback.waitForExistence(timeout: 5))
         XCTAssertTrue(feedback.label.contains("已加入收藏同步队列 2 项"))
@@ -275,14 +282,15 @@ final class LibraryFavoritesV37UITests: XCTestCase {
     }
 
     func testReaderStarUsesSiteFavoritesWhileReadLaterRemainsIndependent() {
-        let app = launch(); detail(app)
+        let app = launch(["--qa-favorite-existing"]); detail(app)
         app.buttons["detail.more"].tap(); app.buttons["detail.local-bookmark"].tap()
         app.buttons["在线阅读"].tap()
         let star = readerFavorite(in: app)
         XCTAssertEqual(app.buttons["reader.settings.read-later"].label, "移出稍后再读")
-        expectation(for: NSPredicate(format: "value == %@", "未收藏"), evaluatedWith: star); waitForExpectations(timeout: 5)
-        star.tap(); XCTAssertTrue(app.buttons["favorite.editor.group.5"].waitForExistence(timeout: 5))
-        app.buttons["favorite.editor.group.5"].tap(); app.buttons["favorite.editor.save"].tap()
+        expectation(for: NSPredicate(format: "value CONTAINS %@", "已收藏"), evaluatedWith: star); waitForExpectations(timeout: 5)
+        star.tap(); XCTAssertTrue(app.descendants(matching: .any)["favorite.editor.group-picker"].firstMatch.waitForExistence(timeout: 5))
+        openGroupMenu(app)
+        group(5, app: app).tap(); app.buttons["favorite.editor.save"].tap()
         _ = readerFavorite(in: app)
         expectation(for: NSPredicate(format: "value CONTAINS %@", "已收藏"), evaluatedWith: star); waitForExpectations(timeout: 6)
         capture(app, "library37.reader-site-star")
@@ -293,28 +301,28 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         capture(app, "library37.detail-reflects-reader-favorite")
         (app.buttons["继续阅读"].exists ? app.buttons["继续阅读"] : app.buttons["在线阅读"]).tap()
         _ = readerFavorite(in: app)
-        star.tap(); let remove = app.buttons["favorite.editor.remove"]; reveal(app, remove); remove.tap()
-        app.buttons["favorite.editor.confirm-remove"].firstMatch.tap()
+        star.tap(); XCTAssertTrue(app.buttons["favorite.editor.remove"].waitForExistence(timeout: 5))
+        let remove = app.buttons["favorite.editor.remove"]; reveal(app, remove); remove.tap()
+        app.alerts.buttons["favorite.editor.confirm-remove"].firstMatch.tap()
         _ = readerFavorite(in: app)
         expectation(for: NSPredicate(format: "value == %@", "未收藏"), evaluatedWith: star); waitForExpectations(timeout: 6)
         ReaderSettingsUIHelpers.close(in: app)
         app.buttons["reader.close"].tap()
         expectation(for: NSPredicate(format: "label CONTAINS %@", "添加收藏"), evaluatedWith: detailFavorite); waitForExpectations(timeout: 5)
     }
-    func testDetailCancelFavoriteHasExplicitConfirmationAndVerifiedUnfavoritedResult() {
+    func testDetailRemoveFavoriteUsesConfirmationAlertAndVerifiedUnfavoritedResult() {
         let app = launch(["--qa-favorite-existing"]); detail(app)
         let button = app.buttons["detail.site-favorite"]
         expectation(for: NSPredicate(format: "label CONTAINS %@", "收藏完成"), evaluatedWith: button); waitForExpectations(timeout: 5)
         let originalFrame = button.frame
         XCTAssertFalse(app.buttons["detail.cancel-favorite"].exists)
         button.tap()
-        let cancel = app.buttons["favorite.editor.remove"]; XCTAssertTrue(cancel.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["favorite.editor.edit"].isHittable)
+        let remove = app.buttons["favorite.editor.remove"]; XCTAssertTrue(remove.waitForExistence(timeout: 5))
         let status = app.descendants(matching: .any)["favorite.editor.status"].firstMatch
         XCTAssertTrue(status.exists)
         XCTAssertTrue(status.label.contains("已读") || (status.value as? String)?.contains("已读") == true)
-        cancel.tap()
-        let confirm = app.buttons["favorite.editor.confirm-remove"]; XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        remove.tap()
+        let confirm = app.alerts.buttons["favorite.editor.confirm-remove"].firstMatch; XCTAssertTrue(confirm.waitForExistence(timeout: 5))
         capture(app, "library37.detail-remove-confirmation"); confirm.tap()
         expectation(for: NSPredicate(format: "label CONTAINS %@", "添加收藏"), evaluatedWith: button); waitForExpectations(timeout: 6)
         XCTAssertEqual(button.frame.midX, originalFrame.midX, accuracy: 1)
@@ -324,12 +332,16 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         let app = launch(["--qa-favorite-unauthenticated"]); detail(app); app.buttons["在线阅读"].tap()
         let star = readerFavorite(in: app)
         XCTAssertEqual(star.value as? String, "状态待核实"); star.tap()
-        XCTAssertTrue(app.staticTexts["favorite.editor.error"].waitForExistence(timeout: 5))
+        XCTAssertFalse(group(0, app: app).exists, "Quick add must not open a picker")
+        ReaderSettingsUIHelpers.close(in: app)
+        let reopenedStar = readerFavorite(in: app)
+        reopenedStar.tap()
+        XCTAssertTrue(app.staticTexts["favorite.sync.status"].waitForExistence(timeout: 5) ||
+                      app.buttons["favorite.sync.retry"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["favorite.editor.save"].isEnabled)
-        XCTAssertFalse(app.buttons["favorite.editor.remove"].exists)
     }
     func testReadingAndLocalStateBindingDoNotReadFavoriteFormUntilExplicitAction() {
-        let app = launch(["--qa-favorite-counters"]); detail(app); app.buttons["在线阅读"].tap()
+        let app = launch(["--qa-favorite-counters", "--qa-favorite-existing"]); detail(app); app.buttons["在线阅读"].tap()
         let star = readerFavorite(in: app)
         XCTAssertTrue((star.value as? String)?.contains("reads=0;posts=0") == true)
         ReaderSettingsUIHelpers.close(in: app)
@@ -339,16 +351,24 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         _ = readerFavorite(in: app)
         XCTAssertTrue((star.value as? String)?.contains("reads=0;posts=0") == true)
         capture(app, "favorite38.reading-zero-form-requests")
-        star.tap(); XCTAssertTrue(app.buttons["favorite.editor.group.0"].waitForExistence(timeout: 5))
+        star.tap(); XCTAssertTrue(app.descendants(matching: .any)["favorite.editor.group-picker"].firstMatch.waitForExistence(timeout: 5))
+        let firstEditorCount = app.descendants(matching: .any)["favorite.editor.qa-counts"].firstMatch
+        expectation(for: NSPredicate(format: "label CONTAINS %@", "reads=1;posts=0"), evaluatedWith: firstEditorCount)
+        waitForExpectations(timeout: 6)
         app.buttons["favorite.editor.cancel"].tap()
         _ = readerFavorite(in: app)
-        XCTAssertTrue((star.value as? String)?.contains("reads=1;posts=0") == true)
+        expectation(for: NSPredicate(format: "value CONTAINS %@", "reads=1;posts=0"), evaluatedWith: star); waitForExpectations(timeout: 5)
         ReaderSettingsUIHelpers.close(in: app)
         slider.adjust(toNormalizedSliderPosition: 0.8)
         _ = readerFavorite(in: app)
         XCTAssertTrue((star.value as? String)?.contains("reads=1;posts=0") == true)
         star.tap()
+        let cachedEditorCount = app.descendants(matching: .any)["favorite.editor.qa-counts"].firstMatch
+        XCTAssertTrue(cachedEditorCount.waitForExistence(timeout: 5))
+        XCTAssertTrue(cachedEditorCount.label.contains("reads=0;posts=0"), "A fresh cached form should avoid another verification read")
         let refresh = app.buttons["favorite.editor.reload"]; reveal(app, refresh); refresh.tap()
+        expectation(for: NSPredicate(format: "label CONTAINS %@", "reads=1;posts=0"), evaluatedWith: cachedEditorCount)
+        waitForExpectations(timeout: 6)
         app.buttons["favorite.editor.cancel"].tap()
         _ = readerFavorite(in: app)
         expectation(for: NSPredicate(format: "value CONTAINS %@", "reads=2;posts=0"), evaluatedWith: star)

@@ -29,6 +29,13 @@ public struct GalleryFavoriteForm: Sendable {
         selectedGroup.flatMap { index in groups.first { $0.id == index } }
             .map { .favorited($0.name) } ?? .notFavorited
     }
+
+    /// Refresh labels without changing membership, notes, or submission fields.
+    public func replacingGroupNames(_ names: [String]) -> Self {
+        guard names.count == 10 else { return self }
+        return Self(reference: reference, groups: groups.map { .init(id: $0.id, name: names[$0.id]) },
+                    selectedGroup: selectedGroup, note: note, hidden: hidden, submit: submit)
+    }
     public static func endpoint(for reference: GalleryRef) throws -> URL {
         guard reference.gid > 0, !reference.token.isEmpty, reference.token.count <= 256,
               reference.token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {

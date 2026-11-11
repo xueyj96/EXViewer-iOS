@@ -72,11 +72,17 @@ enum FeedChrome {
     static let panelSpacing: CGFloat = 4
     static let panelShape = AppShape.aligned(with: AppShape.control, offset: panelSpacing)
     static let rowSurfaceHeight: CGFloat = 34
+    // Single-row bars share this surface height; page-side actions are squares.
+    static let pageActionWidth = rowSurfaceHeight
     static let singleRowPanelHeight = rowSurfaceHeight + 2 * panelSpacing
     static let singleRowOverhang = (rowHeight - singleRowPanelHeight) / 2
     static let singleRowSurfaceInset = verticalHitInset(for: rowSurfaceHeight)
     static let doubleRowPanelHeight = 2 * rowSurfaceHeight + 3 * panelSpacing
     static let doubleRowOverhang = (2 * rowHeight - doubleRowPanelHeight) / 2
+
+    enum ReaderBar {
+        static let maximumWidth: CGFloat = 460
+    }
 
     enum DetailCard {
         static let inset: CGFloat = 6
@@ -268,6 +274,8 @@ struct FloatingPageTitleRow<Leading: View, Trailing: View>: View {
     var body: some View {
         PageTitleLayout(balancesActions: balancesActions) {
             HStack(spacing: FeedChrome.panelSpacing, content: leading)
+                .labelStyle(.iconOnly)
+                .environment(\.pageHeaderAction, true)
             Text(title)
                 .font(FeedChrome.emphasizedLabelFont)
                 .lineLimit(1).minimumScaleFactor(0.8)
@@ -276,6 +284,8 @@ struct FloatingPageTitleRow<Leading: View, Trailing: View>: View {
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier(identifier)
             HStack(spacing: FeedChrome.panelSpacing, content: trailing)
+                .labelStyle(.iconOnly)
+                .environment(\.pageHeaderAction, true)
         }
         .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
     }
@@ -327,6 +337,7 @@ struct CompactFormValueRow<Label: View>: View {
         }
         .lineLimit(1)
         .frame(minHeight: FeedChrome.compactFormRowHeight)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -489,6 +500,7 @@ struct FeedHeaderButtonStyle: ButtonStyle {
 
 extension EnvironmentValues {
     @Entry var feedHeaderRow: FeedHeaderRow? = nil
+    @Entry var pageHeaderAction = false
 }
 
 extension View {
@@ -501,16 +513,19 @@ private struct FeedHeaderControlSurface: ViewModifier {
     let typeSize: DynamicTypeSize
     let expandsHorizontally: Bool
     @Environment(\.feedHeaderRow) private var row
+    @Environment(\.pageHeaderAction) private var pageAction
 
     func body(content: Content) -> some View {
         let insets = FeedChrome.surfaceInsets(for: typeSize, row: row)
+        let square = pageAction && !expandsHorizontally
         content
             .font(FeedChrome.labelFont)
             .imageScale(FeedChrome.iconScale)
-            .padding(.horizontal, FeedChrome.controlSpacing)
+            .padding(.horizontal, square ? 0 : FeedChrome.controlSpacing)
             .offset(y: FeedChrome.contentOffset(for: insets))
-            .frame(minWidth: FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight)
-            .frame(maxWidth: expandsHorizontally ? .infinity : nil, alignment: .leading)
+            .frame(minWidth: square ? FeedChrome.pageActionWidth : FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight)
+            .frame(width: square ? FeedChrome.pageActionWidth : nil)
+            .frame(maxWidth: expandsHorizontally ? .infinity : nil, alignment: square ? .center : .leading)
             .contentShape(Rectangle())
             .appControlSurface(insets: insets)
     }
@@ -738,7 +753,7 @@ struct CompactMainTabs<Content: View>: View {
     }
 
     private var tabButtons: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: FeedChrome.panelSpacing) {
             ForEach(destinations, id: \.id) { destination in
                 Button { selection = destination.id } label: {
                     VStack(spacing: 1) {

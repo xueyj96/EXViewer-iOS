@@ -91,6 +91,7 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
     @Published private(set) var owner = "guest"
     @Published private(set) var favoritesRevision = UUID()
     let favoriteStateCache: SiteFavoriteCache
+    let favoriteGroups: FavoriteGroupPreferences
     @Published var quota = AccountQuota()
     @Published var error: String?
     let webStore = WKWebsiteDataStore.nonPersistent()
@@ -144,10 +145,16 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
     }
 
     init(qa: Bool = false, configuration: URLSessionConfiguration? = nil,
-         searchInterval: TimeInterval = 3.1, pageConcurrencyLimit: (() -> Int)? = nil) {
+         searchInterval: TimeInterval = 3.1, pageConcurrencyLimit: (() -> Int)? = nil,
+         favoriteCache: SiteFavoriteCache? = nil, favoritePreferences: FavoriteGroupPreferences? = nil) {
+        if qa && ProcessInfo.processInfo.arguments.contains("--qa-reset-favorite-groups") {
+            UserDefaults(suiteName: "ExViewer.QA.FavoriteGroups")?.removePersistentDomain(forName: "ExViewer.QA.FavoriteGroups")
+        }
+        self.favoriteGroups = favoritePreferences ?? FavoriteGroupPreferences(defaults: qa
+            ? UserDefaults(suiteName: "ExViewer.QA.FavoriteGroups")! : .standard)
         self.transportConfiguration = configuration
         self.persistsCredentials = !qa
-        favoriteStateCache = SiteFavoriteCache(storageRoot: qa ? nil : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ExViewer"))
+        favoriteStateCache = favoriteCache ?? SiteFavoriteCache(storageRoot: qa ? nil : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ExViewer"))
         self.pageScheduler = SiteRequestScheduler(searchInterval: searchInterval)
         self.pageConcurrencyLimit = pageConcurrencyLimit ?? {
             SiteRequestPolicy.configuredConcurrency(defaults: ReaderPreferenceDefaults.store)

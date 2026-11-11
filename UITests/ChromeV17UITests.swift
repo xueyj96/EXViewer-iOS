@@ -50,6 +50,11 @@ final class ChromeV17UITests: XCTestCase {
     private func nameFavorite(_ app: XCUIApplication, _ name: String) {
         let input = app.textFields["search.save.name"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["main.tab.discover"].isHittable, "Saving a combination stays in the main navigation")
+        XCTAssertEqual(app.buttons["search.save.cancel"].frame.width, 34, accuracy: 0.75)
+        XCTAssertEqual(app.buttons["search.save.confirm"].frame.width, 34, accuracy: 0.75)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "single-row.save-search-page"
+        shot.lifetime = .keepAlways; add(shot)
         input.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         if let old = input.value as? String, old != input.placeholderValue {
             input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count))
@@ -178,15 +183,15 @@ final class ChromeV17UITests: XCTestCase {
         nameFavorite(app, "海岸收藏"); openFavorites(app)
         let common = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-favorites.load.")).firstMatch
         XCTAssertTrue(common.label.contains("海岸收藏")); common.tap()
-        XCTAssertTrue(feedback(app).waitForExistence(timeout: 5))
-        XCTAssertTrue(feedback(app).label.contains("从常用组合载入")); XCTAssertEqual(feedback(app).value as? String, "已载入")
+        XCTAssertTrue(app.textFields["compose.text"].waitForExistence(timeout: 5))
+        XCTAssertFalse(feedback(app).exists)
         let input = app.textFields["compose.text"]
         input.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap(); input.typeText(" changed")
-        XCTAssertEqual(feedback(app).value as? String, "已修改")
+        XCTAssertFalse(feedback(app).exists)
         app.buttons["compose.cancel"].tap()
         app.buttons["discover.search-entry"].tap(); openFavorites(app); common.tap()
         XCTAssertEqual(input.value as? String, "coast", "Editing must not overwrite the stored combination")
-        XCTAssertEqual(feedback(app).value as? String, "已载入")
+        XCTAssertFalse(feedback(app).exists)
         openSearchHistory(app)
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-history.load.")).firstMatch.tap()
         XCTAssertTrue(feedback(app).label.contains("从最近搜索载入"))
@@ -220,8 +225,9 @@ final class ChromeV17UITests: XCTestCase {
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-favorites.load."))
         XCTAssertEqual(rows.count, 4)
         rows.matching(NSPredicate(format: "label CONTAINS %@", "组合4")).firstMatch.tap()
-        XCTAssertTrue(feedback(app).waitForExistence(timeout: 5)); XCTAssertTrue(feedback(app).isHittable)
-        XCTAssertTrue(feedback(app).label.contains("从常用组合载入")); XCTAssertEqual(input.value as? String, "preset4")
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        XCTAssertEqual(input.value as? String, "preset4")
+        XCTAssertFalse(feedback(app).exists)
     }
 
     func testSaveCurrentDraftAsCommonWithoutExecutingAndClearOnlyHistory() {
@@ -725,7 +731,7 @@ final class ChromeV17UITests: XCTestCase {
         XCTAssertTrue(shortcut.waitForExistence(timeout: 5)); shortcut.tap()
         XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         XCTAssertEqual(app.textFields["compose.text"].value as? String, "coast")
-        XCTAssertEqual(feedback(app).value as? String, "已载入")
+        XCTAssertFalse(feedback(app).exists)
         openSearchHistory(app)
         let latest = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-history.load.")).firstMatch
         XCTAssertTrue(latest.label.contains("mountain"), "Loading a preset must not execute or reorder search history")
@@ -739,7 +745,7 @@ final class ChromeV17UITests: XCTestCase {
         XCTAssertTrue(preset.waitForExistence(timeout: 5)); preset.tap()
         XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 7))
         XCTAssertEqual(app.textFields["compose.text"].value as? String, "coast")
-        XCTAssertEqual(feedback(app).value as? String, "已载入")
+        XCTAssertFalse(feedback(app).exists)
         let text = app.textFields["compose.text"]; text.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.9)).tap(); text.typeText(" changed")
         app.buttons["compose.apply"].tap()
         app.buttons["discover.search-entry"].tap()

@@ -31,13 +31,6 @@ struct DetailTagSearchDraft: Identifiable {
         case .discoverSearch: "编辑发现页搜索"
         }
     }
-    var statusTitle: String {
-        switch origin {
-        case .newSearch: "已载入所选标签"
-        case .currentSearch: "已加入当前搜索"
-        case .discoverSearch: "已加入发现页搜索"
-        }
-    }
 
     static func newSearch(tags: [GalleryTag], site: GallerySite) -> Self {
         make(tags: tags, site: site, current: nil, origin: .newSearch)
@@ -217,7 +210,7 @@ private struct DetailSearchFlow: View {
                 .galleryDetailPresentations(inlineSearch: onClose != nil)
                 .transition(.opacity)
             } else {
-                DiscoveryComposerView(query: request.draft.query, site: request.draft.site, savedID: nil,
+                DiscoveryComposerView(query: request.draft.query, site: request.draft.site,
                                       detailTagSource: request.draft, dismissesOnApply: false,
                                       updatesResults: request.target != nil, onCancel: close, onApply: apply)
                     .transition(.opacity)

@@ -4,7 +4,7 @@ import UIKit
 @MainActor protocol DownloadBackgroundWork {
     var canContinue: Bool { get }
     func beginShort(_ name: String, expired: @escaping @MainActor () -> Void)
-    func requestContinuation(expired: @escaping @MainActor () -> Void)
+    func requestContinuation(stopped: @escaping @MainActor () -> Void)
     func report(completed: Int, total: Int?)
     func finish(success: Bool)
 }
@@ -31,7 +31,7 @@ import UIKit
         }
     }
 
-    func requestContinuation(expired: @escaping @MainActor () -> Void) {
+    func requestContinuation(stopped: @escaping @MainActor () -> Void) {
         guard #available(iOS 26.0, *), continuedID == nil, let bundle = Bundle.main.bundleIdentifier else { return }
         let id = "\(bundle).offline-download.\(UUID().uuidString)"
         let scheduler = BGTaskScheduler.shared
@@ -47,7 +47,7 @@ import UIKit
                         guard let self, self.continuedID == id, let operation = self.continued else { return }
                         self.continuedID = nil
                         self.continued = nil
-                        expired()
+                        stopped()
                         operation.setTaskCompleted(success: false)
                     }
                 }

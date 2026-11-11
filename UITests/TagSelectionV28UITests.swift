@@ -128,6 +128,8 @@ final class TagSelectionV28UITests: XCTestCase {
         let shortcut = app.buttons["compose.favorite-tag.language:english"]
         XCTAssertTrue(shortcut.waitForExistence(timeout: 5))
         XCTAssertFalse(shortcut.isEnabled)
+        XCTAssertEqual(add.frame.height, 36, accuracy: 1)
+        XCTAssertEqual(common.frame.height, shortcut.frame.height, accuracy: 1)
         XCTAssertEqual(shortcut.frame.minY - common.frame.maxY, 4, accuracy: 1)
         XCTAssertEqual(common.frame.minX - add.frame.maxX, 4, accuracy: 1)
         XCTAssertEqual(shortcut.frame.minX, add.frame.minX, accuracy: 1)

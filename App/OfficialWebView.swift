@@ -49,7 +49,7 @@ struct OfficialWebView: View {
                 }
             }
                 .floatingPageHeader(destination.title, identifier: "official-web") {
-                    Button("关闭") { if let operation { session.endWebOperation(operation) }; dismiss() }
+                    Button { if let operation { session.endWebOperation(operation) }; dismiss() } label: { Label("关闭", systemImage: "xmark") }
                         .buttonStyle(FeedHeaderButtonStyle()).accessibilityIdentifier("official-web.close")
                 } trailing: {
                     EmptyView()

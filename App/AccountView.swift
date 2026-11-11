@@ -86,6 +86,10 @@ struct AccountView: View {
                 accountSection("偏好与数据") {
                     accountLink("标签与屏蔽", symbol: "tag", identifier: "account.tags") { TagsView(use: onUseTag) }
                     accountDivider
+                    accountLink("收藏设置", symbol: "folder", identifier: "account.favorite-settings") {
+                        FavoriteSettingsView(site: site, session: session)
+                    }
+                    accountDivider
                     accountLink("收藏同步", symbol: "arrow.triangle.2.circlepath", identifier: "account.favorite-sync") {
                         FavoriteSyncStatusView(cache: session.favoriteStateCache)
                     }
@@ -283,6 +287,7 @@ private struct LocalDataManagementView: View {
     @AppStorage("reader.downloadConcurrency", store: ReaderPreferenceDefaults.store) private var readerConcurrency = ReaderLoadPolicy.defaultConcurrency
     @AppStorage("network.pageConcurrency", store: ReaderPreferenceDefaults.store) private var pageConcurrency = SiteRequestPolicy.defaultConcurrency
     @AppStorage(DownloadLoadPolicy.concurrencyKey, store: ReaderPreferenceDefaults.store) private var downloadConcurrency = DownloadLoadPolicy.defaultConcurrency
+    @AppStorage(DownloadLoadPolicy.backgroundKey, store: ReaderPreferenceDefaults.store) private var backgroundDownloads = true
     @State private var editingPrefetch = false
     @State private var prefetchEntry = ""
     @State private var legacyReaderConcurrency: Int?
@@ -327,6 +332,13 @@ private struct LocalDataManagementView: View {
                                    scale: .range(DownloadLoadPolicy.concurrencyRange), value: $downloadConcurrency)
             }
             .accountPageListRow()
+
+            Toggle(isOn: $backgroundDownloads) {
+                AccountRowLabel("后台下载", systemImage: "arrow.down.circle")
+            }
+            .onChange(of: backgroundDownloads) { _, _ in downloads.updateBackgroundDownloadPreference() }
+            .accessibilityIdentifier("account.download.background")
+            .accountPageCard(compactRows: true)
 
             VStack(spacing: 0) {
                 accountValueRow("浏览缓存上限", systemImage: "tray", value: "2 GB")

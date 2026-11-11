@@ -4,6 +4,22 @@ import ExViewerCore
 /// In-memory neutral server used only by the simulator's explicit QA mode.
 @MainActor enum NativeFavoritesQA {
     static var groups: [String] { ["默认", "待阅读", QASamples.favoriteGroupName, "画集", "短篇", "长篇", "关注", "推荐", "整理中", "其他"] }
+    private static var customGroups: [GallerySite: [String]] = [:]
+    static func groupNames(site: GallerySite) -> [String] { customGroups[site] ?? groups }
+    static func renameGroup(_ group: Int, name: String, site: GallerySite) {
+        var names = groupNames(site: site); names[group] = name; customGroups[site] = names
+    }
+    static func settingsHTML(site: GallerySite) -> String {
+        func escape(_ value: String) -> String {
+            value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
+                .replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: "'", with: "&#39;")
+        }
+        let inputs = groupNames(site: site).enumerated().map {
+            "<input name='favorite_\($0)' value='\(escape($1))' maxlength='20'>"
+        }.joined()
+        return "<form method='post'>\(inputs)<input name='apply' type='submit' value='Apply'></form>"
+    }
+
     private final class Record {
         var group: Int?
         var note: String
@@ -22,17 +38,17 @@ import ExViewerCore
         if args.contains("--qa-favorite-unauthenticated") { return .unknown }
         let record = records[reference] ?? Record(existing: args.contains("--qa-favorite-existing"))
         records[reference] = record
-        return record.group.map { .favorited(groups[$0]) } ?? .notFavorited
+        return record.group.map { .favorited(groupNames(site: reference.site)[$0]) } ?? .notFavorited
     }
     static func favorites(site: GallerySite) -> [Gallery] {
         QASamples.galleries.filter { $0.ref.site == site && records[$0.ref]?.group != nil }
     }
     static func html(reference: GalleryRef, group: Int?, note: String) -> String {
         func escape(_ value: String) -> String {
-            value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+            value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: "'", with: "&#39;")
                 .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
         }
-        let rows = groups.enumerated().map { index, name in
+        let rows = groupNames(site: reference.site).enumerated().map { index, name in
             let checked = group == index || (group == nil && index == 0) ? " checked" : ""
             return "<div onclick=\"favsel('\(index)')\"><input type='radio' name='favcat' value='\(index)'\(checked)>\(escape(name))</div>"
         }.joined()

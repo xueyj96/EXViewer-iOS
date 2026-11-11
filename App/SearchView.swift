@@ -5,14 +5,13 @@ private struct FavoriteSearchDraft: Identifiable {
     let id = UUID()
     let query: SearchQuery
     let site: GallerySite
-    let replacing: UUID?
     let name: String
     let owner: String
 
-    init(query: SearchQuery, site: GallerySite, existing: SavedSearch?, owner: String) {
-        self.query = query; self.site = site; replacing = existing?.id
+    init(query: SearchQuery, site: GallerySite, owner: String) {
+        self.query = query; self.site = site
         self.owner = owner
-        name = existing?.name ?? String((query.text.isEmpty ? SearchPresentation.summary(query, site: site) : query.text).prefix(80))
+        name = String((query.text.isEmpty ? SearchPresentation.summary(query, site: site) : query.text).prefix(80))
     }
 }
 
@@ -102,15 +101,14 @@ private struct SearchPresetRow: View {
                 if let date {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(displayTitle).font(FeedChrome.labelFont).foregroundStyle(.primary)
-                            .lineLimit(typeSize.isAccessibilitySize ? nil : 3).fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1).truncationMode(.tail)
                         HStack(spacing: 8) {
                             Text(site == .ex ? "EX" : "EH")
                             Text(date, style: .relative).lineLimit(1)
                             Spacer(minLength: 8)
                             if let selection {
-                                Label(selection, systemImage: selection == "已修改" ? "pencil.circle" : "checkmark.circle.fill")
-                                    .labelStyle(.titleAndIcon).foregroundStyle(Color.accentColor)
-                                    .fixedSize(horizontal: true, vertical: false)
+                                Image(systemName: selection == "已修改" ? "pencil.circle" : "checkmark.circle.fill")
+                                    .foregroundStyle(Color.accentColor)
                             } else {
                                 Image(systemName: "arrow.up.left")
                             }
@@ -122,7 +120,7 @@ private struct SearchPresetRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, FeedChrome.panelSpacing)
-            .frame(minHeight: date == nil ? FeedChrome.rowHeight + FeedChrome.contentSpacing : FeedChrome.rowHeight)
+            .frame(minHeight: FeedChrome.rowHeight + FeedChrome.contentSpacing)
             .padding(.horizontal, date == nil ? FeedChrome.contentSpacing : 0)
             .background {
                 if date == nil {
@@ -167,7 +165,6 @@ private struct SearchPresetsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var favorite: FavoriteSearchDraft?
-    @State private var removingSaved: SavedSearch?
     @State private var editingSaved: SavedSearch?
     @State private var reordering = false
     @State private var reorderingOwner: String?
@@ -175,23 +172,19 @@ private struct SearchPresetsView: View {
 
     @ViewBuilder
     private var listPage: some View {
-        if list == .recent {
-            presetList.floatingGroupedPageContent()
-        } else {
-            presetList.accountSubpageContent()
-        }
+        presetList.accountSubpageContent()
     }
 
     private var presetList: some View {
         List {
             if list == .recent {
                 if let error = library.searchHistoryError {
-                    Section { Text(error).font(.subheadline).foregroundStyle(.secondary) }
+                    Text(error).foregroundStyle(.secondary).accountPageCard()
                 }
-                if let error = library.error { Section { Text(error).font(.subheadline).foregroundStyle(.red) } }
-                Section {
+                if let error = library.error { Text(error).foregroundStyle(.red).accountPageCard() }
+                Group {
                     if library.recentSearches.isEmpty {
-                        Text("暂无搜索记录").foregroundStyle(.secondary).accessibilityIdentifier("search-history.empty")
+                        Text("暂无搜索记录").foregroundStyle(.secondary).accountPageCard(compactRows: true).accessibilityIdentifier("search-history.empty")
                     }
                     ForEach(library.recentSearches) { record in
                         let saved = library.savedSearch(matching: record.query, site: record.site)
@@ -202,19 +195,19 @@ private struct SearchPresetsView: View {
                                 dismiss()
                             }.accessibilityIdentifier("search-history.load.\(record.id)")
                             Button {
-                                if let saved { removingSaved = saved }
-                                else { favorite = FavoriteSearchDraft(query: record.query, site: record.site, existing: nil, owner: library.owner) }
+                                favorite = FavoriteSearchDraft(query: record.query, site: record.site, owner: library.owner)
                             } label: {
-                                Image(systemName: saved == nil ? "bookmark" : "bookmark.fill").frame(width: 44, height: 44)
+                                Image(systemName: saved == nil ? "bookmark" : "bookmark.fill").frame(width: FeedChrome.rowHeight, height: FeedChrome.rowHeight)
                             }
                             .buttonStyle(.borderless)
-                            .accessibilityLabel(saved == nil ? "将这组条件存为常用" : "将这组条件移出常用")
+                            .disabled(saved != nil)
+                            .accessibilityLabel(saved == nil ? "将这组条件存为常用" : "已存常用")
                             .accessibilityIdentifier("search-history.save.\(record.id)")
                         }
-                        .listRowBackground(selection(.recent, record.id) == nil ? Color(uiColor: .secondarySystemGroupedBackground) : Color(uiColor: .tertiarySystemFill))
+                        .accountPageCard(compactRows: true)
                         .swipeActions { Button("删除", role: .destructive) { library.deleteRecentSearch(record.id) } }
                     }
-                } footer: { Text("点选记录载入条件，返回后再执行搜索。") }
+                }
             } else {
                 if let error = library.error {
                     Text(error).font(.footnote).foregroundStyle(.red).accountPageCard()
@@ -231,7 +224,6 @@ private struct SearchPresetsView: View {
                             onLoad(LoadedSearchSource(saved))
                         }.accessibilityIdentifier("search-favorites.load.\(saved.id)")
                             .accountPageListRow()
-                            .swipeActions { Button("移出常用", role: .destructive) { removingSaved = saved } }
                             .moveDisabled(!reordering)
                     }
                     .onMove { offsets, destination in
@@ -258,7 +250,7 @@ private struct SearchPresetsView: View {
                 .accessibilityIdentifier("search-presets.close")
         } trailing: {
             if list == .recent {
-                Button("清空") { clearing = true }
+                Button { clearing = true } label: { Label("清空", systemImage: "trash") }
                     .buttonStyle(FeedHeaderButtonStyle())
                     .disabled(library.recentSearches.isEmpty && library.searchHistoryError == nil)
                     .accessibilityIdentifier("search-history.clear")
@@ -276,19 +268,17 @@ private struct SearchPresetsView: View {
             }
         }
         .onChange(of: library.owner) { _, _ in
-            reordering = false; reorderingOwner = nil; editingSaved = nil; favorite = nil; removingSaved = nil; clearing = false
+            reordering = false; reorderingOwner = nil; editingSaved = nil; favorite = nil; clearing = false
         }
         .confirmationDialog("清空当前账号的搜索记录？常用组合会保留。", isPresented: $clearing, titleVisibility: .visible) {
             Button("清空搜索记录", role: .destructive) { library.clearSearchHistory() }
         }
-        .confirmationDialog("将这组条件移出常用？", isPresented: Binding(get: { removingSaved != nil }, set: { if !$0 { removingSaved = nil } }),
-                            titleVisibility: .visible, presenting: removingSaved) { saved in
-            Button("移出常用", role: .destructive) { library.deleteSearch(saved.id) }
-        } message: { saved in Text(saved.name) }
-        .sheet(item: $favorite) { target in
-            SaveSearchSheet(query: target.query, site: target.site, replacing: target.replacing,
-                            initialName: target.name, owner: target.owner) { _ in }
-                .dynamicTypeSize(typeSize)
+        .navigationDestination(isPresented: Binding(get: { favorite != nil }, set: { if !$0 { favorite = nil } })) {
+            if let target = favorite {
+                SaveSearchPage(query: target.query, site: target.site,
+                               initialName: target.name, owner: target.owner) { _ in }
+                    .dynamicTypeSize(typeSize)
+            }
         }
         .navigationDestination(isPresented: Binding(
             get: { editingSaved != nil },
@@ -312,51 +302,45 @@ private struct SearchPresetsView: View {
     }
 }
 
-struct SaveSearchSheet: View {
+struct SaveSearchPage: View {
     var query: SearchQuery
     var site: GallerySite
-    var replacing: UUID?
     let owner: String
     var onSaved: (UUID) -> Void
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var failure: String?
-    init(query: SearchQuery, site: GallerySite, replacing: UUID?, initialName: String, owner: String, onSaved: @escaping (UUID) -> Void) {
-        self.query = query; self.site = site; self.replacing = replacing; self.onSaved = onSaved; _name = State(initialValue: initialName)
+    init(query: SearchQuery, site: GallerySite, initialName: String, owner: String, onSaved: @escaping (UUID) -> Void) {
+        self.query = query; self.site = site; self.onSaved = onSaved; _name = State(initialValue: initialName)
         self.owner = owner
     }
     var body: some View {
-        NavigationStack {
-            Form {
-                Section { TextField("组合名称", text: $name).accessibilityIdentifier("search.save.name") }
-                Section {
-                    LabeledContent("站点", value: site.name)
-                    LabeledContent("条件数量", value: String(query.count))
-                    Text((try? query.expression()) ?? "请先调整搜索条件").font(.caption).foregroundStyle(.secondary)
-                }
-                if let failure { Section { Text(failure).foregroundStyle(.red) } }
-                if replacing != nil { Section { Button("另存为新组合") { save(replacing: nil) } } }
-            }
-            .font(.footnote)
-            .floatingGroupedPageContent()
-            .floatingPageHeader(replacing == nil ? "保存搜索组合" : "编辑搜索组合",
-                                 identifier: "search.save") {
-                Button { dismiss() } label: { Text("取消").frame(minWidth: 34) }
-                    .buttonStyle(FeedHeaderButtonStyle()).accessibilityIdentifier("search.save.cancel")
-            } trailing: {
-                Button { save(replacing: replacing) } label: { Text("保存").frame(minWidth: 34) }
-                    .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("search.save.confirm")
-            }
+        List {
+            TextField("组合名称", text: $name).accessibilityIdentifier("search.save.name")
+                .accountPageCard(compactRows: true)
+            LabeledContent("站点", value: site.name).accountPageCard(compactRows: true)
+            Text(SearchPresentation.conditions(query)).lineLimit(1).truncationMode(.tail)
+                .foregroundStyle(.secondary).accountPageCard(compactRows: true)
+            if let failure { Text(failure).foregroundStyle(.red).accountPageCard() }
+        }
+        .accountSubpageContent()
+        .floatingPageHeader("保存搜索组合",
+                             identifier: "search.save", pinned: true) {
+            Button { dismiss() } label: { Label("取消", systemImage: "xmark") }
+                .buttonStyle(FeedHeaderButtonStyle()).accessibilityIdentifier("search.save.cancel")
+        } trailing: {
+            Button(action: save) { Label("保存", systemImage: "checkmark") }
+                .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("search.save.confirm")
         }
     }
-    private func save(replacing: UUID?) {
+    private func save() {
         guard owner == library.owner else { failure = "账号已切换，请重新打开保存窗口。"; return }
         do {
             _ = try query.url(site: site)
-            guard let id = library.saveSearch(name: name, site: site, query: query, replacing: replacing, expectedOwner: owner), let saved = library.snapshot.saved.first(where: { $0.id == id }), saved.query == query, saved.site == site else { failure = library.error ?? "保存未完成，请检查名称或已保存组合数量。"; return }
+            guard let id = library.saveSearch(name: name, site: site, query: query, expectedOwner: owner), let saved = library.snapshot.saved.first(where: { $0.id == id }), saved.query == query, saved.site == site else { failure = library.error ?? "保存未完成，请检查名称或已保存组合数量。"; return }
             onSaved(id); dismiss()
         } catch { failure = (error as? ViewerError)?.localizedDescription ?? "条件无法保存" }
     }
@@ -381,38 +365,36 @@ struct DiscoveryComposerView: View {
     @ScaledMetric(relativeTo: .subheadline) private var categoryIconWidth: CGFloat = 18
     private var unlimitedPrompt: Text { Text("不限").foregroundStyle(Palette.inputPrompt) }
     @State private var draft: SearchDraft
-    @State private var draftSavedID: UUID?
     @State private var tagEntry = false
     @State private var commonTagsExpanded = false
     @State private var failure: String?
     @State private var favorite: FavoriteSearchDraft?
-    @State private var removingSaved: SavedSearch?
     @State private var loadedSource: LoadedSearchSource?
     @State private var detailTagSource: DetailTagSearchDraft?
     @State private var clearedDraft = false
-    @State private var savedFeedback = false
     @State private var filtersExpanded: Bool
     @State private var startsWithFavorites: Bool
     @State private var showsSearchHistory = false
     @State private var savedName: String
     @State private var editorOwner: String?
+    @State private var confirmingPresetRemoval = false
     @FocusState private var inputFocused: Bool
 
-    init(query: SearchQuery, site: GallerySite, savedID: UUID?, startAt: SearchComposerStart = .main, loadedPreset: SavedSearch? = nil,
+    init(query: SearchQuery, site: GallerySite, startAt: SearchComposerStart = .main, loadedPreset: SavedSearch? = nil,
          detailTagSource: DetailTagSearchDraft? = nil, dismissesOnApply: Bool = true, updatesResults: Bool = false,
          usesParentNavigation: Bool = false, onCancel: (() -> Void)? = nil, onApply: @escaping (SearchQuery, GallerySite, UUID?) throws -> Void) {
-        self.init(query: query, site: site, savedID: savedID, startAt: startAt, loadedPreset: loadedPreset,
+        self.init(query: query, site: site, startAt: startAt, loadedPreset: loadedPreset,
                   detailTagSource: detailTagSource, purpose: .search(onApply),
                   dismissesOnApply: dismissesOnApply, updatesResults: updatesResults,
                   usesParentNavigation: usesParentNavigation, onCancel: onCancel)
     }
 
     init(editing saved: SavedSearch, usesParentNavigation: Bool = false) {
-        self.init(query: saved.query, site: saved.site, savedID: saved.id, startAt: .main, loadedPreset: nil,
+        self.init(query: saved.query, site: saved.site, startAt: .main, loadedPreset: nil,
                   detailTagSource: nil, purpose: .editSaved(saved), usesParentNavigation: usesParentNavigation)
     }
 
-    private init(query: SearchQuery, site: GallerySite, savedID: UUID?, startAt: SearchComposerStart, loadedPreset: SavedSearch?,
+    private init(query: SearchQuery, site: GallerySite, startAt: SearchComposerStart, loadedPreset: SavedSearch?,
                  detailTagSource: DetailTagSearchDraft?, purpose: SearchComposerPurpose,
                  dismissesOnApply: Bool = true, updatesResults: Bool = false,
                  usesParentNavigation: Bool = false, onCancel: (() -> Void)? = nil) {
@@ -425,7 +407,6 @@ struct DiscoveryComposerView: View {
         if case let .editSaved(saved) = purpose { _savedName = State(initialValue: saved.name) }
         else { _savedName = State(initialValue: "") }
         _draft = State(initialValue: SearchDraft(query: query, site: site))
-        _draftSavedID = State(initialValue: savedID)
         _filtersExpanded = State(initialValue: startAt != .main)
         _startsWithFavorites = State(initialValue: startAt == .favorites)
         _loadedSource = State(initialValue: loadedPreset.map { LoadedSearchSource($0) })
@@ -442,30 +423,17 @@ struct DiscoveryComposerView: View {
         }
         .onAppear { if isSavedEditor && editorOwner == nil { editorOwner = library.owner } }
         .onChange(of: library.owner) { _, owner in
-            favorite = nil; removingSaved = nil; showsSearchHistory = false
-            tagEntry = false
+            favorite = nil; showsSearchHistory = false
+            tagEntry = false; confirmingPresetRemoval = false
             if isSavedEditor && editorOwner != owner { failure = "账号已切换，请重新打开常用组合编辑。" }
         }
         .onChange(of: draft) { _, _ in draftChanged() }
         .onChange(of: savedName) { _, _ in draftChanged() }
-        .sheet(item: $favorite) { target in
-            SaveSearchSheet(query: target.query, site: target.site, replacing: target.replacing,
-                            initialName: target.name, owner: target.owner) { id in
-                draftSavedID = id
-                if let saved = library.snapshot.saved.first(where: { $0.id == id }) {
-                    loadedSource = LoadedSearchSource(saved); savedFeedback = true
-                    detailTagSource = nil
-                }
-            }
-            .dynamicTypeSize(typeSize)
+        .confirmationDialog("删除这个常用组合？", isPresented: $confirmingPresetRemoval, titleVisibility: .visible) {
+            Button("删除组合", role: .destructive, action: removeEditedPreset)
+                .accessibilityIdentifier("saved-editor.confirm-delete")
         }
-        .confirmationDialog("将这组条件移出常用？", isPresented: Binding(get: { removingSaved != nil }, set: { if !$0 { removingSaved = nil } }),
-                            titleVisibility: .visible, presenting: removingSaved) { saved in
-            Button("移出常用", role: .destructive) { removeFavorite(saved) }
-                .accessibilityIdentifier("compose.remove-favorite")
-        } message: { saved in Text(saved.name) }
     }
-
     @ViewBuilder private var page: some View {
         if startsWithFavorites {
             SearchPresetsView(list: .favorite, source: loadedSource, sourceModified: sourceModified, onClose: onCancel) { source in
@@ -473,6 +441,16 @@ struct DiscoveryComposerView: View {
             }
         } else {
             mainPage
+                .navigationDestination(isPresented: Binding(get: { favorite != nil }, set: { if !$0 { favorite = nil } })) {
+                    if let target = favorite {
+                        SaveSearchPage(query: target.query, site: target.site, initialName: target.name, owner: target.owner) { id in
+                            if let saved = library.snapshot.saved.first(where: { $0.id == id }) {
+                                loadedSource = LoadedSearchSource(saved); detailTagSource = nil
+                            }
+                        }
+                        .dynamicTypeSize(typeSize)
+                    }
+                }
                 .navigationDestination(isPresented: $showsSearchHistory) {
                     SearchPresetsView(list: .recent, source: loadedSource, sourceModified: sourceModified) { source in
                         load(source)
@@ -526,7 +504,7 @@ struct DiscoveryComposerView: View {
             }
         }
         keywordCard
-        if clearedDraft || detailTagSource != nil || loadedSource != nil {
+        if clearedDraft || !tagSearchExclusions.isEmpty || composerStatusSource != nil {
             composerStatus.searchComposerCardSurface(allowsMultiline: true)
         }
         if !isSavedEditor { favoriteDraftCard }
@@ -541,6 +519,15 @@ struct DiscoveryComposerView: View {
             recentSearchCards
         }
         clearCard
+        if isSavedEditor {
+            Button(role: .destructive) { confirmingPresetRemoval = true } label: {
+                Text("删除组合").searchComposerCardSurface()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.red)
+            .disabled(editorOwner != library.owner)
+            .accessibilityIdentifier("saved-editor.delete")
+        }
     }
 
     private var keywordCard: some View {
@@ -577,29 +564,18 @@ struct DiscoveryComposerView: View {
         if clearedDraft {
             Label(isSavedEditor ? "条件已清空，保存后更新此组合" : "已清空本次条件，点击“\(visibleConfirmationTitle)”后生效",
                   systemImage: "checkmark.circle")
-                .font(.caption).foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color.accentColor)
                 .accessibilityIdentifier("compose.cleared-state")
-        } else if let source = detailTagSource {
-            VStack(alignment: .leading, spacing: 4) {
-                Label(source.statusTitle, systemImage: source.origin == .newSearch ? "magnifyingglass" : "plus.magnifyingglass")
-                    .foregroundStyle(Color.accentColor)
-                    .accessibilityIdentifier("compose.tag-source")
-                Text(source.origin == .newSearch ? "\(source.selectedCount) 个所选标签，尚未搜索" : "新增 \(source.addedCount) 个标签，原条件已保留，尚未搜索")
-                if let summary = source.sourceSummary {
-                    Text("原搜索：\(summary)").lineLimit(2)
-                        .accessibilityIdentifier("compose.tag-original")
-                }
-                if !tagSearchExclusions.isEmpty {
-                    Text("原搜索已排除：\(tagSearchExclusions.map(\.label).joined(separator: "、"))。可在筛选条件中调整。")
-                        .lineLimit(2).accessibilityIdentifier("compose.tag-exclusions")
-                }
-            }.font(.caption).foregroundStyle(.secondary)
-        } else if let source = loadedSource {
+        } else if !tagSearchExclusions.isEmpty {
+            Text("原搜索已排除：\(tagSearchExclusions.map(\.label).joined(separator: "、"))。可在筛选条件中调整。")
+                .font(FeedChrome.labelFont).foregroundStyle(.secondary)
+                .lineLimit(2).accessibilityIdentifier("compose.tag-exclusions")
+        } else if let source = composerStatusSource {
             Label(loadedStatus, systemImage: sourceModified ? "pencil.circle" : "checkmark.circle")
-                .labelStyle(.titleAndIcon).font(.caption).foregroundStyle(Color.accentColor)
+                .labelStyle(.titleAndIcon).foregroundStyle(Color.accentColor)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("compose.loaded-state")
-                .accessibilityValue(sourceModified ? "已修改" : savedFeedback ? "已保存" : "已载入")
+                .accessibilityValue(sourceModified ? "已修改" : "已载入")
                 .accessibilityHint(source.title)
         }
     }
@@ -648,7 +624,7 @@ struct DiscoveryComposerView: View {
 
     private var favoriteDraftCard: some View {
         let saved = matchingFavorite != nil
-        let label = saved ? "移出常用" : (originalFavorite == nil ? "存为常用" : "更新常用")
+        let label = saved ? "已存常用" : "存为常用"
         return Button(action: prepareFavorite) {
             HStack(spacing: FeedChrome.contentSpacing) {
                 Image(systemName: saved ? "bookmark.fill" : "bookmark").accessibilityHidden(true)
@@ -658,8 +634,8 @@ struct DiscoveryComposerView: View {
             .searchComposerCardSurface()
         }
         .buttonStyle(.plain)
-        .foregroundStyle(draft.hasConditions ? Color.accentColor : Color.secondary)
-        .disabled(!draft.hasConditions)
+        .foregroundStyle(draft.hasConditions && !saved ? Color.accentColor : Color.secondary)
+        .disabled(saved || !draft.hasConditions)
         .accessibilityValue(saved ? "已保存" : "未保存")
         .accessibilityIdentifier("compose.save-favorite")
     }
@@ -680,12 +656,12 @@ struct DiscoveryComposerView: View {
                                  identifier: "compose.title") {
                 Button {
                     if let onCancel { onCancel() } else { dismiss() }
-                } label: { Text("取消").frame(minWidth: 34) }
+                } label: { Label("取消", systemImage: "xmark") }
                     .buttonStyle(FeedHeaderButtonStyle())
                     .accessibilityIdentifier(isSavedEditor ? "saved-editor.cancel" : "compose.cancel")
             } trailing: {
                 Button { apply() } label: {
-                    Text(visibleConfirmationTitle).minimumScaleFactor(0.8).frame(minWidth: 34)
+                    Label(visibleConfirmationTitle, systemImage: isSavedEditor ? "checkmark" : "magnifyingglass")
                 }
                 .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true))
                 .foregroundStyle(Color.accentColor)
@@ -730,9 +706,13 @@ struct DiscoveryComposerView: View {
         return SearchPresentation.conditions(query, includeText: false)
     }
 
+    private var composerStatusSource: LoadedSearchSource? {
+        guard let loadedSource, loadedSource.kind == .recent else { return nil }
+        return loadedSource
+    }
+
     private var loadedStatus: String {
-        let origin = savedFeedback ? "已保存为常用" : loadedSource?.kind == .recent ? "从最近搜索载入" : "从常用组合载入"
-        return "\(origin)\(sourceModified ? " · 已修改" : "")"
+        return sourceModified ? "从最近搜索载入 · 已修改" : "从最近搜索载入"
     }
 
     @ViewBuilder private var filterSections: some View {
@@ -927,7 +907,7 @@ struct DiscoveryComposerView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .foregroundStyle(excluded ? Color.secondary : Color.primary)
-                        .searchFilterRow(minHeight: FeedChrome.rowHeight)
+                        .searchFilterRow()
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -976,10 +956,9 @@ struct DiscoveryComposerView: View {
     private func load(_ source: LoadedSearchSource) {
         inputFocused = false
         draft = SearchDraft(query: source.query, site: source.site)
-        draftSavedID = source.kind == .favorite ? source.id : nil
         loadedSource = source
         detailTagSource = nil
-        failure = nil; clearedDraft = false; savedFeedback = false
+        failure = nil; clearedDraft = false
         UISelectionFeedbackGenerator().selectionChanged()
     }
 
@@ -988,11 +967,8 @@ struct DiscoveryComposerView: View {
             let query = try draft.validatedQuery()
             guard query.hasSettings else { failure = "先输入关键词、标签或搜索设置，再存为常用。"; return }
             inputFocused = false
-            if let saved = library.savedSearch(matching: query, site: draft.site) {
-                removingSaved = saved
-                return
-            }
-            favorite = FavoriteSearchDraft(query: query, site: draft.site, existing: originalFavorite, owner: library.owner)
+            guard library.savedSearch(matching: query, site: draft.site) == nil else { return }
+            favorite = FavoriteSearchDraft(query: query, site: draft.site, owner: library.owner)
         } catch { failure = (error as? LocalizedError)?.errorDescription ?? "搜索条件无效" }
     }
 
@@ -1001,23 +977,18 @@ struct DiscoveryComposerView: View {
         return library.savedSearch(matching: query, site: draft.site)
     }
 
-    private var originalFavorite: SavedSearch? {
-        draftSavedID.flatMap { id in library.snapshot.saved.first { $0.id == id } }
-    }
-
-    private func removeFavorite(_ saved: SavedSearch) {
-        guard library.deleteSearch(saved.id) else {
-            failure = library.error ?? "未能移出常用，请重试。"
-            return
-        }
-        if draftSavedID == saved.id { draftSavedID = nil }
-        if loadedSource?.kind == .favorite && loadedSource?.id == saved.id { loadedSource = nil }
-        savedFeedback = false
-    }
-
     private func addTag(_ tag: GalleryTag) {
         guard !draft.query.rules.contains(where: { $0.id == tag.id }) else { return }
         draft.query.rules.append(.init(tag: tag))
+    }
+
+    private func removeEditedPreset() {
+        guard case let .editSaved(saved) = purpose, editorOwner == library.owner else { return }
+        guard library.deleteSearch(saved.id) else {
+            failure = library.error ?? "未能删除常用组合，请重试。"
+            return
+        }
+        dismiss()
     }
 
     private func apply() {
@@ -1051,7 +1022,6 @@ struct DiscoveryComposerView: View {
     private func clearDraft() {
         inputFocused = false
         draft.clear()
-        draftSavedID = nil
         detailTagSource = nil
         failure = nil; clearedDraft = true
         UISelectionFeedbackGenerator().selectionChanged()
@@ -1079,10 +1049,10 @@ private extension View {
         modifier(SearchComposerCardSurface(allowsMultiline: allowsMultiline))
     }
 
-    func searchFilterRow(minHeight: CGFloat = FeedChrome.compactFormRowHeight) -> some View {
+    func searchFilterRow() -> some View {
         font(.footnote)
             .padding(.horizontal, FeedChrome.contentSpacing)
-            .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight, alignment: .leading)
             .formRowSurface(shape: AppShape.control)
     }
 }
@@ -1097,7 +1067,7 @@ private struct SearchFilterActionStyle: ButtonStyle {
             .font(FeedChrome.labelFont)
             .foregroundStyle(accented ? Color.accentColor : Color.primary)
             .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
-            .frame(minHeight: FeedChrome.rowHeight)
+            .frame(minHeight: FeedChrome.compactFormRowHeight)
             .contentShape(Rectangle())
             .appControlSurface(selected: accented)
     }

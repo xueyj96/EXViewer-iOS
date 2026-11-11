@@ -11,6 +11,17 @@ import XCTest
         return condition()
     }
 
+    func testDownloadGateEnforcesItsStartInterval() async throws {
+        let scheduler = SiteRequestScheduler(searchInterval: 0)
+        let request = MediaRequestDemand(priority: .download)
+        let first = try await scheduler.acquire(request: request, pacing: .download, limit: 4)
+        let started = ProcessInfo.processInfo.systemUptime
+        await scheduler.release(first)
+        let second = try await scheduler.acquire(request: request, pacing: .download, limit: 4)
+        XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - started, 0.74)
+        await scheduler.release(second)
+    }
+
     func testBackgroundCannotTakeReservedForegroundSlotAndForegroundJumpsQueue() async throws {
         let scheduler = SiteRequestScheduler(searchInterval: 0)
         let first = try await scheduler.acquire(request: MediaRequestDemand(priority: .prefetch), pacing: nil, limit: 2)

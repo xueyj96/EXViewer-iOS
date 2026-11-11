@@ -26,6 +26,7 @@ struct GalleryDetailView: View {
     @State private var tagFeedback: String?
     @State private var tagFailure: String?
     @State private var favoriteEditing = false
+    @State private var favoriteFailure: String?
     @State private var pendingOfflineUpdate: GalleryOfflineUpdate?
     @StateObject private var favoriteObservation = GalleryFavoriteObservation()
     @StateObject private var downloadVersions = GalleryDownloadVersions()
@@ -120,9 +121,12 @@ struct GalleryDetailView: View {
             .onChange(of: current.tags) { _, tags in selectedTagIDs.formIntersection(Set(tags.map(\.id))) }
             .sheet(item: $web, onDismiss: { Task { await load(refresh: true) } }) { OfficialWebView(destination: $0) }
             .sheet(isPresented: $downloadOptions) { GalleryDownloadsView(gallery: current, versions: downloadVersions) }
-            .sheet(isPresented: $favoriteEditing) {
+            .navigationDestination(isPresented: $favoriteEditing) {
                 GalleryFavoriteEditorView(gallery: current, session: session, preparation: favoriteObservation.preparation(favoriteClient(for: current, session: session), reference: current.ref)) { favoriteObservation.accept($0, form: $1) }
             }
+            .alert("收藏未能加入", isPresented: Binding(get: { favoriteFailure != nil }, set: { if !$0 { favoriteFailure = nil } })) {
+                Button("好") { favoriteFailure = nil }
+            } message: { Text(favoriteFailure ?? "") }
             .alert("标签操作未完成", isPresented: Binding(get: { tagFailure != nil }, set: { if !$0 { tagFailure = nil } })) {
                 Button("好") { tagFailure = nil }
             } message: { Text(tagFailure ?? "") }
@@ -292,6 +296,17 @@ struct GalleryDetailView: View {
         }
     }
 
+    private func favoriteTapped() {
+        if favoriteObservation.needsManagement {
+            favoriteEditing = true
+        } else {
+            do {
+                _ = try session.addToDefaultFavorites([current])
+                favoriteObservation.syncFromCache()
+            } catch { favoriteFailure = ErrorMessages.message(error) }
+        }
+    }
+
     private var detailActions: some View {
         let hasLocalPages = library.readableDownload(for: current) != nil
         let readingTitle = onResumeReading != nil ? "返回阅读" :
@@ -307,7 +322,7 @@ struct GalleryDetailView: View {
                 .accessibilityLabel(readingTitle).accessibilityValue(hasLocalPages ? "优先读本机副本" : "")
                 .accessibilityIdentifier("detail.read")
                 .disabled(onResumeReading == nil && presentation == nil)
-            Button { favoriteEditing = true } label: {
+            Button(action: favoriteTapped) {
                 actionLabel(favoriteActionTitle,
                             symbol: { if case .favorited = favoriteState { return "star.fill" }; return "star" }())
             }
@@ -379,10 +394,8 @@ struct GalleryDetailView: View {
                     .accessibilityHint(target.search.summary)
             }
         } label: {
-            Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium))
-            .foregroundStyle(Color.accentColor)
-            .frame(width: FeedChrome.rowHeight, height: FeedChrome.rowHeight)
-            .appControlSurface(selected: true, verticalInset: detailControlInset)
+            Image(systemName: "magnifyingglass").foregroundStyle(Color.accentColor)
+                .feedHeaderControl(typeSize: typeSize)
         }
         .buttonStyle(.plain)
         .disabled(presentation == nil)
@@ -390,13 +403,9 @@ struct GalleryDetailView: View {
     }
 
     private var detailMenuLabel: some View {
-        Image(systemName: "ellipsis").font(.system(size: 17, weight: .medium))
-            .foregroundStyle(.primary)
-            .frame(width: 44, height: 44)
-            .appControlSurface(verticalInset: detailControlInset)
+        Image(systemName: "ellipsis").foregroundStyle(.primary)
+            .feedHeaderControl(typeSize: typeSize)
     }
-
-    private var detailControlInset: CGFloat { typeSize.isAccessibilitySize ? 0 : FeedChrome.singleRowSurfaceInset }
 
     private func toggleTagSelection(_ tag: GalleryTag) {
         if selectedTagIDs.contains(tag.id) { selectedTagIDs.remove(tag.id) }

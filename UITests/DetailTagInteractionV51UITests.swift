@@ -81,7 +81,8 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         XCTAssertFalse(app.buttons["detail.tags.add-to-search"].exists, "An empty browsing lane is not a current search")
         app.buttons["detail.tags.new-search"].tap()
         XCTAssertTrue(app.searchComposerTitle("新建搜索").waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["compose.tag-source"].label.contains("已载入"))
+        XCTAssertFalse(app.staticTexts["compose.tag-source"].exists)
+        XCTAssertFalse(app.staticTexts["compose.tag-original"].exists)
         let input = app.textFields["compose.text"]
         let fieldCard = app.descendants(matching: .any)["compose.keyword-card"].firstMatch
         XCTAssertTrue(fieldCard.exists)
@@ -155,7 +156,8 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         app.buttons["detail.tags.add-to-search"].tap()
         XCTAssertTrue(app.searchComposerTitle("编辑当前搜索").waitForExistence(timeout: 5))
         XCTAssertEqual(app.textFields["compose.text"].value as? String, "coast field notes")
-        XCTAssertTrue(app.staticTexts["compose.tag-source"].label.contains("已加入当前搜索"))
+        XCTAssertFalse(app.staticTexts["compose.tag-source"].exists)
+        XCTAssertFalse(app.staticTexts["compose.tag-original"].exists)
         XCTAssertTrue((app.buttons["compose.filters"].value as? String)?.contains("≥3星") == true)
         capture(app, "detail51.merge-draft")
         app.buttons["compose.cancel"].tap()

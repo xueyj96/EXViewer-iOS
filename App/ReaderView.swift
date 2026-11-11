@@ -106,6 +106,7 @@ struct ReaderView: View {
     @State private var historyCheckpoint: ReaderHistoryCheckpoint?
     @StateObject private var favoriteObservation = GalleryFavoriteObservation()
     @State private var favoriteEditing = false
+    @State private var favoriteFailure: String?
     @State private var favoriteAfterSettings = false
     @State private var singleTurn = ReaderSinglePageTurn()
     @State private var decodeFailures: [Int: URL] = [:]
@@ -310,9 +311,15 @@ struct ReaderView: View {
         .onAppear(perform: bindFavoriteState)
         .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in bindFavoriteState() }
         .onReceive(session.favoriteStateCache.$revision) { _ in favoriteObservation.syncFromCache() }
-        .sheet(isPresented: $favoriteEditing) {
-            GalleryFavoriteEditorView(gallery: gallery, session: session, preparation: favoriteObservation.preparation(favoriteClient(for: gallery, session: session), reference: gallery.ref)) { favoriteObservation.accept($0, form: $1) }
+        .fullScreenCover(isPresented: $favoriteEditing) {
+            NavigationStack {
+                GalleryFavoriteEditorView(gallery: gallery, session: session, preparation: favoriteObservation.preparation(favoriteClient(for: gallery, session: session), reference: gallery.ref)) { favoriteObservation.accept($0, form: $1) }
+            }
+            .localPageChrome()
         }
+        .alert("收藏未能加入", isPresented: Binding(get: { favoriteFailure != nil }, set: { if !$0 { favoriteFailure = nil } })) {
+            Button("好") { favoriteFailure = nil }
+        } message: { Text(favoriteFailure ?? "") }
         .overlay {
             if progressHUD, let total = model.total {
                 Text("\(Int(progressTarget.rounded())) / \(total)")
@@ -779,7 +786,7 @@ struct ReaderView: View {
                         Task { await seek(target); if progressRevision == token { progressHUD = false } }
                     }
                 }
-                .frame(minWidth: 56, maxWidth: .infinity, minHeight: 44)
+                .frame(minWidth: 56, maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
                 .accessibilityLabel("阅读进度")
                 .accessibilityValue("第 \(current) 页，共 \(total) 页")
                 .accessibilityIdentifier("reader.progress")
@@ -790,21 +797,21 @@ struct ReaderView: View {
                 Text("\(current) / \(model.total.map(String.init) ?? "未知")")
                     .font(FeedChrome.emphasizedLabelFont.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.65)
                     .foregroundStyle(.white).padding(.horizontal, 5)
-                    .frame(minWidth: 54, minHeight: 44).fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 54, minHeight: FeedChrome.rowHeight).fixedSize(horizontal: true, vertical: false)
                     .contentShape(Rectangle())
             }
             .accessibilityIdentifier("reader.page")
             .accessibilityHint("跳转到指定页码")
             Button { settings = true } label: {
-                Image(systemName: "ellipsis").font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white).frame(width: 44, height: 44).contentShape(Rectangle())
+                Image(systemName: "ellipsis").font(FeedChrome.labelFont)
+                    .foregroundStyle(.white).frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowHeight).contentShape(Rectangle())
             }
             .accessibilityLabel("阅读设置").accessibilityIdentifier("reader.settings")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, FeedChrome.panelSpacing)
         .background { readerPanelSurface }
-        .frame(maxWidth: 460)
+        .frame(maxWidth: FeedChrome.ReaderBar.maximumWidth)
         .padding(.horizontal, FeedChrome.contentInset)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("reader.controls.compact")
@@ -815,7 +822,16 @@ struct ReaderView: View {
         return ReaderSettingsPanel(mode: $mode, direction: Binding(get: { direction }, set: { direction = $0 }),
                                    favoriteSymbol: symbol, favoriteValue: favoriteAccessibilityValue,
                                    readLater: library.containsReadLater(gallery),
-                                   onFavorite: { favoriteAfterSettings = true; settings = false },
+                                   onFavorite: {
+                                       if favoriteObservation.needsManagement {
+                                           favoriteAfterSettings = true; settings = false
+                                       } else {
+                                           do {
+                                               _ = try session.addToDefaultFavorites([gallery])
+                                               favoriteObservation.syncFromCache()
+                                           } catch { favoriteFailure = ErrorMessages.message(error) }
+                                       }
+                                   },
                                    onReadLater: { library.toggleReadLater(gallery) })
     }
     private func bindFavoriteState() {
@@ -835,10 +851,10 @@ struct ReaderView: View {
             Image(systemName: "xmark")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.white)
-                .frame(width: FeedChrome.rowHeight, height: FeedChrome.rowSurfaceHeight)
+                .frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowSurfaceHeight)
                 .background(FloatingChrome.readerBackground, in: AppShape.control)
                 .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
-                .frame(width: 44, height: 44)
+                .frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -860,10 +876,10 @@ struct ReaderView: View {
                 .background(FloatingChrome.readerBackground, in: AppShape.control)
                 .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
         }
-        .frame(height: 44)
+        .frame(height: FeedChrome.rowHeight)
         .padding(.horizontal, FeedChrome.panelSpacing)
         .background { readerPanelSurface }
-        .frame(maxWidth: 460)
+        .frame(maxWidth: FeedChrome.ReaderBar.maximumWidth)
         .padding(.horizontal, FeedChrome.contentInset)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("reader.header")
@@ -1203,7 +1219,7 @@ private struct ReaderSettingsPanel: View {
             .floatingPageHeader("阅读设置", identifier: "reader.settings-page") {
                 EmptyView()
             } trailing: {
-                Button("完成") { dismiss() }
+                Button { dismiss() } label: { Label("完成", systemImage: "checkmark") }
                     .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
                     .accessibilityIdentifier("reader.settings.done")
             }
