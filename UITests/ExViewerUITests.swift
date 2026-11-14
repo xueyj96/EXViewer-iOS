@@ -100,7 +100,7 @@ final class ExViewerUITests: XCTestCase {
 
         input.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         input.typeText(" edited")
-        XCTAssertEqual(saveAction.label, "存为常用")
+        XCTAssertEqual(saveAction.label, "加入常用搜索组合")
         saveAction.tap()
         XCTAssertTrue(app.staticTexts["保存搜索组合"].waitForExistence(timeout: 5))
         confirm.tap()
@@ -231,7 +231,7 @@ final class ExViewerUITests: XCTestCase {
         let group = app.buttons["favorites.move-to.0"]
         XCTAssertTrue(group.waitForExistence(timeout: 5)); group.tap()
         app.buttons["favorites.confirm-move"].tap()
-        XCTAssertTrue(app.staticTexts["测试模式仅检查多选交互，未修改站点收藏。"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["测试模式 未修改站点收藏"].waitForExistence(timeout: 5))
         capture(app, "Favorites selection and explicit batch confirmation")
     }
     func testFeedLoadsNextBatchWhenScrollingDown() {

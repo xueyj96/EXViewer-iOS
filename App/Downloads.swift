@@ -31,6 +31,7 @@ enum DownloadLoadPolicy {
     private var isInBackground = false
     private var backgroundEpoch = UUID()
     private var finishedBackgroundPages = 0
+    private var backgroundHadFailure = false
     private var continuationStopped = false
     private let session: SiteSession
     private let library: LibraryStore
@@ -114,6 +115,7 @@ enum DownloadLoadPolicy {
             startNext()
         } else if var record = library.snapshot.downloads.first(where: { $0.id == id && $0.status == .waiting }) {
             record.status = .paused
+            record.error = nil
             library.updateDownload(record)
         }
     }
@@ -150,17 +152,19 @@ enum DownloadLoadPolicy {
     func updateBackgroundDownloadPreference() {
         if !DownloadLoadPolicy.backgroundEnabled(defaults: preferences) {
             if isInBackground { stopActive(as: .waiting) }
-            else { finishBackgroundWork(success: false) }
+            else { finishBackgroundWork(.foregroundOnly) }
         } else if !isInBackground, let run = activeRun, isCurrent(run) {
             beginShortBackgroundTime()
             requestBackgroundContinuation()
         }
     }
 
-    private func finishBackgroundWork(success: Bool) {
+    private func finishBackgroundWork(_ completion: DownloadBackgroundCompletion) {
         backgroundEpoch = UUID()
         finishedBackgroundPages = 0
-        backgroundWork?.finish(success: success)
+        let result: DownloadBackgroundCompletion = library.error != nil || (completion == .completed && backgroundHadFailure) ? .failed : completion
+        backgroundHadFailure = false
+        backgroundWork?.finish(result)
     }
 
     private func reportBackgroundProgress(completed: Int, total: Int?) {
@@ -182,9 +186,10 @@ enum DownloadLoadPolicy {
         if let stoppedRun, stoppedRun.owner == library.owner,
            var record = library.snapshot.downloads.first(where: { $0.id == stoppedRun.galleryID }) {
             record.status = status
+            record.error = nil
             library.updateDownload(record)
         }
-        finishBackgroundWork(success: false)
+        finishBackgroundWork(status == .paused ? .paused : .waiting)
     }
     func remove(_ ids: Set<String>) async -> Bool {
         let owner = library.owner, generation = session.generation
@@ -277,6 +282,7 @@ enum DownloadLoadPolicy {
             current.status = .complete
         } catch is CancellationError {
             current.status = .paused
+            current.error = nil
         } catch {
             current.status = .failed
             switch error as? RequestFailure {
@@ -299,6 +305,7 @@ enum DownloadLoadPolicy {
             library.updateDownload(current)
         }
         let success = canCommit && current.status == .complete && library.error == nil
+        if canCommit && current.status == .failed { backgroundHadFailure = true }
         if success, current.replaces != nil { library.retireReplacedDownloads() }
         // One user-started queue shares the current grant. Completing a gallery
         // must not end background work while the next queued gallery can run.
@@ -306,7 +313,7 @@ enum DownloadLoadPolicy {
             finishedBackgroundPages += current.completed.count
             if startNext() { return }
         }
-        finishBackgroundWork(success: success)
+        finishBackgroundWork(success ? .completed : current.status == .paused ? .paused : .failed)
     }
 
     private func savePages(_ pages: [GalleryPage], to directory: URL, run: Run, reuse: OfflinePageReuse?,

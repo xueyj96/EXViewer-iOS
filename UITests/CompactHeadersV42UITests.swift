@@ -39,21 +39,22 @@ final class CompactHeadersV42UITests: XCTestCase {
 
     private func assertActiveHeader(_ app: XCUIApplication, large: Bool) {
         let header = app.descendants(matching: .any)["discover.header.floating"].firstMatch
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         let common = app.buttons["discover.saved-menu"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5)); XCTAssertTrue(common.isHittable)
         capture(app, large ? "compact42.search.large-before-bounds" : "compact42.search.before-bounds")
         XCTAssertLessThanOrEqual(header.frame.height, large ? 190 : 100)
-        XCTAssertEqual(summary.frame.minX, header.frame.minX + 4, accuracy: 1)
-        XCTAssertLessThan(summary.frame.midY, common.frame.midY)
+        XCTAssertGreaterThanOrEqual(summary.frame.minX, header.frame.minX + 4)
+        XCTAssertEqual(summary.frame.midY, common.frame.midY, accuracy: 1)
         XCTAssertEqual(summary.frame.height, common.frame.height, accuracy: 1)
         XCTAssertGreaterThanOrEqual(summary.frame.height, 44)
         XCTAssertGreaterThanOrEqual(common.frame.width, 44)
         XCTAssertEqual(common.frame.maxX, header.frame.maxX - 4, accuracy: 1)
         XCTAssertFalse(app.buttons["discover.sort-order"].exists)
         let history = app.buttons["discover.lane.2"]
-        XCTAssertEqual(history.frame.midY, summary.frame.midY, accuracy: 1)
-        XCTAssertLessThanOrEqual(summary.frame.maxX, history.frame.minX)
+        XCTAssertLessThan(history.frame.midY, summary.frame.midY)
+        XCTAssertEqual(history.frame.height, summary.frame.height, accuracy: 1)
+        for index in 0...2 { XCTAssertFalse(app.buttons["discover.lane.\(index)"].isSelected) }
         XCTAssertTrue((summary.value as? String)?.contains("language:chinese") == true, "Full criteria stay available to accessibility")
         XCTAssertFalse(app.scrollViews["discover.rule-chips"].exists)
         XCTAssertFalse(app.scrollViews["discover.saved-shortcuts"].exists)
@@ -77,7 +78,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertEqual(card.frame.minX, header.frame.minX, accuracy: 1)
         XCTAssertGreaterThanOrEqual(card.frame.minY, header.frame.maxY)
         capture(app, "compact42.search.light")
-        app.buttons["discover.condition-summary"].tap()
+        app.buttons["discover.filters"].tap()
         XCTAssertTrue(app.searchComposerTitle("搜索").waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["compose.sort-order"].exists)
     }
@@ -96,7 +97,7 @@ final class CompactHeadersV42UITests: XCTestCase {
             return size.width > size.height
         }, evaluatedWith: app)
         waitForExpectations(timeout: 6)
-        let summary = app.buttons["discover.condition-summary"], common = app.buttons["discover.saved-menu"]
+        let summary = app.buttons["discover.search-entry"], common = app.buttons["discover.saved-menu"]
         XCTAssertTrue(summary.isHittable && common.isHittable)
         XCTAssertLessThanOrEqual(common.frame.maxX, app.frame.maxX)
         capture(app, "compact42.search.dark-large-landscape")
@@ -117,7 +118,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         XCTAssertTrue(badge.waitForExistence(timeout: 5))
         XCTAssertTrue((badge.value as? String ?? "").contains("5 项筛选条件"))
         capture(app, "summary62.five-conditions.preview")
-        app.buttons["discover.condition-summary"].tap()
+        app.buttons["discover.filters"].tap()
         let filter = app.buttons["compose.filters"]
         XCTAssertTrue(filter.waitForExistence(timeout: 5))
         filter.tap()
@@ -349,7 +350,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         app.buttons["discover.search-entry"].tap()
         XCTAssertTrue(text.waitForExistence(timeout: 5)); text.tap(); text.typeText("coast")
         app.buttons["compose.apply"].tap()
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5))
         app.buttons["discover.lane.2"].tap()
         XCTAssertTrue(app.textFields["reading-history.search-field"].waitForExistence(timeout: 5))
@@ -383,7 +384,7 @@ final class CompactHeadersV42UITests: XCTestCase {
         app.buttons["detail.tags.new-search"].tap()
         XCTAssertTrue(app.searchComposerTitle("新建搜索").waitForExistence(timeout: 5))
         app.buttons["compose.apply"].tap()
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5))
         XCTAssertTrue((summary.value as? String)?.contains("language:chinese") == true)
     }

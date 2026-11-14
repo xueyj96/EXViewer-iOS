@@ -54,11 +54,26 @@ final class GalleryGridPlacementTests: XCTestCase {
         XCTAssertEqual(layout.columns, [["a", "c"], ["b", "d", "e", "f"]])
     }
 
-    func testRemovalClosesGapsWithoutMovingSurvivorsBetweenColumns() {
+    func testRemovalDoesNotReplaceAnAlreadyBetterColumnBalance() {
         var layout = GalleryGridPlacement()
         layout.update(ids: ["a", "b", "c", "d"], aspects: [:])
         layout.update(ids: ["a", "c", "d"], aspects: ["a": 2, "c": 2, "d": 0.2])
         XCTAssertEqual(layout.columns, [["a", "c"], ["d"]])
+    }
+
+    func testDeletingSeveralCardsFromOneColumnRebalancesBothNonemptyColumns() {
+        var layout = GalleryGridPlacement()
+        layout.update(ids: ["a", "b", "c", "d", "e", "f", "g", "h"], aspects: [:])
+        layout.update(ids: ["b", "d", "f", "g", "h"], aspects: [:])
+        XCTAssertEqual(layout.columns.map(\.count).sorted(), [2, 3])
+        XCTAssertEqual(Set(layout.columns.flatMap { $0 }), Set(["b", "d", "f", "g", "h"]))
+    }
+
+    func testRemovalCombinedWithReorderingCannotRestoreTheOldOrder() {
+        var layout = GalleryGridPlacement()
+        layout.update(ids: ["a", "b", "c", "d"], aspects: [:])
+        layout.update(ids: ["c", "a", "d"], aspects: ["a": 2, "c": 2, "d": 0.2])
+        XCTAssertEqual(layout.columns, [["c", "d"], ["a"]])
     }
 
     func testPrependAndExplicitReorderResetToTheNewResultOrder() {

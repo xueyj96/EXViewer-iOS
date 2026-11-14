@@ -36,6 +36,14 @@ enum FavoriteSyncPhase: String, Codable {
         let phase: FavoriteSyncPhase
         let message: String?
         let canCheck: Bool
+        let action: String
+        let groupName: String?
+
+        init(id: String, title: String, phase: FavoriteSyncPhase, message: String?, canCheck: Bool,
+             action: String = "", groupName: String? = nil) {
+            self.id = id; self.title = title; self.phase = phase; self.message = message; self.canCheck = canCheck
+            self.action = action; self.groupName = groupName
+        }
     }
     struct BatchAddition {
         let scope: GalleryFavoriteScope
@@ -63,6 +71,7 @@ enum FavoriteSyncPhase: String, Codable {
         var phase = FavoriteSyncPhase.queued
         var message: String?
         var addIfMissing: Bool?
+        var optimisticToggle: Bool?
         var action: FavoriteAction { group.map(FavoriteAction.move) ?? .remove }
         var state: GalleryFavoriteState { groupName.map(GalleryFavoriteState.favorited) ?? .notFavorited }
     }
@@ -123,9 +132,21 @@ enum FavoriteSyncPhase: String, Codable {
     private func ensureInitialScope(_ scope: GalleryFavoriteScope) { if generation == nil { activate(owner: scope.owner, generation: scope.generation) } }
     func entry(_ scope: GalleryFavoriteScope) -> Entry? {
         guard valid(scope), let r = records[scope.reference.id] else { return nil }
-        let state = r.pending?.addIfMissing == true ? r.confirmed.state : r.pending?.state ?? r.confirmed.state
+        let state = r.pending?.addIfMissing == true && r.pending?.optimisticToggle != true ? r.confirmed.state : r.pending?.state ?? r.confirmed.state
         return .init(state: state, form: forms[r.id]?.value, date: r.date, version: r.version,
                      phase: r.pending?.phase, message: r.pending?.message, pendingGroup: r.pending?.group, pendingNote: r.pending?.note)
+    }
+    /// A newer confirmed local change takes precedence over a stale list snapshot.
+    /// Pending removals still follow the existing server-confirmation contract.
+    func includesCachedFavorite(_ scope: GalleryFavoriteScope, category: Int?, savedAt: Date) -> Bool {
+        guard valid(scope), let record = records[scope.reference.id], record.date > savedAt else { return true }
+        switch record.confirmed.state {
+        case .notFavorited: return false
+        case .favorited:
+            if let category, let confirmed = record.confirmed.groupIndex { return category == confirmed }
+            return true
+        case .unknown: return true
+        }
     }
     func recent(_ scope: GalleryFavoriteScope, now: Date = Date()) -> Entry? {
         guard let value = entry(scope), value.state != .unknown,
@@ -175,11 +196,17 @@ enum FavoriteSyncPhase: String, Codable {
     var changes: [Change] {
         records.values.compactMap { r in
             guard let p = r.pending else { return nil }
-            return .init(id: r.id, title: p.title, phase: p.phase, message: p.message, canCheck: runtimes[r.id]?.client.isCurrent() == true)
+            let action: String
+            if p.group == nil { action = "取消收藏" }
+            else if p.addIfMissing == true || (r.confirmed.known && r.confirmed.group == nil) { action = "加入收藏" }
+            else { action = r.confirmed.known ? "调整分组" : "收藏到分组" }
+            return .init(id: r.id, title: p.title, phase: p.phase, message: p.message,
+                         canCheck: runtimes[r.id]?.client.isCurrent() == true,
+                         action: action, groupName: p.groupName)
         }.sorted { $0.id < $1.id }
     }
     var cachedCount: Int { records.count }
-    var readFailure: String? { storageUnreadable ? "收藏同步记录暂时无法读取，原记录已保留。" : nil }
+    var readFailure: String? { storageUnreadable ? "同步记录暂不可读 原记录保留" : nil }
     func check(_ key: String) { schedule(key, checkOnly: true, force: true) }
     func retry(_ key: String) {
         guard records[key]?.pending?.phase == .failed || records[key]?.pending?.phase == .login || records[key]?.pending?.phase == .queued else { check(key); return }
@@ -190,7 +217,7 @@ enum FavoriteSyncPhase: String, Codable {
                  action: FavoriteAction, note: String, title: String) throws {
         guard valid(scope), client.isCurrent(), form.reference == scope.reference else { throw ViewerError.stale }
         _ = try form.request(action: action, note: note)
-        guard records.values.filter({ $0.pending != nil }).count < Self.pendingLimit || records[scope.reference.id]?.pending != nil else { throw ViewerError.invalidQuery("待同步操作较多，请稍后再试。") }
+        guard records.values.filter({ $0.pending != nil }).count < Self.pendingLimit || records[scope.reference.id]?.pending != nil else { throw ViewerError.invalidQuery("待同步操作较多 请稍后再试") }
         let group: Int?
         if case let .move(index) = action { group = index } else { group = nil }
         let key = scope.reference.id
@@ -205,14 +232,36 @@ enum FavoriteSyncPhase: String, Codable {
         revision = UUID(); schedule(key, checkOnly: false)
     }
 
+    /// The latest local toggle wins, including while an earlier intent is syncing.
+    func enqueueToggle(scope: GalleryFavoriteScope, client: GalleryFavoriteClient, group: Int,
+                       groupName: String, title: String) throws {
+        guard valid(scope), client.isCurrent() else { throw ViewerError.stale }
+        guard (0...9).contains(group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组") }
+        _ = try GalleryFavoriteForm.endpoint(for: scope.reference)
+        let key = scope.reference.id
+        guard records[key]?.pending != nil || records.values.filter({ $0.pending != nil }).count < Self.pendingLimit else {
+            throw ViewerError.invalidQuery("收藏同步队列已满 请稍后再试")
+        }
+        let removing = if case .favorited? = entry(scope)?.state { true } else { false }
+        var record = records[key] ?? .init(site: scope.reference.site, gid: scope.reference.gid, confirmed: Value(.unknown), date: clock())
+        record.pending = Intent(group: removing ? nil : group, groupName: removing ? nil : groupName,
+                                title: String(title.prefix(300)), addIfMissing: !removing, optimisticToggle: true)
+        record.version = UUID()
+        var copy = records; copy[key] = record; trim(&copy)
+        try persist(copy)
+        records = copy; runtimes[key] = .init(scope: scope, client: client)
+        mutationEpochs[key] = UUID(); revision = UUID()
+        schedule(key, checkOnly: false)
+    }
+
     /// Store the whole selection before scheduling any requests. The worker
     /// reads each current form and only submits for a gallery without a group.
     func enqueueAdditions(_ additions: [BatchAddition], group: Int) throws -> Int {
-        guard (0...9).contains(group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组。") }
+        guard (0...9).contains(group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组") }
         var seen = Set<String>()
         let eligible = try additions.filter { addition in
             guard valid(addition.scope), addition.client.isCurrent() else { throw ViewerError.stale }
-            guard (0...9).contains(addition.group ?? group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组。") }
+            guard (0...9).contains(addition.group ?? group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组") }
             _ = try GalleryFavoriteForm.endpoint(for: addition.scope.reference)
             let key = addition.scope.reference.id
             return seen.insert(key).inserted && records[key]?.pending == nil
@@ -220,7 +269,7 @@ enum FavoriteSyncPhase: String, Codable {
         guard !eligible.isEmpty else { return 0 }
         let available = max(0, Self.pendingLimit - records.values.filter { $0.pending != nil }.count)
         guard eligible.count <= available else {
-            throw ViewerError.invalidQuery(available > 0 ? "本次可排队 \(available) 项，请减少选择或等候同步。" : "收藏同步队列已满，请稍后再试。")
+            throw ViewerError.invalidQuery(available > 0 ? "本次可排队 \(available) 项 请减少选择" : "收藏同步队列已满 请稍后再试")
         }
         var copy = records
         for addition in eligible {
@@ -280,10 +329,11 @@ enum FavoriteSyncPhase: String, Codable {
         changed()
     }
     func hasPending(_ refs: [GalleryRef]) -> Bool { refs.contains { records[$0.id]?.pending != nil } }
-    func seedFavorites(_ galleries: [Gallery], categories: [String: String], url: URL, scopeOwner: String, generation: UUID) {
+    func seedFavorites(_ galleries: [Gallery], categories: [String: String], url: URL, scopeOwner: String, generation: UUID, observedAfter: Date? = nil) {
         guard owner == scopeOwner, self.generation == generation, url.path == "/favorites.php" else { return }
         let category = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "favcat" }?.value
         for gallery in galleries where records[gallery.id]?.pending == nil {
+            if let observedAfter, let newer = records[gallery.id]?.date, newer > observedAfter { continue }
             let existing = records[gallery.id]?.confirmed.state
             let named = category.flatMap { categories[$0] }.map(GalleryFavoriteState.favorited)
             let state: GalleryFavoriteState
@@ -352,13 +402,12 @@ enum FavoriteSyncPhase: String, Codable {
                         guard current() else { return }
                         if records[key]?.pending?.id == target.id {
                             records[key]?.pending?.phase = (postError as? ViewerError) == .authentication || (error as? ViewerError) == .authentication ? .login : .uncertain
-                            records[key]?.pending?.message = "暂时无法确认是否已生效，请检查结果。"
+                            records[key]?.pending?.message = "收藏结果待确认 请检查结果"
                         }
                         forms.removeValue(forKey: key); changed()
                         if target.action != .remove { runtime.client.didSubmit() }
                         return
                     }
-                    if target.action != .remove { runtime.client.didSubmit() }
                 }
             }
             guard current() else { return }
@@ -368,18 +417,22 @@ enum FavoriteSyncPhase: String, Codable {
             remember(form, key: key)
             if var record = records[key] {
                 var removal: UUID?
+                var confirmedMutation = false
                 record.confirmed = confirmedValue(form.state, site: runtime.scope.reference.site, form: form)
                 record.date = clock(); record.version = UUID()
                 if let target, record.pending?.id == targetID {
                     if satisfies(target, form: form) {
                         if target.action == .remove { removal = target.id }
+                        else { confirmedMutation = true }
                         record.pending = nil
                     }
-                    else { record.pending?.phase = .failed; record.pending?.message = "未能同步，已保留本次更改。" }
+                    else { record.pending?.phase = .failed; record.pending?.message = "同步未完成 本次更改已保留" }
                 }
                 records[key] = record
                 if target != nil { mutationEpochs[key] = UUID() }
                 changed()
+                // Includes delayed check-only confirmation and already-satisfied targets.
+                if confirmedMutation { runtime.client.didSubmit() }
                 if let removal {
                     var confirmed = confirmedRemovals
                     confirmed[key] = removal
@@ -395,7 +448,7 @@ enum FavoriteSyncPhase: String, Codable {
                 let transport = (error as? URLError).map { [.timedOut, .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed].contains($0.code) } == true
                 let unsent = !checkOnly && target?.phase == .queued && (transport || (error as? RequestFailure)?.canRetryWhenVisible == true || (error as? ViewerError) == .network)
                 records[key]?.pending?.phase = (error as? ViewerError) == .authentication ? .login : uncertain ? .uncertain : unsent ? .queued : .failed
-                records[key]?.pending?.message = (error as? ViewerError) == .authentication ? "站点要求登录，请登录后继续同步。" : uncertain ? "暂时无法确认是否已生效，请检查结果。" : unsent ? "暂时无法连接，请稍后重试。" : "未能同步，已保留本次更改。"
+                records[key]?.pending?.message = (error as? ViewerError) == .authentication ? "请登录站点后继续同步" : uncertain ? "收藏结果待确认 请检查结果" : unsent ? "暂时无法连接 请稍后重试" : "同步未完成 本次更改已保留"
                 changed()
             }
         }
@@ -425,7 +478,7 @@ enum FavoriteSyncPhase: String, Codable {
     private var file: URL? { storageRoot?.appendingPathComponent(owner, isDirectory: true).appendingPathComponent("site-favorites.json") }
     private func persist(_ values: [String: Record]) throws {
         guard let file, !owner.isEmpty else { return }
-        guard !storageUnreadable else { throw ViewerError.invalidQuery("收藏同步记录暂时无法读取，原记录已保留。") }
+        guard !storageUnreadable else { throw ViewerError.invalidQuery("同步记录暂不可读 原记录保留") }
         var saved = values.values.sorted { $0.date < $1.date }
         var data = try JSONEncoder().encode(File(records: saved))
         while data.count > 2_000_000 {

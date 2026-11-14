@@ -421,7 +421,7 @@ import ExViewerCore
     }
 
     func testThirtyTwoOfflineTransfersLeaveOneSlotForVisibleReading() async throws {
-        let gate = TransferGate(limit: ReaderLoadPolicy.maxConcurrency, totalLimit: MediaTransferClient.maxConnections)
+        let gate = TransferGate.mediaTransfers()
         let events = GateEvents()
         let downloads = (0..<32).map { _ in
             Task {

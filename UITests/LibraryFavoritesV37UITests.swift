@@ -137,7 +137,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         let selected = app.buttons["favorites.sort.siteDefault"]
         XCTAssertTrue(selected.isSelected)
         XCTAssertGreaterThanOrEqual(selected.frame.minY, sortFrame.maxY)
-        XCTAssertGreaterThanOrEqual(option.frame.height, 44)
+        XCTAssertEqual(option.frame.height, 36, accuracy: 1)
         XCTAssertTrue(app.buttons["favorites.sort.posted"].isHittable)
         capture(app, "favorites-sort.flat-dark")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7)).tap()
@@ -193,7 +193,7 @@ final class LibraryFavoritesV37UITests: XCTestCase {
         app.buttons["移出所选作品"].tap()
         XCTAssertTrue(app.staticTexts["read-later.empty"].waitForExistence(timeout: 4))
         XCTAssertTrue(app.buttons["main.tab.library"].exists)
-        scope("阅读历史", index: 2, app: app); XCTAssertTrue(app.staticTexts["暂无阅读记录"].waitForExistence(timeout: 4))
+        scope("阅读历史", index: 2, app: app); XCTAssertTrue(app.staticTexts["无作品"].waitForExistence(timeout: 4))
         scope("下载", index: 3, app: app); XCTAssertTrue(app.descendants(matching: .any)["library.downloads"].firstMatch.waitForExistence(timeout: 4))
         scope("站点收藏", index: 1, app: app)
         XCTAssertTrue(app.buttons["favorites.group-filter"].waitForExistence(timeout: 4))

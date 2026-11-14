@@ -48,6 +48,7 @@ private struct ReaderPageFrames: PreferenceKey {
 }
 
 struct ReaderView: View {
+    @Environment(\.mainTabSelection) private var mainTabSelection
     private static var usesAutomaticImmersion: Bool {
         !AppMode.qa || ProcessInfo.processInfo.arguments.contains("--qa-automatic-immersion")
     }
@@ -55,6 +56,7 @@ struct ReaderView: View {
     var offline = false
     var searchTarget: DetailSearchTarget? = nil
     var openingDetail: ReaderOpeningDetail? = nil
+    var returnPreview: PageReturnPreview? = nil
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
@@ -86,6 +88,7 @@ struct ReaderView: View {
     @State private var pageZoomed = false
     @State private var settings = false
     @State private var detailsShowing = false
+    @State private var detailSearchShowing = false
     @State private var immersive = Self.usesAutomaticImmersion
     @State private var readerTouched = false
     @State private var controlsIdleRevision = UUID()
@@ -105,18 +108,18 @@ struct ReaderView: View {
     @State private var slideTask: Task<Void, Never>?
     @State private var historyCheckpoint: ReaderHistoryCheckpoint?
     @StateObject private var favoriteObservation = GalleryFavoriteObservation()
-    @State private var favoriteEditing = false
     @State private var favoriteFailure: String?
-    @State private var favoriteAfterSettings = false
     @State private var singleTurn = ReaderSinglePageTurn()
-    @State private var decodeFailures: [Int: URL] = [:]
-    @State private var decodeRetryIDs: [Int: UUID] = [:]
+    @State private var returnDragging = false
+    @State private var returnTouchDeadline = Date.distantPast
+    @State private var returnRequested: UUID?
     @State private var presentations: [Int: ImageCanvasPresentation] = [:]
     @State private var decodedFiles: [Int: URL] = [:]
     @State private var singleMetadataTask: Task<Void, Never>?
     @State private var singleMetadataRevision = UUID()
     @State private var singleMetadataAttemptedTarget: Int?
     @State private var singleMetadataError: String?
+    @State private var qaInitialImageFailureUsed = false
     @State private var automaticMetadataTask: Task<Void, Never>?
     @State private var automaticMetadataCursor: URL?
     @State private var automaticMetadataRevision = UUID()
@@ -132,18 +135,18 @@ struct ReaderView: View {
     }
     @State private var readingContext: ReadingContext?
     private var readerGesturesActive: Bool {
-        readingContext != nil && scenePhase == .active && !settings && !detailsShowing && !favoriteEditing && !jump
+        readingContext != nil && scenePhase == .active && !settings && !detailsShowing && !jump
     }
     private var controlsIdleID: UUID? {
         guard Self.usesAutomaticImmersion, !immersive, !voiceOverEnabled, readerGesturesActive,
-              !readerTouched, !progressHUD, !findingPage, !userScrolling, !draggingCanvas, !singleTurn.isDraggingOrSettling else { return nil }
+              !readerTouched, !returnDragging, !progressHUD, !findingPage, !userScrolling, !draggingCanvas, !singleTurn.isDraggingOrSettling else { return nil }
         return controlsIdleRevision
     }
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
             VStack(spacing: 0) {
-                if let error = model.error, model.pages.isEmpty || mode == ReaderMode.continuous.rawValue { StatusMessage(title: error) { Task { guard let context = readingContext, isCurrent(context) else { return }; await model.load(gallery: gallery, offline: offline, session: session, library: library) } } }
+                if let error = model.error, model.pages.isEmpty || mode == ReaderMode.continuous.rawValue { ReaderFailureMessage(message: error, retry: { Task { guard let context = readingContext, isCurrent(context) else { return }; await model.load(gallery: gallery, offline: offline, session: session, library: library) } }).padding(FeedChrome.contentSpacing) }
                 if model.loading && model.pages.isEmpty { Spacer(); ProgressView(); Spacer() }
                 GeometryReader { geometry in
                     ZStack {
@@ -200,8 +203,6 @@ struct ReaderView: View {
                     progressTarget = Double(value); pageZoomed = false
                     pageSizes = pageSizes.filter { abs($0.key - value) <= 2 }
                     presentations = presentations.filter { abs($0.key - value) <= 1 }
-                    decodeFailures = decodeFailures.filter { abs($0.key - value) <= 1 }
-                    decodeRetryIDs = decodeRetryIDs.filter { abs($0.key - value) <= 1 }
                     decodedFiles = decodedFiles.filter { abs($0.key - value) <= 1 }
                     updateMedia()
                 }
@@ -209,7 +210,6 @@ struct ReaderView: View {
                 .onChange(of: model.loading) { _, loading in if !loading { updateMedia() } }
                 .onChange(of: media.files) { _, files in
                     presentations = presentations.filter { files[$0.key] == $0.value.file && abs($0.key - current) <= 1 }
-                    decodeFailures = decodeFailures.filter { files[$0.key] == $0.value }
                     if ReaderNetworkMetrics.enabled { decodedFiles = decodedFiles.filter { files[$0.key] == $0.value && abs($0.key - current) <= 1 } }
                     if let context = readingContext, isCurrent(context) { updatePinnedFiles(context) }
                     if AppMode.qa, singleTurn.isDraggingOrSettling, let preview = singleTurn.dragPreview {
@@ -248,58 +248,74 @@ struct ReaderView: View {
                     let page = current; Task { await seek(page) }
                 }
                 .onChange(of: readerGesturesActive) { _, active in
-                    if active { finishPendingTurnIfReady() }
-                    else {
+                    if !active {
                         readerTouched = false
                         controlsIdleRevision = UUID()
                     }
                 }
                 .onChange(of: settings) { _, shown in if shown { progressHUD = false; stopTrackingScroll(); cancelSingleDrag() } }
-                .onChange(of: detailsShowing) { _, shown in if shown { progressHUD = false; stopTrackingScroll(); cancelSingleDrag() } }
+                .onChange(of: detailsShowing) { _, shown in
+                    if shown { progressHUD = false; stopTrackingScroll(); cancelSingleDrag() }
+                    else { detailSearchShowing = false }
+                }
                 .onChange(of: singleFingerDown) { _, down in
                     if !down {
                         let intent = seekRevision
                         Task {
                             await Task.yield()
                             guard seekRevision == intent, !singleFingerDown else { return }
+                            if case .dragging = singleTurn.dragPhase {
+                                ReaderNetworkMetrics.record(UUID(), phase: "page-drag-interrupted", outcome: readerTouched ? "touch-active" : "touch-ended", page: current)
+                            }
                             finishSingleDrag(commit: false)
                         }
                     }
                 }
-                .alert("跳转到页码", isPresented: $jump) { TextField("页码", text: $jumpText).keyboardType(.numberPad); Button("跳转") { if let page = Int(jumpText) { Task { await seek(page) } } }; Button("取消", role: .cancel) { } } message: { Text("动图完整播放，按一张图片计算一页。") }
-                .overlay(alignment: .top) { if findingPage { ProgressView("正在定位页面").font(FeedChrome.labelFont).padding(8).allowsHitTesting(false) } }
-                .sheet(isPresented: $settings, onDismiss: {
-                    if favoriteAfterSettings { favoriteAfterSettings = false; favoriteEditing = true }
-                }) { readerSettings }
-                .sheet(isPresented: $detailsShowing) {
-                    NavigationStack {
-                        GalleryDetailView(gallery: gallery, onResumeReading: { detailsShowing = false }, searchTarget: searchTarget)
-                    }
-                    .galleryDetailPresentations()
-                    .statusBarHidden(false)
-                    .accessibilityIdentifier("reader.details")
-                }
-                if !immersive { readerHeader }
+                .alert("跳转到页码", isPresented: $jump) { TextField("页码", text: $jumpText).keyboardType(.numberPad); Button("跳转") { if let page = Int(jumpText) { Task { await seek(page) } } }; Button("取消", role: .cancel) { } } message: { Text("每张动图计为一页") }
+                .overlay(alignment: .top) { if findingPage { ProgressView("正在定位页面").font(ReaderStatusAppearance.font).padding(8).allowsHitTesting(false) } }
+                if !immersive && !detailsShowing && !settings { readerHeader.transition(.opacity) }
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: FeedChrome.panelSpacing) {
-                    if let target = singleTurn.pendingPage { pendingTurnStatus(target) }
-                    if !immersive { readerControls }
+                    if !immersive && !detailsShowing && !settings { readerControls.transition(.opacity) }
                 }
             }
         }
+        .accessibilityHidden(detailsShowing || settings)
+        .allowsHitTesting(!detailsShowing && !settings)
+        .overlay {
+            if settings {
+                readerSettingsPage
+                    .transition(.opacity)
+            } else if detailsShowing {
+                readerDetailPage
+                    .transition(.opacity)
+            }
+        }
+        .animation(motionReduced ? nil : .easeInOut(duration: 0.16), value: detailsShowing || settings)
         .statusBarHidden(immersive && !settings && !detailsShowing)
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
         .background {
             ReaderGestureBridge(tracksActivity: Self.usesAutomaticImmersion && readerGesturesActive,
-                                allowsBack: readerGesturesActive && !pageZoomed && !progressHUD,
                                 onActivity: { active in
                                     guard readerGesturesActive else { return }
                                     readerTouched = active
                                     if !active { controlsIdleRevision = UUID() }
-                                }, onBack: { dismiss() })
+                                })
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea()
+        }
+        .readerEdgeBack(enabled: readerGesturesActive && !pageZoomed && !progressHUD,
+                        requested: returnRequested, preview: returnPreview, interaction: { active in
+                            returnDragging = active
+                            returnTouchDeadline = Date().addingTimeInterval(0.35)
+                            if active {
+                                if singleTurn.isDraggingOrSettling { cancelSingleDrag() }
+                                stopTrackingScroll()
+                            }
+                        }) {
+            if settings { settings = false } else if detailsShowing { detailsShowing = false }
+            else { dismiss() }
         }
         .task(id: controlsIdleID) {
             guard let id = controlsIdleID else { return }
@@ -311,15 +327,7 @@ struct ReaderView: View {
         .onAppear(perform: bindFavoriteState)
         .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in bindFavoriteState() }
         .onReceive(session.favoriteStateCache.$revision) { _ in favoriteObservation.syncFromCache() }
-        .fullScreenCover(isPresented: $favoriteEditing) {
-            NavigationStack {
-                GalleryFavoriteEditorView(gallery: gallery, session: session, preparation: favoriteObservation.preparation(favoriteClient(for: gallery, session: session), reference: gallery.ref)) { favoriteObservation.accept($0, form: $1) }
-            }
-            .localPageChrome()
-        }
-        .alert("收藏未能加入", isPresented: Binding(get: { favoriteFailure != nil }, set: { if !$0 { favoriteFailure = nil } })) {
-            Button("好") { favoriteFailure = nil }
-        } message: { Text(favoriteFailure ?? "") }
+        .appToast(message: $favoriteFailure, identifier: "reader.favorite-error")
         .overlay {
             if progressHUD, let total = model.total {
                 Text("\(Int(progressTarget.rounded())) / \(total)")
@@ -362,7 +370,7 @@ struct ReaderView: View {
             .scrollPosition(id: $scrollPosition, anchor: readingAnchor)
             .simultaneousGesture(DragGesture(minimumDistance: 5)
                 .onChanged { value in
-                    guard !pageZoomed else { return }
+                    guard !returnDragging, !pageZoomed else { return }
                     if isEdgeBackDrag(value) {
                         stopTrackingScroll()
                         return
@@ -470,7 +478,7 @@ struct ReaderView: View {
             .clipped()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("reader.single.canvas")
-            .accessibilityValue(AppMode.qa ? "page \(current); \(singleTurn.isDraggingOrSettling ? "dragging" : (singleTurn.pendingPage != nil ? "waiting" : (slideProgress < 1 ? "transitioning" : "settled"))); reduced=\(motionReduced); lastDrag=\(lastDragEvidence); release=\(lastReleaseEvidence)" : "第 \(current) 页")
+            .accessibilityValue(AppMode.qa ? "page \(current); \(singleTurn.isDraggingOrSettling ? "dragging" : (slideProgress < 1 ? "transitioning" : "settled")); reduced=\(motionReduced); lastDrag=\(lastDragEvidence); release=\(lastReleaseEvidence)" : "第 \(current) 页")
         }
     }
 
@@ -484,7 +492,7 @@ struct ReaderView: View {
             pageCanvas(page)
         } else {
             ReaderLoadingPage(index: index, metadata: true,
-                              failure: offline ? "离线副本中没有这一页。" : (index == current ? singleMetadataError : nil),
+                              failure: offline ? "离线副本中没有这一页" : (index == current ? singleMetadataError : nil),
                               retry: offline || model.next == nil ? nil : retrySinglePageMetadata,
                               interactions: canvasInteractions)
         }
@@ -504,16 +512,9 @@ struct ReaderView: View {
             guard let expected, isCurrent(expected), abs(page.index - current) <= 1,
                   media.files[page.index] == value.file else { return }
             presentations[page.index] = value
-            decodeFailures[page.index] = nil
             recordDecoded(page.index, file: value.file)
-            finishPendingTurnIfReady()
-        }, onDecodeFailure: { file in
-            guard let expected, isCurrent(expected), abs(page.index - current) <= 1,
-                  media.files[page.index] == file else { return }
-            presentations[page.index] = nil
-            decodeFailures[page.index] = file
         })
-        .id("\(page.index):\(storedDirection):\(decodeRetryIDs[page.index]?.uuidString ?? "")")
+        .id("\(page.index):\(storedDirection)")
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(media.files[page.index] == nil ? "reader.page.loading.\(page.index)" : "reader.page.frame")
     }
@@ -589,8 +590,6 @@ struct ReaderView: View {
         media.reset()
         presentations = [:]
         decodedFiles = [:]
-        decodeFailures = [:]
-        decodeRetryIDs = [:]
         userScrolling = false
         draggingCanvas = false
         progressHUD = false
@@ -619,6 +618,10 @@ struct ReaderView: View {
 
     private func loadMedia(_ page: GalleryPage, demand: MediaRequestDemand, context: ReadingContext) async throws -> URL {
         if AppMode.qa {
+            if ProcessInfo.processInfo.arguments.contains("--qa-reader-initial-failure"), page.index == 1, !qaInitialImageFailureUsed {
+                qaInitialImageFailureUsed = true
+                throw URLError(.timedOut)
+            }
             if ProcessInfo.processInfo.arguments.contains("--qa-reader-prefetch-timeout"), page.index == 2, demand.priority == .prefetch {
                 throw RequestFailure.transport(.media, URLError.timedOut.rawValue)
             }
@@ -679,7 +682,7 @@ struct ReaderView: View {
         guard !offline, let target, singleMetadataTask == nil, !model.loading,
               singleMetadataAttemptedTarget != target else { return }
         guard model.next != nil else {
-            if !model.pages.isEmpty { singleMetadataError = "未能取得第 \(target) 页的页面信息。" }
+            if !model.pages.isEmpty { singleMetadataError = "第 \(target) 页信息载入失败 请重试" }
             return
         }
         singleMetadataAttemptedTarget = target
@@ -697,54 +700,15 @@ struct ReaderView: View {
                       neededSingleMetadataTarget == target || model.pages.contains(where: { $0.index == target }) else { return }
                 if model.pages.contains(where: { $0.index == target }) { break }
                 if model.error != nil || model.pages.count == count || model.next == cursor {
-                    singleMetadataError = model.error ?? "未能取得第 \(target) 页的页面信息，请重试。"
+                    singleMetadataError = model.error ?? "第 \(target) 页信息载入失败 请重试"
                     break
                 }
             }
             guard !Task.isCancelled, isCurrent(context), singleMetadataRevision == revision else { return }
             singleMetadataTask = nil
             if model.pages.contains(where: { $0.index == target }) { singleMetadataError = nil; remember() }
-            else if singleMetadataError == nil { singleMetadataError = "未能取得第 \(target) 页的页面信息，请重试。" }
+            else if singleMetadataError == nil { singleMetadataError = "第 \(target) 页信息载入失败 请重试" }
             updateMedia()
-        }
-    }
-
-    private func pendingTurnStatus(_ target: Int) -> some View {
-        let needsMetadata = neededSingleMetadataTarget == target
-        let failed = media.failures[target] != nil || decodeFailures[target] != nil ||
-            (needsMetadata && (singleMetadataError != nil || offline))
-        let canRetry = failed && (!needsMetadata || (!offline && model.next != nil))
-        return HStack(spacing: FeedChrome.controlSpacing) {
-            if failed {
-                Text("第 \(target) 页加载失败，当前页已保留")
-                if canRetry {
-                    Button("重试") { retryPendingTurn(target) }
-                        .frame(minHeight: FeedChrome.rowHeight)
-                        .accessibilityIdentifier("reader.page.retry.\(target)")
-                }
-            } else {
-                ProgressView().tint(.white)
-                Text("正在加载第 \(target) 页…")
-            }
-        }
-        .font(FeedChrome.labelFont)
-        .padding(.horizontal, FeedChrome.contentSpacing)
-        .frame(minHeight: FeedChrome.compactFormRowHeight)
-        .foregroundStyle(.white)
-        .background(FloatingChrome.readerBackground, in: AppShape.control)
-        .padding(.horizontal, FeedChrome.contentInset)
-        .padding(.bottom, immersive ? FeedChrome.contentSpacing : 0)
-        .allowsHitTesting(canRetry)
-    }
-
-    private func retryPendingTurn(_ target: Int) {
-        guard singleTurn.pendingPage == target else { return }
-        if decodeFailures.removeValue(forKey: target) != nil {
-            decodeRetryIDs[target] = UUID()
-        } else if media.failures[target] != nil {
-            media.retry(page: target)
-        } else {
-            retrySinglePageMetadata()
         }
     }
 
@@ -754,27 +718,57 @@ struct ReaderView: View {
         updateMedia()
     }
 
-    private func isPagePresented(_ page: Int) -> Bool {
-        guard let file = media.files[page] else { return false }
-        return presentations[page]?.file == file
-    }
-
-    private func finishPendingTurnIfReady() {
-        guard let target = singleTurn.pendingPage, !singleTurn.isDraggingOrSettling, !pageZoomed, !progressHUD,
-              readerGesturesActive, mode == ReaderMode.singlePage.rawValue,
-              let context = readingContext, isCurrent(context), isPagePresented(target) else { return }
-        displayPage(target, animatedTurn: true)
-        syncSinglePagePosition()
-        remember()
-    }
-
     private func syncSinglePagePosition() {
         scrollPosition = current
         progressTarget = Double(current)
     }
 
+    private var readerDetailPage: some View {
+        CompactMainTabs(selection: detailTabSelection) {
+            NavigationStack {
+                GalleryDetailView(gallery: gallery, onResumeReading: { detailsShowing = false }, searchTarget: searchTarget)
+            }
+            .galleryDetailPresentations(retainsSearchSource: true, onSearchVisibilityChange: { detailSearchShowing = $0 })
+        }
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reader.details")
+    }
+
+    private var readerSettingsPage: some View {
+        CompactMainTabs(selection: detailTabSelection) {
+            NavigationStack {
+                readerSettings
+
+            }
+        }
+        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+    }
+
+    private var detailTabSelection: Binding<Int> {
+        Binding(get: { detailSearchShowing ? 0 : mainTabSelection?.wrappedValue ?? 0 }, set: { tab in
+            mainTabSelection?.wrappedValue = tab
+            dismiss()
+        })
+    }
+
     private var readerControls: some View {
         HStack(spacing: FeedChrome.panelSpacing) {
+            Button { jumpText = String(current); jump = true } label: {
+                VStack(spacing: 0) {
+                    Text(String(current)).frame(height: FeedChrome.ReaderBar.pageDigitLineHeight)
+                    Rectangle().fill(.white.opacity(0.35)).frame(width: FeedChrome.ReaderBar.pageSeparatorWidth, height: 0.5)
+                    Text(model.total.map(String.init) ?? "—").frame(height: FeedChrome.ReaderBar.pageDigitLineHeight)
+                }
+                .font(FeedChrome.ReaderBar.pageDigitFont)
+                .lineLimit(1).minimumScaleFactor(0.7)
+                .foregroundStyle(.white)
+                .padding(.horizontal, FeedChrome.panelSpacing)
+            }
+            .buttonStyle(ReaderSquareButtonStyle())
+            .accessibilityLabel("\(current) / \(model.total.map(String.init) ?? "未知")")
+            .accessibilityIdentifier("reader.page")
+            .accessibilityHint("跳转到指定页码")
             if let total = model.total, total > 1 {
                 Slider(value: $progressTarget, in: 1...Double(total)) { editing in
                     if editing {
@@ -786,29 +780,22 @@ struct ReaderView: View {
                         Task { await seek(target); if progressRevision == token { progressHUD = false } }
                     }
                 }
-                .frame(minWidth: 56, maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
+                .frame(minWidth: 56, maxWidth: .infinity)
+                .padding(.horizontal, FeedChrome.panelSpacing)
+                .frame(height: FeedChrome.rowSurfaceHeight)
+                .background(FloatingChrome.readerBackground, in: AppShape.control)
+                .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
+                .frame(height: FeedChrome.rowHeight)
                 .accessibilityLabel("阅读进度")
                 .accessibilityValue("第 \(current) 页，共 \(total) 页")
                 .accessibilityIdentifier("reader.progress")
-            } else {
-                Spacer(minLength: 0)
-            }
-            Button { jumpText = String(current); jump = true } label: {
-                Text("\(current) / \(model.total.map(String.init) ?? "未知")")
-                    .font(FeedChrome.emphasizedLabelFont.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.65)
-                    .foregroundStyle(.white).padding(.horizontal, 5)
-                    .frame(minWidth: 54, minHeight: FeedChrome.rowHeight).fixedSize(horizontal: true, vertical: false)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityIdentifier("reader.page")
-            .accessibilityHint("跳转到指定页码")
+            } else { Spacer(minLength: 0) }
             Button { settings = true } label: {
-                Image(systemName: "ellipsis").font(FeedChrome.labelFont)
-                    .foregroundStyle(.white).frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowHeight).contentShape(Rectangle())
+                Image(systemName: "ellipsis").font(FeedChrome.labelFont).foregroundStyle(.white)
             }
+            .buttonStyle(ReaderSquareButtonStyle())
             .accessibilityLabel("阅读设置").accessibilityIdentifier("reader.settings")
         }
-        .buttonStyle(.plain)
         .padding(.horizontal, FeedChrome.panelSpacing)
         .background { readerPanelSurface }
         .frame(maxWidth: FeedChrome.ReaderBar.maximumWidth)
@@ -820,17 +807,14 @@ struct ReaderView: View {
     private var readerSettings: some View {
         let symbol = if case .favorited = favoriteObservation.state { "star.fill" } else { "star" }
         return ReaderSettingsPanel(mode: $mode, direction: Binding(get: { direction }, set: { direction = $0 }),
-                                   favoriteSymbol: symbol, favoriteValue: favoriteAccessibilityValue,
+                                   favoriteSymbol: symbol, favoriteValue: favoriteAccessibilityValue, favoriteTitle: favoriteToggleTitle(favoriteObservation.state),
                                    readLater: library.containsReadLater(gallery),
+                                   onBack: { settings = false },
                                    onFavorite: {
-                                       if favoriteObservation.needsManagement {
-                                           favoriteAfterSettings = true; settings = false
-                                       } else {
-                                           do {
-                                               _ = try session.addToDefaultFavorites([gallery])
-                                               favoriteObservation.syncFromCache()
-                                           } catch { favoriteFailure = ErrorMessages.message(error) }
-                                       }
+                                       do {
+                                           try session.toggleSiteFavorite(gallery)
+                                           favoriteObservation.syncFromCache()
+                                       } catch { favoriteFailure = ErrorMessages.message(error) }
                                    },
                                    onReadLater: { library.toggleReadLater(gallery) })
     }
@@ -847,9 +831,9 @@ struct ReaderView: View {
     }
 
     private var closeButton: some View {
-        Button { dismiss() } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 14, weight: .medium))
+        Button { returnRequested = UUID() } label: {
+            Image(systemName: "chevron.left")
+                .font(FeedChrome.labelFont)
                 .foregroundStyle(.white)
                 .frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowSurfaceHeight)
                 .background(FloatingChrome.readerBackground, in: AppShape.control)
@@ -858,7 +842,7 @@ struct ReaderView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("关闭")
+        .accessibilityLabel("返回")
         .accessibilityIdentifier("reader.close")
     }
 
@@ -868,13 +852,18 @@ struct ReaderView: View {
             Text(gallery.title)
                 .font(FeedChrome.labelFont)
                 .foregroundStyle(.white)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, FeedChrome.controlSpacing)
                 .frame(height: FeedChrome.rowSurfaceHeight)
                 .background(FloatingChrome.readerBackground, in: AppShape.control)
                 .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
+                .accessibilityIdentifier("reader.title")
+            Button { detailsShowing = true } label: {
+                Image(systemName: "info.circle").font(FeedChrome.labelFont).foregroundStyle(.white)
+            }
+            .buttonStyle(ReaderSquareButtonStyle())
+            .accessibilityLabel("画廊详情").accessibilityIdentifier("reader.details.open")
         }
         .frame(height: FeedChrome.rowHeight)
         .padding(.horizontal, FeedChrome.panelSpacing)
@@ -893,55 +882,49 @@ struct ReaderView: View {
     }
 
     private func canvasTapped(_ point: CGPoint) {
-        guard !pageZoomed, !singleTurn.isDraggingOrSettling, Date() >= ignoreCanvasTapUntil,
+        guard !returnDragging, Date() >= returnTouchDeadline, !pageZoomed, !singleTurn.isDraggingOrSettling, Date() >= ignoreCanvasTapUntil,
               let context = readingContext, isCurrent(context), viewportFrame.width > 0 else { return }
         switch ReaderTapPolicy.action(at: point, in: viewportFrame, direction: direction,
                                       mode: ReaderMode(rawValue: mode) ?? .continuous) {
         case .previous: changePage(by: -1)
         case .next: changePage(by: 1)
-        case .center: if immersive { immersive = false }
+        case .center: toggleImmersive()
         case nil: break
         }
     }
 
     private var canvasInteractions: CanvasInteractions {
-        .init(singleTap: canvasTapped, doubleTap: canvasDoubleTapped, longPress: toggleImmersive)
-    }
-
-    private func canvasDoubleTapped(_ point: CGPoint) -> Bool {
-        guard !singleTurn.isDraggingOrSettling, !settings, !detailsShowing, Date() >= ignoreCanvasTapUntil,
-              let context = readingContext, isCurrent(context),
-              ReaderTapPolicy.action(at: point, in: viewportFrame, direction: direction,
-                                     mode: ReaderMode(rawValue: mode) ?? .continuous) == .center else { return false }
-        detailsShowing = true
-        return true
+        .init(singleTap: canvasTapped, allowsDoubleTapZoom: false, longPress: toggleImmersive)
     }
 
     private func toggleImmersive() {
-        guard !singleTurn.isDraggingOrSettling, !settings, !detailsShowing,
+        guard !returnDragging, !singleTurn.isDraggingOrSettling, !settings, !detailsShowing,
               let context = readingContext, isCurrent(context) else { return }
         progressHUD = false; stopTrackingScroll(); cancelPageAnimation()
-        immersive.toggle()
+        withAnimation(motionReduced ? nil : .easeInOut(duration: 0.16)) { immersive.toggle() }
         ignoreCanvasTapUntil = Date().addingTimeInterval(0.25)
     }
 
     private func updateViewportFrame(_ frame: CGRect) {
         guard frame.width.isFinite, frame.height.isFinite, frame.width > 0, frame.height > 0 else { return }
-        if viewportFrame.size != frame.size { cancelPageAnimation() }
+        if viewportFrame.size != frame.size {
+            if singleTurn.isDraggingOrSettling { ReaderNetworkMetrics.record(UUID(), phase: "page-drag-viewport-reset", page: current) }
+            cancelPageAnimation()
+        }
         viewportFrame = frame
     }
 
     private func isEdgeBackDrag(_ value: DragGesture.Value) -> Bool {
         readerGesturesActive && !pageZoomed && !progressHUD &&
-            ReaderEdgeBackPolicy.isLeadingSwipe(startX: value.startLocation.x + viewportFrame.minX,
-                                                translation: value.translation)
+            ReaderEdgeBackPolicy.isInwardSwipe(startX: value.startLocation.x, width: viewportFrame.width,
+                                               translation: value.translation)
     }
 
     private func singleDragGesture(size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .updating($singleFingerDown) { _, down, _ in down = true }
             .onChanged { value in
-                guard mode == ReaderMode.singlePage.rawValue, !pageZoomed,
+                guard !returnDragging, Date() >= returnTouchDeadline, mode == ReaderMode.singlePage.rawValue, !pageZoomed,
                       let context = readingContext, isCurrent(context) else { return }
                 if isEdgeBackDrag(value) {
                     if singleTurn.isDraggingOrSettling { cancelSingleDrag() }
@@ -958,6 +941,7 @@ struct ReaderView: View {
                     seekRevision = UUID()
                     findingPage = false
                     singleTurn.dragPhase = .dragging(extent: extent)
+                    ReaderNetworkMetrics.record(UUID(), phase: "page-drag-start", page: current)
                 }
                 guard case let .dragging(dragExtent) = singleTurn.dragPhase else { return }
                 ignoreCanvasTapUntil = Date().addingTimeInterval(0.45)
@@ -965,9 +949,8 @@ struct ReaderView: View {
                 let preview = adjacentPage(by: delta)
                 let changed = preview != singleTurn.dragPreview
                 singleTurn.dragPreview = preview
-                // Keep the current canvas centered until the neighbor can actually draw.
-                singleTurn.dragOffset = if let preview, !isPagePresented(preview) { 0 }
-                    else { ReaderDragPolicy.boundedOffset(raw, extent: dragExtent, hasNeighbor: preview != nil) }
+                // An uncached neighbor is its own black loading page and follows the same drag.
+                singleTurn.dragOffset = ReaderDragPolicy.boundedOffset(raw, extent: dragExtent, hasNeighbor: preview != nil)
                 if changed {
                     updateMedia()
                 }
@@ -976,7 +959,7 @@ struct ReaderView: View {
                 }
             }
             .onEnded { value in
-                guard case .dragging = singleTurn.dragPhase, !pageZoomed else { return }
+                guard !returnDragging, Date() >= returnTouchDeadline, case .dragging = singleTurn.dragPhase, !pageZoomed else { return }
                 let raw = direction.horizontal ? value.translation.width : value.translation.height
                 let predicted = direction.horizontal ? value.predictedEndTranslation.width : value.predictedEndTranslation.height
                 let extent = direction.horizontal ? size.width : size.height
@@ -989,9 +972,10 @@ struct ReaderView: View {
         // preference temporarily reports zero while the target page is loading.
         guard case let .dragging(extent) = singleTurn.dragPhase,
               let context = readingContext, isCurrent(context) else { return }
+        ReaderNetworkMetrics.record(UUID(), phase: "page-drag-release", outcome: commit ? "commit" : "rebound", page: current)
         let releaseID = UUID()
         singleTurn.dragPhase = .settling(releaseID)
-        ignoreCanvasTapUntil = Date().addingTimeInterval(0.4)
+        ignoreCanvasTapUntil = Date().addingTimeInterval(0.18)
         let target = commit ? singleTurn.dragPreview : nil
         let oldPage = current
         if target != nil { seekRevision = UUID(); findingPage = false }
@@ -1000,7 +984,7 @@ struct ReaderView: View {
         if AppMode.qa {
             lastReleaseEvidence = "commit=\(commit),target=\(target ?? 0),extent=\(extent),from=\(singleTurn.dragOffset),fileReady=\(target.map { media.files[$0] != nil } ?? false)"
         }
-        switch singleTurn.release(commit: commit, isPresented: isPagePresented) {
+        switch singleTurn.release(commit: commit) {
         case .commit(let target):
             let offset = ReaderDragPolicy.pageOffset(index: target, current: oldPage, direction: direction,
                                                      size: CGSize(width: extent, height: extent), translation: singleTurn.dragOffset)
@@ -1013,8 +997,6 @@ struct ReaderView: View {
             }
             remember()
             updateMedia()
-        case .waitForPresentation(let target):
-            singleTurn.pendingPage = target
         case .rebound:
             break
         }
@@ -1027,7 +1009,6 @@ struct ReaderView: View {
             resetSingleDrag()
             historyCheckpoint?.flush()
             updateMedia()
-            finishPendingTurnIfReady()
         }
     }
 
@@ -1060,13 +1041,12 @@ struct ReaderView: View {
                 cancelSingleDrag()
                 return
             }
-            guard singleTurn.pendingPage != target else { return }
             cancelPageAnimation(updateDemand: false)
             seekRevision = UUID()
             findingPage = false
-            singleTurn.pendingPage = target
-            updateMedia()
-            finishPendingTurnIfReady()
+            displayPage(target, animatedTurn: true)
+            syncSinglePagePosition()
+            remember()
             return
         }
         Task {
@@ -1149,86 +1129,71 @@ private struct ReaderSettingsPanel: View {
     @Binding var direction: ReaderDirection
     let favoriteSymbol: String
     let favoriteValue: String
+    let favoriteTitle: String
     let readLater: Bool
+    let onBack: () -> Void
     let onFavorite: () -> Void
     let onReadLater: () -> Void
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.verticalSizeClass) private var heightClass
-    @State private var contentHeight: CGFloat = 300
 
     private let modes = [
         FeedScopeOption(id: ReaderMode.continuous.rawValue, title: ReaderMode.continuous.title, symbol: "rectangle.split.1x2"),
         FeedScopeOption(id: ReaderMode.singlePage.rawValue, title: ReaderMode.singlePage.title, symbol: "book")
     ]
 
-    private var detent: PresentationDetent {
-        if heightClass == .compact || typeSize.isAccessibilitySize { return .large }
-        return .height(contentHeight + 52)
-    }
-
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if typeSize.isAccessibilitySize {
-                        VStack(alignment: .leading, spacing: FeedChrome.panelSpacing) {
-                            sectionTitle("阅读方式")
-                            ForEach(modes) { item in
-                                choice(item.title, symbol: item.symbol, selected: mode == item.id) { mode = item.id }
-                                    .accessibilityIdentifier("reader.settings.mode.\(item.id)")
-                            }
-                        }
-                    } else {
-                        HStack(spacing: FeedChrome.controlSpacing) {
-                            sectionTitle("阅读方式").fixedSize()
-                            FeedScopePicker(selection: $mode, options: modes, identifier: "reader.settings.mode")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if typeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: FeedChrome.panelSpacing) {
+                        sectionTitle("阅读方式")
+                        ForEach(modes) { item in
+                            choice(item.title, symbol: item.symbol, selected: mode == item.id) { mode = item.id }
+                                .accessibilityIdentifier("reader.settings.mode.\(item.id)")
                         }
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        sectionTitle("翻页方向")
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: FeedChrome.panelSpacing),
-                                                 count: typeSize.isAccessibilitySize ? 1 : 2), spacing: FeedChrome.panelSpacing) {
-                            ForEach(ReaderDirection.allCases) { item in
-                                choice(item.title, symbol: item.forwardSymbol, selected: direction == item) { direction = item }
-                                    .accessibilityValue(direction == item ? "已选择" : "未选择")
-                                    .accessibilityIdentifier("reader.settings.direction.\(item.rawValue)")
-                            }
-                        }
+                } else {
+                    HStack(spacing: FeedChrome.controlSpacing) {
+                        sectionTitle("阅读方式").fixedSize()
+                        FeedScopePicker(selection: $mode, options: modes, identifier: "reader.settings.mode")
                     }
-                    VStack(spacing: 0) {
-                        Divider()
-                        galleryAction("站点收藏", symbol: favoriteSymbol, opensEditor: true, action: onFavorite)
-                            .accessibilityValue(favoriteValue)
-                            .accessibilityIdentifier("reader.settings.site-favorite")
-                        Divider().padding(.leading, 28)
-                        galleryAction(readLater ? "移出稍后再读" : "加入稍后再读",
-                                      symbol: readLater ? "checkmark" : "text.badge.plus", action: onReadLater)
-                            .accessibilityIdentifier("reader.settings.read-later")
-                    }
-                    Text("双击中间看详情 · 长按隐藏或显示控件")
-                        .font(.footnote).foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, FeedChrome.contentInset)
-                .padding(.top, FeedChrome.contentTopGap).padding(.bottom, FeedChrome.sectionSpacing)
-                .onGeometryChange(for: CGFloat.self) { ceil($0.size.height) } action: { height in
-                    if height > 0 { contentHeight = height }
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionTitle("翻页方向")
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: FeedChrome.panelSpacing),
+                                             count: typeSize.isAccessibilitySize ? 1 : 2), spacing: FeedChrome.panelSpacing) {
+                        ForEach(ReaderDirection.allCases) { item in
+                            choice(item.title, symbol: item.forwardSymbol, selected: direction == item) { direction = item }
+                                .accessibilityValue(direction == item ? "已选择" : "未选择")
+                                .accessibilityIdentifier("reader.settings.direction.\(item.rawValue)")
+                        }
+                    }
+                }
+                VStack(spacing: 0) {
+                    Divider()
+                    galleryAction(favoriteTitle, symbol: favoriteSymbol, action: onFavorite)
+                        .accessibilityValue(favoriteValue)
+                        .accessibilityIdentifier("reader.settings.site-favorite")
+                    Divider().padding(.leading, 28)
+                    galleryAction(readLater ? "移出稍后再读" : "加入稍后再读",
+                                  symbol: readLater ? "checkmark" : "text.badge.plus", action: onReadLater)
+                        .accessibilityIdentifier("reader.settings.read-later")
                 }
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .floatingPageHeader("阅读设置", identifier: "reader.settings-page") {
-                EmptyView()
-            } trailing: {
-                Button { dismiss() } label: { Label("完成", systemImage: "checkmark") }
-                    .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
-                    .accessibilityIdentifier("reader.settings.done")
-            }
+            .padding(.horizontal, FeedChrome.contentInset)
+            .padding(.top, FeedChrome.contentTopGap).padding(.bottom, FeedChrome.sectionSpacing)
         }
-        .presentationDetents([detent])
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(FeedChrome.panelShape.cornerSize.width)
-        .presentationBackground(FloatingChrome.headerBackground)
-        .statusBarHidden(false)
+        .scrollBounceBehavior(.basedOnSize)
+        .floatingPageHeader("阅读设置", identifier: "reader.settings-page", pinned: true) {
+            Button(action: onBack) { Image(systemName: "chevron.left") }
+                .buttonStyle(FeedHeaderButtonStyle())
+                .accessibilityLabel("返回")
+                .accessibilityIdentifier("reader.settings.back")
+        } trailing: {
+            Button(action: onBack) { Label("完成", systemImage: "checkmark") }
+                .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+                .accessibilityIdentifier("reader.settings.done")
+        }
     }
 
     private func sectionTitle(_ title: String) -> some View {
@@ -1239,10 +1204,10 @@ private struct ReaderSettingsPanel: View {
     private func choice(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
-                .font(.subheadline.weight(.medium))
+                .font(FeedChrome.labelFont)
                 .foregroundStyle(selected ? Color.accentColor : Color.primary)
-                .padding(.horizontal, 10).padding(.vertical, 4)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .padding(.horizontal, FeedChrome.controlSpacing)
+                .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight, alignment: .leading)
                 .appControlSurface(selected: selected)
                 .contentShape(Rectangle())
         }
@@ -1262,8 +1227,8 @@ private struct ReaderSettingsPanel: View {
                     Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
                 }
             }
-            .font(.subheadline)
-            .frame(minHeight: 44)
+            .font(FeedChrome.labelFont)
+            .frame(minHeight: FeedChrome.rowHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1316,9 +1281,20 @@ struct ReaderPage: View {
             } else if active, let failure {
                 ReaderLoadingPage(index: page.index, failure: ErrorMessages.message(failure), retry: retry, interactions: interactions)
             } else if active { ReaderLoadingPage(index: page.index, progress: progress, interactions: interactions) }
-            else { Text("第 \(page.index) 页").font(.caption).foregroundStyle(.white.opacity(0.4)) }
+            else { Text("第 \(page.index) 页").font(ReaderStatusAppearance.font).monospacedDigit().foregroundStyle(.white.opacity(0.4)) }
         }
         .onChange(of: active) { _, value in if !value { onZoomChanged?(false) } }
         .onChange(of: file) { _, _ in onZoomChanged?(false) }
+    }
+}
+
+private struct ReaderSquareButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowSurfaceHeight)
+            .background(FloatingChrome.readerBackground.opacity(configuration.isPressed ? 0.7 : 1), in: AppShape.control)
+            .overlay { AppShape.control.strokeBorder(.white.opacity(0.08), lineWidth: 0.5).allowsHitTesting(false) }
+            .frame(width: FeedChrome.pageActionWidth, height: FeedChrome.rowHeight)
+            .contentShape(Rectangle())
     }
 }

@@ -39,6 +39,7 @@ import ExViewerCore
     @Published private(set) var forwardHistory: [DiscoveryEntry] = []
     @Published var submissionError: String?
     var canGoBack: Bool { !history.isEmpty }
+    var canGoBackToSearch: Bool { history.contains { $0.query.hasSettings } }
     var canGoForward: Bool { !forwardHistory.isEmpty }
 
     init(query: SearchQuery = SearchQuery(), site: GallerySite = .ex, lane: Int = 0, savedID: UUID? = nil) {
@@ -76,30 +77,49 @@ import ExViewerCore
     func startCurrent(session: SiteSession, qa: Bool) throws {
         guard !current.didStart else { return }
         let url = try Self.requestURL(query: current.query, site: current.site, lane: current.lane)
-        guard url == current.requestURL else { throw ViewerError.invalidQuery("当前浏览条件已变化，请重新提交。") }
+        guard url == current.requestURL else { throw ViewerError.invalidQuery("搜索未能开始 请重试") }
         current.markStarted()
-        current.pager.reset(url: url, session: session, qa: qa)
+        current.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !current.query.hasSettings)
+    }
+
+    /// Prepare a presentation owner without starting a request or changing the trail.
+    /// The exact object can then be committed after an accepted section gesture.
+    func preparedEntry(query: SearchQuery, site: GallerySite, lane: Int, savedID: UUID? = nil) throws -> DiscoveryEntry {
+        let url = try Self.requestURL(query: query, site: site, lane: lane)
+        if let existing = ([current] + history + forwardHistory).first(where: {
+            $0.requestURL == url && $0.query == query && $0.site == site && $0.lane == lane && $0.savedID == savedID
+        }) { return existing }
+        let sameFeed = current.requestURL == url
+        let prepared = DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url,
+                                      scrollAnchor: sameFeed ? current.scrollAnchor : nil,
+                                      pager: sameFeed ? current.pager : nil)
+        if sameFeed && current.didStart { prepared.markStarted() }
+        return prepared
     }
 
     /// Validates before changing history. Identical URLs reuse the current feed
     /// and replace only immutable presentation/saved-search metadata.
     @discardableResult
-    func submit(query: SearchQuery, site: GallerySite, lane: Int, savedID: UUID?, session: SiteSession, qa: Bool) throws -> Bool {
+    func submit(query: SearchQuery, site: GallerySite, lane: Int, savedID: UUID?, session: SiteSession, qa: Bool, prepared: DiscoveryEntry? = nil) throws -> Bool {
         let url = try Self.requestURL(query: query, site: site, lane: lane)
+        if let prepared {
+            guard prepared.requestURL == url, prepared.query == query, prepared.site == site,
+                  prepared.lane == lane, prepared.savedID == savedID else { throw ViewerError.stale }
+        }
         if current.requestURL == url {
             if current.query == query, current.site == site, current.lane == lane, current.savedID == savedID {
-                if !current.didStart { current.markStarted(); current.pager.reset(url: url, session: session, qa: qa) }
+                if !current.didStart { current.markStarted(); current.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !current.query.hasSettings) }
                 return false
             }
             let old = current
-            let replacement = DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url,
+            let replacement = prepared ?? DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url,
                                              scrollAnchor: old.scrollAnchor,
                                              pager: old.pager)
             if old.didStart { replacement.markStarted() }
             current = replacement
             if !replacement.didStart {
                 replacement.markStarted()
-                replacement.pager.reset(url: url, session: session, qa: qa)
+                replacement.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !replacement.query.hasSettings)
             }
             return false
         }
@@ -131,18 +151,32 @@ import ExViewerCore
             history.removeFirst(excess)
             removed.forEach { $0.pager.cancel() }
         }
-        let entry = DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url)
+        let entry = prepared ?? DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url)
         entry.markStarted()
         current = entry
-        entry.pager.reset(url: url, session: session, qa: qa)
+        entry.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !entry.query.hasSettings)
         return true
     }
 
     @discardableResult
     func back() -> Bool {
-        guard let previous = history.popLast() else { return false }
+        guard !history.isEmpty else { return false }
+        return restoreHistoryEntry(at: history.count - 1)
+    }
+
+    @discardableResult
+    func backToPreviousSearch() -> Bool {
+        guard let index = history.lastIndex(where: { $0.query.hasSettings }) else { return false }
+        return restoreHistoryEntry(at: index)
+    }
+
+    private func restoreHistoryEntry(at index: Int) -> Bool {
+        let previous = history[index]
+        let skipped = Array(history.dropFirst(index + 1))
         current.pager.cancel()
         forwardHistory.append(current)
+        forwardHistory.append(contentsOf: skipped.reversed())
+        history.removeSubrange(index...)
         current = previous
         return true
     }
@@ -157,7 +191,7 @@ import ExViewerCore
     }
 
     static func requestURL(query: SearchQuery, site: GallerySite, lane: Int) throws -> URL {
-        guard (0...1).contains(lane) else { throw ViewerError.invalidQuery("浏览范围无效。") }
+        guard (0...1).contains(lane) else { throw ViewerError.invalidQuery("浏览范围无效") }
         if query.hasSettings { return try query.url(site: site) }
         return lane == 1 ? site.baseURL.appendingPathComponent("popular") : try SearchQuery().url(site: site)
     }

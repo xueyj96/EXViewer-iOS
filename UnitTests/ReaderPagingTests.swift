@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import ExViewer
 
 final class ReaderPagingTests: XCTestCase {
@@ -101,12 +102,38 @@ final class ReaderPagingTests: XCTestCase {
         XCTAssertEqual(ReaderDragPolicy.pageDelta(offset: 100, direction: .rightToLeft), 1)
         XCTAssertEqual(ReaderDragPolicy.pageDelta(offset: -100, direction: .topToBottom), 1)
         XCTAssertEqual(ReaderDragPolicy.pageDelta(offset: 100, direction: .bottomToTop), 1)
-        XCTAssertFalse(ReaderDragPolicy.commits(offset: 32, predicted: 800, extent: 400))
-        XCTAssertFalse(ReaderDragPolicy.commits(offset: 45, predicted: 45, extent: 400))
+        XCTAssertFalse(ReaderDragPolicy.commits(offset: 20, predicted: 800, extent: 400))
+        XCTAssertTrue(ReaderDragPolicy.commits(offset: 45, predicted: 45, extent: 400))
         XCTAssertTrue(ReaderDragPolicy.commits(offset: 110, predicted: 110, extent: 400))
         XCTAssertTrue(ReaderDragPolicy.commits(offset: -40, predicted: -250, extent: 400))
         XCTAssertEqual(ReaderDragPolicy.boundedOffset(200, extent: 400, hasNeighbor: true), 200)
         XCTAssertEqual(ReaderDragPolicy.boundedOffset(200, extent: 400, hasNeighbor: false), 32)
+    }
+
+    func testComfortableStrokeIsCappedInLandscapeAndTinyDragsStillRebound() {
+        for extent in [320.0, 440, 956, 1366] {
+            for sign in [-1.0, 1] {
+                XCTAssertTrue(ReaderDragPolicy.commits(offset: sign * 56, predicted: sign * 56, extent: extent))
+                XCTAssertFalse(ReaderDragPolicy.commits(offset: sign * 20, predicted: sign * 1000, extent: extent))
+                XCTAssertFalse(ReaderDragPolicy.commits(offset: sign * 26, predicted: sign * 26, extent: extent))
+            }
+        }
+        XCTAssertFalse(ReaderDragPolicy.commits(offset: .infinity, predicted: 500, extent: 440))
+    }
+
+    @MainActor func testReaderDisablesTheUnusedDoubleTapRecognizerWhilePreviewKeepsIt() {
+        let canvas = ImageCanvasView()
+        let scroll = canvas.subviews.compactMap { $0 as? UIScrollView }.first!
+        let taps = scroll.gestureRecognizers!.compactMap { $0 as? UITapGestureRecognizer }
+        let double = taps.first { $0.numberOfTapsRequired == 2 }!
+        let single = taps.first { $0.numberOfTapsRequired == 1 }!
+        XCTAssertTrue(double.isEnabled)
+        canvas.readerInteractions = CanvasInteractions(singleTap: { _ in }, allowsDoubleTapZoom: false)
+        XCTAssertTrue(single.isEnabled)
+        XCTAssertFalse(double.isEnabled, "A disabled double tap fails immediately, so the single tap has no double-click wait")
+        canvas.readerInteractions = CanvasInteractions()
+        XCTAssertTrue(double.isEnabled)
+        XCTAssertFalse(single.isEnabled)
     }
 
     func testNeighborReboundKeepsItsSideAtZeroInEveryDirection() {

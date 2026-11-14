@@ -3,7 +3,18 @@ import UIKit
 import ExViewerCore
 import ImageIO
 
-enum GalleryLayout { case list, grid }
+/// Keep NavigationLink's native ownership, but check the shared touch gate at
+/// its actual activation boundary, rather than waiting for a hit-test redraw.
+private struct GuardedGalleryNavigationStyle: PrimitiveButtonStyle {
+    @Environment(\.edgeTouchGate) private var edgeTouches
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            guard edgeTouches?.permitsGalleryActivation() != false else { return }
+            configuration.trigger()
+        } label: { configuration.label }
+        .buttonStyle(.plain)
+    }
+}
 
 private struct GalleryCellFrames: PreferenceKey {
     static var defaultValue: [String: CGRect] = [:]
@@ -12,12 +23,19 @@ private struct GalleryCellFrames: PreferenceKey {
     }
 }
 
+// Retain the last measurement for viewport-only changes without publishing
+// every scroll pixel as view state.
+private final class GalleryCoverFrames {
+    var values: [String: CGRect] = [:]
+}
+
 struct GalleryRows: View {
     var galleries: [Gallery]
-    var layout: GalleryLayout = .list
     var sourceIdentity: String? = nil
     var selectionStore: LibrarySelectionStore
     var isSelecting = false
+    var isLoading = false
+    var loadFailure: String? = nil
     var openIdentifier = "gallery.open"
     var selectionIdentifier = "favorites.select"
     var onLongPressSelect: (Gallery) -> Void
@@ -26,6 +44,7 @@ struct GalleryRows: View {
     var onVisibleAnchor: ((String) -> Void)? = nil
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var session: SiteSession
+    @Environment(\.headerSectionPreview) private var isSectionPreview
     @Environment(\.displayScale) private var displayScale
     private static let restorationMarkerHeight: CGFloat = 1
     private let aspectCache = CoverAspectCache.shared
@@ -36,46 +55,54 @@ struct GalleryRows: View {
     @State private var placementSource: String?
     @State private var lastAutomaticAnchor: String?
     @State private var coverEdges: [GalleryFeedViewport.CoverEdge] = []
+    @State private var coverWindow = GalleryFeedViewport.CoverWindow()
+    @State private var measuredCoverFrames = GalleryCoverFrames()
     private var visible: [Gallery] { preparedVisible ?? filterGalleries().visible }
     private var unknown: Int { preparedVisible == nil ? filterGalleries().unknown : preparedUnknown }
     private var markerHeight: CGFloat { onVisibleAnchor == nil ? 0 : Self.restorationMarkerHeight }
 
     var body: some View {
         LazyVStack(spacing: 0) {
-            if unknown > 0 { Text("\(unknown) 项标签尚未核实，暂按屏蔽设置隐藏。") .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding() }
-            if layout == .grid {
-                HStack(alignment: .top, spacing: FeedChrome.contentSpacing) {
-                    ForEach(Array(gridColumns.enumerated()), id: \.offset) { entry in
-                        LazyVStack(alignment: .leading, spacing: FeedChrome.contentSpacing - markerHeight) {
-                            ForEach(entry.element) { gallery in
-                                VStack(spacing: 0) {
-                                    restorationAnchor(gallery)
-                                    gridCell(gallery)
-                                }.id(gallery.id).background { measure(gallery) }
-                            }
-                        }.scrollTargetLayout().frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
-                    }
-                }.padding(.horizontal, FeedChrome.contentInset)
-                    .padding(.top, FeedChrome.contentTopGap - markerHeight)
-                    .padding(.bottom, FeedChrome.sectionSpacing)
-            } else {
-                ForEach(visible) { gallery in
-                    VStack(spacing: 0) {
-                        restorationAnchor(gallery)
-                        NavigationLink(value: gallery) { GalleryRow(gallery: gallery) }.buttonStyle(.plain)
-                    }.id(gallery.id).background { measure(gallery) }
-                    Divider().padding(.leading, 122)
-                }
+            if unknown > 0 && isLoading && visible.isEmpty {
+                GalleryLoadingIndicator(label: "正在载入").frame(maxWidth: .infinity)
             }
-            if !galleries.isEmpty && visible.isEmpty && unknown == 0 { StatusMessage(title: "当前结果已被本机标签屏蔽。可到账号的「标签与屏蔽」调整。", symbol: "eye.slash") }
+            HStack(alignment: .top, spacing: FeedChrome.contentSpacing) {
+                ForEach(Array(gridColumns.enumerated()), id: \.offset) { entry in
+                    LazyVStack(alignment: .leading, spacing: FeedChrome.contentSpacing - markerHeight) {
+                        ForEach(entry.element) { gallery in
+                            VStack(spacing: 0) {
+                                restorationAnchor(gallery)
+                                gridCell(gallery)
+                            }.id(gallery.id).background { measure(gallery) }
+                        }
+                    }.scrollTargetLayout().frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
+                }
+            }.padding(.horizontal, FeedChrome.contentInset)
+                .padding(.top, FeedChrome.contentTopGap - markerHeight)
         }
+        .appToast(message: loadFailure == nil && !isLoading && unknown > 0 ? "标签资料尚未载入 请重试" :
+                    (loadFailure == nil && !galleries.isEmpty && visible.isEmpty && unknown == 0 ? "当前结果已被本机标签屏蔽" : nil),
+                  identifier: "gallery.filter-feedback")
         .onAppear(perform: prepareLayout)
         .onChange(of: galleries) { _, _ in prepareLayout() }
         .onChange(of: library.blockedIDs) { _, _ in prepareLayout() }
         .onChange(of: library.owner) { _, _ in prepareLayout() }
         .onChange(of: sourceIdentity) { _, _ in prepareLayout() }
         .background { upcomingCoverTasks }
-        .onPreferenceChange(GalleryCellFrames.self, perform: observedFrames)
+        .overlay(alignment: .topLeading) {
+            if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-cover-window") {
+                Text("visible=" + coverWindow.visible.sorted().joined(separator: ",") + ";nearby=" + coverWindow.nearby.sorted().joined(separator: ",")
+                     + ";decoded=" + CoverWindowQA.shared.decoded.intersection(coverWindow.visible).sorted().joined(separator: ","))
+                    .font(.system(size: 1)).frame(width: 1, height: 1).opacity(0.01)
+                    .accessibilityIdentifier("cover-window.qa").allowsHitTesting(false)
+            }
+        }
+        .onPreferenceChange(GalleryCellFrames.self) { frames in
+            measuredCoverFrames.values = frames
+            observedFrames(frames)
+        }
+        .onChange(of: viewport?.height) { _, _ in observedFrames(measuredCoverFrames.values) }
+        .onChange(of: viewport?.topOcclusion) { _, _ in observedFrames(measuredCoverFrames.values) }
     }
 
     @ViewBuilder private func measure(_ gallery: Gallery) -> some View {
@@ -97,9 +124,11 @@ struct GalleryRows: View {
     }
 
     private func observedFrames(_ frames: [String: CGRect]) {
-        guard let viewport, viewport.height > 0 else { return }
+        guard !isSectionPreview, let viewport, viewport.height > 0 else { return }
         let edges = viewport.coverEdges(in: frames)
         if coverEdges != edges { coverEdges = edges }
+        let window = viewport.coverWindow(in: frames, columns: gridColumns)
+        if coverWindow != window { coverWindow = window }
         let visibleTop = viewport.contentTop
         let anchor = viewport.nearestVisibleAnchor(in: frames)
         if let anchor {
@@ -118,7 +147,7 @@ struct GalleryRows: View {
     }
 
     @ViewBuilder private var upcomingCoverTasks: some View {
-        if !AppMode.qa && !isSelecting {
+        if (!AppMode.qa || ProcessInfo.processInfo.arguments.contains("--qa-cover-window")) && !isSelecting && !isSectionPreview {
             let columns = gridColumns
             let requests = coverEdges.flatMap { edge in
                 GalleryFeedViewport.upcomingCovers(after: edge.id, in: columns).map { gallery in
@@ -147,6 +176,7 @@ struct GalleryRows: View {
         let gallery = request.gallery
         guard let file = try? await GalleryCoverLoader.file(for: gallery, owner: request.owner,
                                                             generation: request.generation, session: session,
+                                                            storedCoverQA: AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-cover-window"),
                                                             priority: .thumbnailPrefetch),
               !Task.isCancelled else { return }
         let ratio = aspectCache.hasAspect(for: gallery) ? aspectCache.aspect(for: gallery) : await coverAspectRatio(at: file)
@@ -164,7 +194,8 @@ struct GalleryRows: View {
                              openIdentifier: "\(openIdentifier).\(gallery.ref.gid)",
                              selectionIdentifier: "\(selectionIdentifier).\(gallery.ref.gid)",
                              selectionLabel: { selectionLabel(gallery) }, onLongPressSelect: { onLongPressSelect(gallery) }) {
-            GalleryGridCell(gallery: gallery, selected: $0)
+            GalleryGridCell(gallery: gallery, selected: $0,
+                            coverPriority: isSectionPreview ? nil : viewport == nil ? .thumbnail : coverWindow.priority(for: gallery.id))
         }
     }
 
@@ -188,6 +219,7 @@ struct GalleryRows: View {
             placement = GalleryGridPlacement()
             placementSource = source
             coverEdges = []
+            coverWindow = GalleryFeedViewport.CoverWindow()
         }
         let result = filterGalleries()
         preparedVisible = result.visible
@@ -212,6 +244,9 @@ struct GalleryRows: View {
 }
 
 struct GallerySelectionLink<Label: View>: View {
+    @Environment(\.edgeTouchGate) private var edgeTouches
+    @Environment(\.galleryNavigation) private var navigation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let gallery: Gallery
     let store: LibrarySelectionStore
     @ObservedObject var entry: LibrarySelectionEntry
@@ -223,14 +258,21 @@ struct GallerySelectionLink<Label: View>: View {
     @ViewBuilder let label: (Bool?) -> Label
 
     var body: some View {
-        NavigationLink(value: gallery) {
-            label(isSelecting ? entry.isSelected : nil)
+        Group {
+            if let navigation {
+                Button { navigation.open(gallery, animated: !reduceMotion) } label: {
+                    label(isSelecting ? entry.isSelected : nil)
+                }
+            } else {
+                NavigationLink(value: gallery) { label(isSelecting ? entry.isSelected : nil) }
+            }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardedGalleryNavigationStyle())
         .accessibilityIdentifier(openIdentifier)
         .accessibilityHint("轻点打开详情，长按选择并管理")
         .accessibilityAction(named: Text("选择并管理")) { onLongPressSelect() }
         .highPriorityGesture(LongPressGesture(minimumDuration: 0.55).onEnded { _ in
+            guard edgeTouches?.blocksGalleryActions != true else { return }
             onLongPressSelect()
         }, including: isSelecting ? .none : .all)
         .allowsHitTesting(!isSelecting)
@@ -239,6 +281,7 @@ struct GallerySelectionLink<Label: View>: View {
         .overlay {
             if isSelecting {
                 Button {
+                    guard edgeTouches?.blocksGalleryActions != true else { return }
                     SelectionPerformanceProbe.markAction(id: gallery.id)
                     guard store.toggle(gallery.id) else { return }
                     SelectionPerformanceProbe.markStateSet(id: gallery.id, count: store.selectedIDs.count)
@@ -255,26 +298,29 @@ struct GallerySelectionLink<Label: View>: View {
         .onChange(of: entry.isSelected) { _, selected in
             SelectionPerformanceProbe.markSelectionViewUpdate(id: gallery.id, selected: selected)
         }
+        .allowsHitTesting(edgeTouches?.blocksGalleryActions != true)
     }
 }
 
 struct GalleryGridCell: View {
     let gallery: Gallery
     let selected: Bool?
+    var coverPriority: MediaRequestPriority?
     @ObservedObject private var aspect: CoverAspectEntry
-    init(gallery: Gallery, selected: Bool? = nil) {
+    init(gallery: Gallery, selected: Bool? = nil, coverPriority: MediaRequestPriority? = .thumbnail) {
         self.gallery = gallery
         self.selected = selected
+        self.coverPriority = coverPriority
         _aspect = ObservedObject(wrappedValue: CoverAspectCache.shared.entry(for: gallery))
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
             Color(uiColor: .secondarySystemGroupedBackground)
                 .aspectRatio(GalleryCoverLayout.displayAspect(Double(aspect.aspect)), contentMode: .fit)
                 .overlay {
                     CoverView(gallery: gallery, contentMode: .fill,
                               alignment: aspect.aspect < GalleryCoverLayout.minimumAspect ? .top : .center,
-                              showsLoadingIndicator: false)
+                              showsLoadingIndicator: false, requestPriority: coverPriority)
                 }
                 .clipShape(AppShape.control)
                 .overlay(alignment: .topTrailing) {
@@ -294,7 +340,7 @@ struct GalleryGridCell: View {
                 .lineLimit(2).truncationMode(.tail).multilineTextAlignment(.leading)
                 .accessibilityIdentifier("gallery.title.\(gallery.ref.gid)")
             if !gallery.category.isEmpty || gallery.pages != nil {
-                HStack(spacing: 6) {
+                HStack(spacing: FeedChrome.panelSpacing) {
                     if !gallery.category.isEmpty { Text(gallery.category).lineLimit(1) }
                     Spacer(minLength: 0)
                     if let pages = gallery.pages { Text("\(pages) 页").fixedSize() }
@@ -367,7 +413,7 @@ struct GalleryFact: Identifiable {
     }
 }
 
-private enum LibraryCardMetrics {
+enum LibraryCardMetrics {
     static let height = FeedChrome.rowHeight * 3
     static let coverSize = CGSize(width: 72, height: height - 2 * FeedChrome.sectionSpacing)
 }
@@ -498,33 +544,6 @@ struct LibraryGalleryCard<Cover: View>: View {
     }
 }
 
-struct GalleryRow: View {
-    static let standardVerticalInset: CGFloat = 16
-
-    var gallery: Gallery
-    var horizontalInset: CGFloat = FeedChrome.contentInset
-    var topInset: CGFloat = Self.standardVerticalInset
-    var bottomInset: CGFloat = Self.standardVerticalInset
-    @ScaledMetric(relativeTo: .caption2) private var categorySize: CGFloat = 10
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            CoverView(gallery: gallery).frame(width: 90, height: 126).clipShape(AppShape.control)
-            VStack(alignment: .leading, spacing: 7) {
-                Text(gallery.category.isEmpty ? "画廊" : gallery.category.uppercased())
-                    .font(.system(size: categorySize, weight: .semibold, design: .monospaced))
-                    .tracking(0.6).foregroundStyle(Palette.accent)
-                Text(gallery.title).font(.subheadline.weight(.medium)).lineLimit(3).truncationMode(.tail)
-                    .foregroundStyle(.primary).multilineTextAlignment(.leading)
-                Text(GalleryFact.items(for: gallery).filter { $0.id != "category" }.map(\.text).joined(separator: " · "))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
-                if !gallery.uploader.isEmpty { Text(gallery.uploader).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-                Text(gallery.tags.prefix(3).map(\.name).joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }.padding(.horizontal, horizontalInset).padding(.top, topInset).padding(.bottom, bottomInset).contentShape(Rectangle())
-    }
-}
-
 struct CoverView: View {
     var gallery: Gallery
     var contentMode: ContentMode = .fit
@@ -532,15 +551,18 @@ struct CoverView: View {
     var showsLoadingIndicator = true
     var showsRetryButton = true
     var fitsExtremeAspects = false
+    var requestPriority: MediaRequestPriority? = .thumbnail
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @State private var file: URL?
     @State private var fileContext: String?
     @State private var failure: String?
+    @State private var userRetryContext: String?
     @State private var retry = UUID()
+    @State private var activeDemand: MediaRequestDemand?
     private var storedCoverQA: Bool { AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-stored-bookmark-covers") }
-    private struct RequestIdentity: Hashable { var owner: String; var gallery: String; var cover: URL?; var revision: UUID; var retry: UUID }
-    private var requestIdentity: RequestIdentity { .init(owner: library.owner, gallery: gallery.id, cover: gallery.cover, revision: session.generation, retry: retry) }
+    private struct RequestIdentity: Hashable { var owner: String; var gallery: String; var cover: URL?; var revision: UUID; var retry: UUID; var enabled: Bool }
+    private var requestIdentity: RequestIdentity { .init(owner: library.owner, gallery: gallery.id, cover: gallery.cover, revision: session.generation, retry: retry, enabled: requestPriority != nil) }
     private var contextIdentity: String { "\(library.owner)|\(session.generation.uuidString)" }
     var body: some View {
         ZStack {
@@ -551,10 +573,12 @@ struct CoverView: View {
                             requestIdentity: "\(gallery.id)|\(gallery.cover?.absoluteString ?? "none")|\(retry.uuidString)",
                             contentMode: contentMode, alignment: alignment,
                             fitsExtremeAspects: fitsExtremeAspects,
-                            onDecodeFailure: { failure = ErrorMessages.message(ViewerError.unsupported) })
+                            onDecodeFailure: { failure = ErrorMessages.message(ViewerError.unsupported) },
+                            onDecoded: { CoverWindowQA.shared.record(gallery.id) })
                     .overlay(alignment: .bottom) {
                         if let failure, showsRetryButton {
                             Button {
+                                userRetryContext = contextIdentity
                                 Task {
                                     let owner = library.owner, generation = session.generation
                                     await MediaRepository.shared.discardUndecodableBrowseFile(file, owner: owner)
@@ -568,11 +592,10 @@ struct CoverView: View {
                         }
                     }
             }
-            else if AppMode.qa && !storedCoverQA { QACover(seed: Int(gallery.ref.gid)) }
+            else if AppMode.qa && !storedCoverQA && !ProcessInfo.processInfo.arguments.contains("--qa-cover-window") { QACover(seed: Int(gallery.ref.gid)) }
             else if let failure, showsRetryButton {
                 VStack(spacing: 4) {
-                    Text(failure).font(.caption2).lineLimit(3).multilineTextAlignment(.center).foregroundStyle(.secondary)
-                    Button { retry = UUID() } label: { Label("重试", systemImage: "arrow.clockwise").font(.caption).frame(minHeight: 44) }
+                    Button { userRetryContext = contextIdentity; retry = UUID() } label: { Label("重试", systemImage: "arrow.clockwise").font(.caption).frame(minHeight: 44) }
                         .buttonStyle(.borderless).accessibilityLabel("重新载入封面").accessibilityHint(failure)
                 }.padding(5)
             }
@@ -581,10 +604,23 @@ struct CoverView: View {
             }
             else if showsLoadingIndicator { ProgressView() }
         }
+        .appToast(message: showsRetryButton && userRetryContext == contextIdentity ? failure : nil,
+                  identifier: "cover.error.\(gallery.ref.gid)")
         .accessibilityElement(children: .contain).accessibilityIdentifier("cover.media.\(gallery.ref.gid)")
-        .accessibilityValue(failure != nil ? "载入失败" : file == nil ? "载入中" : "已载入")
+        .accessibilityValue(failure != nil ? "载入失败" : file == nil ? (requestPriority == nil ? "未请求" : "载入中") : "已载入")
+        .onChange(of: requestPriority) { _, priority in
+            if let priority { activeDemand?.setPriority(priority) }
+        }
+        .onDisappear {
+            if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-cover-window") {
+                CoverWindowQA.shared.invalidate(gallery.id)
+            }
+        }
         .task(id: requestIdentity) {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, let priority = requestPriority else { return }
+            let demand = MediaRequestDemand(priority: priority)
+            activeDemand = demand
+            defer { if activeDemand?.id == demand.id { activeDemand = nil } }
             // Keep a successfully displayed image while the same gallery is
             // revalidated. Identity changes recreate this task/context safely.
             failure = nil
@@ -608,7 +644,7 @@ struct CoverView: View {
             do {
                 failure = nil
                 let result = try await GalleryCoverLoader.file(for: gallery, owner: owner, generation: revision,
-                                                                session: session, storedCoverQA: storedCoverQA)
+                                                                session: session, storedCoverQA: storedCoverQA, demand: demand)
                 try Task.checkCancellation()
                 guard revision == session.generation, owner == library.owner else { return }
                 fileContext = currentContext; file = result
@@ -630,7 +666,8 @@ struct CoverView: View {
 
 @MainActor private enum GalleryCoverLoader {
     static func file(for gallery: Gallery, owner: String, generation: UUID, session: SiteSession,
-                     storedCoverQA: Bool = false, priority: MediaRequestPriority = .thumbnail) async throws -> URL {
+                     storedCoverQA: Bool = false, priority: MediaRequestPriority = .thumbnail,
+                     demand: MediaRequestDemand? = nil) async throws -> URL {
         let cover: URL
         if let source = gallery.cover { cover = source }
         else {
@@ -649,7 +686,8 @@ struct CoverView: View {
         try Task.checkCancellation()
         guard generation == session.generation else { throw CancellationError() }
         if storedCoverQA { return cover }
-        return try await MediaRepository.shared.file(for: cover, owner: owner, priority: priority)
+        return try await MediaRepository.shared.file(for: cover, owner: owner,
+                                                     request: demand ?? MediaRequestDemand(priority: priority))
     }
 }
 

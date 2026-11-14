@@ -3,6 +3,27 @@ import ExViewerCore
 @testable import ExViewer
 
 final class TagSuggestionsTests: XCTestCase {
+    @MainActor func testRawNameRequiresCurrentSuccessfulEmptySearch() async throws {
+        let model = TagSuggestionModel(catalog: .init(version: "fixture", source: "test", commit: "fixture", license: "test", updatedAt: nil, namespaces: [:]))
+        let session = SiteSession(qa: true)
+        model.update(prefix: "zzraw153", namespace: "all", session: session, qa: true, arguments: ["--qa-tags-offline"])
+        XCTAssertFalse(model.hasNoResults(prefix: "zzraw153", namespace: "all"))
+        for _ in 0..<100 where model.state != .ready { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(model.hasNoResults(prefix: "zzraw153", namespace: "all"))
+        XCTAssertFalse(model.hasNoResults(prefix: "zzraw153x", namespace: "all"))
+        XCTAssertFalse(model.hasNoResults(prefix: "zzraw153", namespace: "language"))
+        model.update(prefix: "eng", namespace: "all", session: session, qa: true, arguments: ["--qa-tags-offline"])
+        for _ in 0..<100 where model.state != .ready { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertFalse(model.items.isEmpty)
+        XCTAssertFalse(model.hasNoResults(prefix: "eng", namespace: "all"))
+        model.update(prefix: "zzfailed153", namespace: "all", session: session, qa: true, arguments: [])
+        for _ in 0..<100 where !model.state.isFailure { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(model.state.isFailure)
+        XCTAssertFalse(model.hasNoResults(prefix: "zzfailed153", namespace: "all"))
+        model.update(prefix: "zzcancel153", namespace: "all", session: session, qa: true, arguments: ["--qa-tags-delayed"])
+        model.cancel()
+        XCTAssertFalse(model.hasNoResults(prefix: "zzcancel153", namespace: "all"))
+    }
     func testSuggestionAndExactRequestsIgnoreCaseAndOuterWhitespace() {
         XCTAssertEqual(TagSuggestionRequest.text(prefix: " EnGLISh ", namespace: " ALL "), "english")
         XCTAssertEqual(TagSuggestionRequest.text(prefix: " GLI ", namespace: " LANGUAGE "), "language:gli")

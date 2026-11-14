@@ -11,8 +11,8 @@ import ExViewerCore
         case missing, queueFull
         var errorDescription: String? {
             switch self {
-            case .missing: return "未能取得封面，请重试。"
-            case .queueFull: return "封面正在排队，请稍后重试。"
+            case .missing: return "封面载入失败 请重试"
+            case .queueFull: return "封面正在排队 请稍后重试"
             }
         }
     }

@@ -44,8 +44,9 @@ struct AppControlSurface: ViewModifier {
 
 enum TagChipMetrics {
     static let faceHeight: CGFloat = 26
-    static let targetHeight: CGFloat = 32
-    static var verticalOverhang: CGFloat { (targetHeight - faceHeight) / 2 }
+    static let targetInset: CGFloat = 2
+    static let targetHeight = faceHeight + 2 * targetInset
+    static var verticalOverhang: CGFloat { targetInset }
 }
 
 extension View {
@@ -60,11 +61,12 @@ extension View {
     func tagChipFaceLayout() -> some View {
         padding(.horizontal, 8)
             .padding(.vertical, 2)
-            .frame(minHeight: TagChipMetrics.faceHeight)
+            .frame(minWidth: FeedChrome.rowHeight, minHeight: TagChipMetrics.faceHeight)
     }
 
     func tagChipTargetLayout() -> some View {
-        frame(minWidth: FeedChrome.rowHeight, minHeight: TagChipMetrics.targetHeight)
+        padding(.vertical, TagChipMetrics.targetInset)
+            .frame(minWidth: FeedChrome.rowHeight)
     }
 
     func appControlSurface(selected: Bool = false, verticalInset: CGFloat = 0) -> some View {
@@ -73,6 +75,80 @@ extension View {
 
     func appControlSurface(selected: Bool = false, insets: EdgeInsets) -> some View {
         modifier(AppControlSurface(selected: selected, insets: insets))
+    }
+}
+
+/// Surface gaps belong to groups; text insets belong to rows.
+/// Keeping these roles separate prevents nested 4 pt gaps from changing text alignment.
+enum FormLayoutMetrics {
+    static let textInset = FeedChrome.contentSpacing
+    static let fieldLabelWidth = FeedChrome.rowHeight
+    static let labelToFieldGap = FeedChrome.panelSpacing
+}
+
+enum FormRowRole {
+    case compact, standard
+    var minimumHeight: CGFloat { self == .compact ? FeedChrome.compactFormRowHeight : FeedChrome.rowHeight }
+    var font: Font { self == .compact ? .footnote : .subheadline }
+}
+
+extension View {
+    func formRowLayout(_ role: FormRowRole = .compact, horizontalInset: CGFloat = FormLayoutMetrics.textInset) -> some View {
+        font(role.font)
+            .padding(.horizontal, horizontalInset)
+            .frame(maxWidth: .infinity, minHeight: role.minimumHeight, alignment: .leading)
+            .contentShape(Rectangle())
+    }
+}
+
+struct FormGroup<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: FeedChrome.panelSpacing, content: content)
+            .padding(FeedChrome.panelSpacing)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .formRowSurface(outer: true)
+    }
+}
+
+enum FormMenuMetrics {
+    static let width: CGFloat = 220
+    static let rowHeight: CGFloat = 36
+    static let valueFaceInset = FeedChrome.panelSpacing
+    static let portraitVisibleRows = 7
+    static let landscapeVisibleRows = 4
+    static func height(rows: Int) -> CGFloat {
+        CGFloat(rows) * rowHeight + CGFloat(max(0, rows - 1)) * FeedChrome.panelSpacing + 2 * FeedChrome.panelSpacing
+    }
+    static func visibleRows(isLandscape: Bool) -> Int {
+        isLandscape ? landscapeVisibleRows : portraitVisibleRows
+    }
+}
+
+/// The caption is read-only; only the trailing value opens the menu.
+struct FormValueMenuRow<Options: View>: View {
+    let title: String
+    let value: String
+    let identifier: String
+    var titleIdentifier: String? = nil
+    var enabled = true
+    @ViewBuilder let options: () -> Options
+    var body: some View {
+        HStack(spacing: FeedChrome.controlSpacing) {
+            Text(title).foregroundStyle(.primary)
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityIdentifier(titleIdentifier ?? identifier + ".title")
+            Spacer(minLength: 0)
+            AppMenu(content: options) {
+                AppMenuValueLabel(title: value)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(enabled ? Color.primary : Color.secondary)
+            .disabled(!enabled)
+            .accessibilityLabel(title).accessibilityValue(value)
+            .accessibilityIdentifier(identifier)
+        }
+        .formRowLayout(.compact, horizontalInset: 0)
     }
 }
 
@@ -186,14 +262,15 @@ struct AppToolbarItem<Content: View>: ToolbarContent {
 }
 
 extension View {
-    func appNavigationChrome(backButton: Bool = false, showsToolbarBackButton: Bool = true) -> some View {
-        modifier(AppNavigationChromeModifier(backButton: backButton, showsToolbarBackButton: showsToolbarBackButton))
+    func appNavigationChrome(backButton: Bool = false, showsToolbarBackButton: Bool = true, customEdgeBack: Bool = false) -> some View {
+        modifier(AppNavigationChromeModifier(backButton: backButton, showsToolbarBackButton: showsToolbarBackButton, customEdgeBack: customEdgeBack))
     }
 }
 
 private struct AppNavigationChromeModifier: ViewModifier {
     let backButton: Bool
     let showsToolbarBackButton: Bool
+    let customEdgeBack: Bool
     @Environment(\.dismiss) private var dismiss
 
     func body(content: Content) -> some View {
@@ -211,18 +288,20 @@ private struct AppNavigationChromeModifier: ViewModifier {
                     }
                 }
             }
-            .background(NavigationChrome(backButton: backButton).frame(width: AppMode.qa ? 1 : 0, height: AppMode.qa ? 1 : 0).allowsHitTesting(false))
+            .background(NavigationChrome(backButton: backButton, customEdgeBack: customEdgeBack).frame(width: AppMode.qa ? 1 : 0, height: AppMode.qa ? 1 : 0).allowsHitTesting(false))
     }
 }
 
 @MainActor
 private struct NavigationChrome: UIViewControllerRepresentable {
+    @Environment(\.headerSectionCanPageBack) private var sectionBack
     @Environment(\.colorScheme) private var scheme
     let backButton: Bool
+    let customEdgeBack: Bool
 
     func makeUIViewController(context: Context) -> Controller { Controller(scheme: scheme, backButton: backButton) }
     func updateUIViewController(_ controller: Controller, context: Context) {
-        controller.scheme = scheme; controller.backButton = backButton
+        controller.scheme = scheme; controller.backButton = backButton; controller.blocksSectionBack = sectionBack || customEdgeBack
         controller.applyChrome(); controller.updateInteractivePop()
     }
     static func dismantleUIViewController(_ controller: Controller, coordinator: ()) { controller.deactivate() }
@@ -244,6 +323,7 @@ private struct NavigationChrome: UIViewControllerRepresentable {
     final class Controller: UIViewController {
         var scheme: ColorScheme
         var backButton: Bool
+        var blocksSectionBack = false
         private weak var styledNavigation: UINavigationController?
         private var styledScheme: ColorScheme?
         private var bindings: [ObjectIdentifier: Binding] = [:]
@@ -290,8 +370,11 @@ private struct NavigationChrome: UIViewControllerRepresentable {
             let ink = UIColor.label.resolvedColor(with: traits)
             let appearance = UINavigationBarAppearance()
             appearance.configureWithTransparentBackground()
-            appearance.backgroundColor = UIColor.systemBackground.resolvedColor(with: traits)
-                .withAlphaComponent(CGFloat(FloatingChrome.surfaceOpacity))
+            appearance.backgroundColor = .clear
+            // Keep UIKit fallback adaptive; a resolved light fill can survive a dark
+            // reader/presentation handoff even after SwiftUI's labels change theme.
+            navigation.view.backgroundColor = .systemGroupedBackground
+            navigation.topViewController?.viewIfLoaded?.backgroundColor = .clear
             appearance.backgroundEffect = nil; appearance.shadowColor = .clear
             appearance.titleTextAttributes = [.foregroundColor: ink]
             navigation.navigationBar.standardAppearance = appearance
@@ -316,9 +399,10 @@ private struct NavigationChrome: UIViewControllerRepresentable {
                         binding.proxy.isActive = false; bindings[key] = nil; ownershipLost.insert(key); continue
                     }
                     binding.proxy.isActive = true
+                    binding.proxy.blocksSectionBack = blocksSectionBack
                 } else if !ownershipLost.contains(key) {
                     let proxy = PopDelegate(original: gesture.delegate, enabled: gesture.isEnabled, navigation: navigation)
-                    proxy.isActive = true
+                    proxy.isActive = true; proxy.blocksSectionBack = blocksSectionBack
                     proxy.onDecision = { [weak self, weak navigation] in
                         self?.decisionCount += 1
                         if let navigation { self?.updateDiagnostic(navigation) }
@@ -372,6 +456,7 @@ private struct NavigationChrome: UIViewControllerRepresentable {
         weak var navigation: UINavigationController?
         let originalEnabled: Bool
         var isActive = false
+        var blocksSectionBack = false
         var beginCount = 0
         var receiveCount = 0
         var eventCount = 0
@@ -394,18 +479,18 @@ private struct NavigationChrome: UIViewControllerRepresentable {
                     hit = view.superview
                 }
             }
-            return isActive && (navigation?.viewControllers.count ?? 0) > 1 && navigation?.transitionCoordinator == nil
+            return !blocksSectionBack && isActive && (navigation?.viewControllers.count ?? 0) > 1 && navigation?.transitionCoordinator == nil
         }
         @objc(gestureRecognizer:shouldReceiveEvent:)
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive event: UIEvent) -> Bool {
             eventCount += 1; defer { onDecision?() }
             if gestureRecognizer.state == .began || gestureRecognizer.state == .changed { return true }
-            return isActive && (navigation?.viewControllers.count ?? 0) > 1 && navigation?.transitionCoordinator == nil
+            return !blocksSectionBack && isActive && (navigation?.viewControllers.count ?? 0) > 1 && navigation?.transitionCoordinator == nil
         }
         @objc(gestureRecognizerShouldBegin:)
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             beginCount += 1; defer { onDecision?() }
-            guard isActive, let navigation, navigation.viewControllers.count > 1,
+            guard isActive, !blocksSectionBack, let navigation, navigation.viewControllers.count > 1,
                   navigation.transitionCoordinator == nil else { return false }
             if let pan = gestureRecognizer as? UIPanGestureRecognizer {
                 let velocity = pan.velocity(in: navigation.view)
@@ -460,5 +545,252 @@ struct TagWrapLayout: Layout {
             rowHeight = max(rowHeight, size.height)
         }
         return (frames, y + rowHeight)
+    }
+}
+
+/// Work-list empty state occupies the viewport between the floating bars.
+struct GalleryEmptyState: View {
+    var body: some View {
+        Text("无作品")
+            .font(.subheadline).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+    }
+}
+
+/// One presentation lives above navigation, so row-level errors still appear at
+/// the center of the window instead of moving or resizing their source content.
+@MainActor final class AppToastCenter: ObservableObject {
+    struct Presentation: Identifiable {
+        let id = UUID()
+        let owner: UUID
+        let message: String
+        let identifier: String
+        let onDismiss: (() -> Void)?
+    }
+    @Published private(set) var presentation: Presentation?
+    func show(_ message: String, owner: UUID, identifier: String, onDismiss: (() -> Void)?) {
+        // Keep transient feedback to plain phrases without altering tag syntax or numbers.
+        let phrase = message.components(separatedBy: CharacterSet(charactersIn: "。，；！？\n\r"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !phrase.isEmpty else { return }
+        presentation = Presentation(owner: owner, message: phrase, identifier: identifier, onDismiss: onDismiss)
+    }
+    func dismiss(owner: UUID) {
+        guard let current = presentation, current.owner == owner else { return }
+        presentation = nil
+        current.onDismiss?()
+    }
+}
+
+private struct AppToastHost: ViewModifier {
+    @StateObject private var center = AppToastCenter()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func body(content: Content) -> some View {
+        content.environmentObject(center)
+            .overlay {
+                if let current = center.presentation {
+                    Text(current.message)
+                        .font(FeedChrome.labelFont).foregroundStyle(.primary)
+                        .multilineTextAlignment(.center)
+                        .padding(FeedChrome.contentSpacing)
+                        .background(.regularMaterial, in: AppShape.control)
+                        .overlay { AppShape.control.strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5) }
+                        .padding(FeedChrome.contentInset)
+                        .accessibilityIdentifier(current.identifier)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .animation(reduceMotion ? nil : ChromeMotion.replace, value: center.presentation?.id)
+            .task(id: center.presentation?.id) {
+                guard let current = center.presentation else { return }
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                guard !Task.isCancelled, center.presentation?.id == current.id else { return }
+                center.dismiss(owner: current.owner)
+            }
+    }
+}
+
+private struct AppToastObserver: ViewModifier {
+    let message: String?
+    let identifier: String
+    var onDismiss: (() -> Void)? = nil
+    @EnvironmentObject private var center: AppToastCenter
+    @Environment(\.headerSectionPreview) private var preview
+    @State private var owner = UUID()
+    func body(content: Content) -> some View {
+        content.onChange(of: message, initial: true) { _, value in
+            guard !preview else { return }
+            if let value, !value.isEmpty {
+                center.show(value, owner: owner, identifier: identifier, onDismiss: onDismiss)
+            } else { center.dismiss(owner: owner) }
+        }
+        .onDisappear { center.dismiss(owner: owner) }
+    }
+}
+
+extension View {
+    func appToastHost() -> some View { modifier(AppToastHost()) }
+    func appToast(message: String?, identifier: String) -> some View {
+        modifier(AppToastObserver(message: message, identifier: identifier))
+    }
+    func appToast(message: Binding<String?>, identifier: String) -> some View {
+        let current = message.wrappedValue
+        return modifier(AppToastObserver(message: current, identifier: identifier, onDismiss: {
+            if message.wrappedValue == current { message.wrappedValue = nil }
+        }))
+    }
+}
+
+/// Shared disclosure chrome. Plain headers own the whole row; compound headers
+/// use the same arrow action beside independent controls, never nested buttons.
+struct AppDisclosureTitle: View {
+    let title: String
+    let identifier: String
+    var body: some View {
+        Text(title).font(FeedChrome.labelFont).foregroundStyle(.primary)
+            .lineLimit(1).truncationMode(.tail)
+            .padding(.horizontal, FeedChrome.contentSpacing)
+            .frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight, alignment: .leading)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier(identifier)
+    }
+}
+
+private struct AppDisclosureChevron: View {
+    let expanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Image(systemName: "chevron.down")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.primary)
+            .rotationEffect(.degrees(expanded ? 180 : 0))
+            .animation(reduceMotion ? nil : ChromeMotion.resize, value: expanded)
+            .frame(width: FeedChrome.compactFormRowHeight, height: FeedChrome.compactFormRowHeight)
+            .accessibilityHidden(true)
+    }
+}
+
+struct AppDisclosureHeader: View {
+    let title: String
+    let expanded: Bool
+    let identifier: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: FeedChrome.panelSpacing) {
+                AppDisclosureTitle(title: title, identifier: identifier + ".title")
+                AppDisclosureChevron(expanded: expanded)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(expanded ? "已展开" : "已收起")
+        .accessibilityHint(expanded ? "收起" : "展开")
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+struct AppDisclosureButton: View {
+    let title: String
+    let expanded: Bool
+    let identifier: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            AppDisclosureChevron(expanded: expanded).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(expanded ? "已展开" : "已收起")
+        .accessibilityHint(expanded ? "收起" : "展开")
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+/// Keeps only the outgoing presentation alive until its height reaches zero.
+/// Business values remain owned by the caller; no measurements are written into state.
+struct AnimatedDisclosureContent<Content: View>: View {
+    let isExpanded: Bool
+    let identifier: String
+    @ViewBuilder let content: () -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var mounted: Bool
+    @State private var reveal: CGFloat
+    @State private var revision = UUID()
+
+    init(isExpanded: Bool, identifier: String, @ViewBuilder content: @escaping () -> Content) {
+        self.isExpanded = isExpanded; self.identifier = identifier; self.content = content
+        // One-time presentation seeds prevent an initially open section animating from zero.
+        _mounted = State(initialValue: isExpanded)
+        _reveal = State(initialValue: isExpanded ? 1 : 0)
+    }
+    var body: some View {
+        DisclosureRevealLayout(reveal: reveal) {
+            if mounted {
+                VStack(alignment: .leading, spacing: 0, content: content)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .opacity(reveal)
+                    .allowsHitTesting(isExpanded)
+                    .accessibilityHidden(!isExpanded)
+                    .transition(.identity)
+            }
+        }
+        .clipped()
+        .modifier(DisclosureProgressQA(reveal: reveal, identifier: identifier))
+        .onChange(of: isExpanded) { _, expanded in update(expanded, animated: !reduceMotion) }
+        .onChange(of: reduceMotion) { _, reduced in if reduced { update(isExpanded, animated: false) } }
+        .onDisappear { update(isExpanded, animated: false) }
+    }
+    private func update(_ expanded: Bool, animated: Bool) {
+        let token = UUID(); revision = token
+        if !animated {
+            var transaction = Transaction(animation: nil); transaction.disablesAnimations = true
+            withTransaction(transaction) { mounted = expanded; reveal = expanded ? 1 : 0 }
+            return
+        }
+        if expanded {
+            var transaction = Transaction(animation: nil); transaction.disablesAnimations = true
+            withTransaction(transaction) { mounted = true }
+        }
+        withAnimation(ChromeMotion.resize, completionCriteria: .removed) {
+            reveal = expanded ? 1 : 0
+        } completion: {
+            // A later reversal owns the presentation. An obsolete close cannot unmount it.
+            Task { @MainActor in
+                guard revision == token, !expanded else { return }
+                var transaction = Transaction(animation: nil); transaction.disablesAnimations = true
+                withTransaction(transaction) { mounted = false }
+            }
+        }
+    }
+}
+
+private struct DisclosureRevealLayout: Layout {
+    var reveal: CGFloat
+    var animatableData: CGFloat { get { reveal } set { reveal = newValue } }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let size = subviews.first?.sizeThatFits(.init(width: proposal.width, height: nil)) ?? .zero
+        return CGSize(width: proposal.width ?? size.width, height: size.height * min(1, max(0, reveal)))
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let content = subviews.first else { return }
+        let size = content.sizeThatFits(.init(width: bounds.width, height: nil))
+        content.place(at: bounds.origin, anchor: .topLeading, proposal: .init(width: bounds.width, height: size.height))
+    }
+}
+
+private struct DisclosureProgressQA: AnimatableModifier {
+    var reveal: CGFloat
+    let identifier: String
+    var animatableData: CGFloat { get { reveal } set { reveal = newValue } }
+    func body(content: Content) -> some View {
+        content.background(alignment: .topLeading) {
+            if AppMode.qa { ChromeMotionQA(clearance: reveal, identifier: identifier).frame(width: 1, height: 1) }
+        }
     }
 }

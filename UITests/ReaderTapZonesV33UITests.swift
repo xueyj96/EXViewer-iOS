@@ -95,14 +95,16 @@ final class ReaderTapZonesV33UITests: XCTestCase {
         tap(app, x: 0.82, y: 0.64)
         let retry = app.buttons["reader.page.retry.3"]
         XCTAssertTrue(retry.waitForExistence(timeout: 4))
-        page(2, in: app)
+        page(3, in: app)
         retry.tap()
-        page(2, in: app)
+        page(3, in: app)
         let diagnostic = app.descendants(matching: .any)["reader.cache.qa"].firstMatch
         expectation(for: NSPredicate { _, _ in (diagnostic.value as? String ?? "").contains("metadataCalls=2;") }, evaluatedWith: diagnostic)
         waitForExpectations(timeout: 4)
         XCTAssertFalse(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.exists)
 
+        tap(app, x: 0.18, y: 0.64)
+        page(2, in: app)
         tap(app, x: 0.18, y: 0.64)
         page(1, in: app)
         XCTAssertFalse(retry.exists)

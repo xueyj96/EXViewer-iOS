@@ -7,16 +7,16 @@ final class CanvasInteractionTests: XCTestCase {
         .init(onZoomChanged: nil, onImageSizeChanged: nil, interactions: actions, onPresentation: nil)
     }
 
-    func testDoubleTapCanBeConsumedOrFallThroughToZoomUsingLatestHandler() {
+    func testSingleTapDispatchesOnNextMainTurnWithoutADoubleTapTimer() async {
         var points: [CGPoint] = []
-        let coordinator = coordinator(.init(doubleTap: { point in points.append(point); return point.x == 50 }))
-        let callbacks = coordinator.canvasInteractions
-        XCTAssertEqual(callbacks.doubleTap?(CGPoint(x: 50, y: 50)), true)
-        XCTAssertEqual(callbacks.doubleTap?(CGPoint(x: 10, y: 50)), false)
-        XCTAssertEqual(points.count, 2)
-        coordinator.interactions = .init(doubleTap: { _ in false })
-        XCTAssertEqual(callbacks.doubleTap?(CGPoint(x: 50, y: 50)), false)
-        XCTAssertEqual(points.count, 2, "A replaced handler must not be called")
+        let coordinator = coordinator(.init(singleTap: { points.append($0) }, allowsDoubleTapZoom: false))
+        XCTAssertFalse(coordinator.canvasInteractions.allowsDoubleTapZoom)
+        coordinator.canvasInteractions.singleTap?(CGPoint(x: 50, y: 50))
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        XCTAssertEqual(points, [CGPoint(x: 50, y: 50)])
+        coordinator.interactions = .init()
+        XCTAssertTrue(coordinator.canvasInteractions.allowsDoubleTapZoom)
+        XCTAssertNil(coordinator.canvasInteractions.singleTap)
     }
 
     func testQueuedTapAndLongPressAreDiscardedAfterCanvasInvalidation() async {
@@ -39,6 +39,6 @@ final class CanvasInteractionTests: XCTestCase {
         let empty = self.coordinator(.init()).canvasInteractions
         XCTAssertNil(empty.singleTap)
         XCTAssertNil(empty.longPress)
-        XCTAssertEqual(empty.doubleTap?(.zero), false)
+        XCTAssertTrue(empty.allowsDoubleTapZoom)
     }
 }

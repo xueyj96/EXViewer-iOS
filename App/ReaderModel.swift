@@ -45,7 +45,7 @@ struct ReaderOpeningDetail {
             if pages.isEmpty {
                 let metadata = gallery.tagsComplete ? gallery : (library.download(for: gallery.ref)?.gallery ?? gallery)
                 let blocked = TagFilter.decision(tags: metadata.tags, blocked: library.blockedIDs, complete: metadata.tagsComplete) != .visible
-                error = blocked ? "此画廊已被标签设置屏蔽，或标签尚未核实。" : "本机没有可读取的离线副本。"
+                error = blocked ? "画廊已被屏蔽或标签尚未核实" : "本机没有可用的离线副本"
             }
             return
         }
@@ -108,14 +108,14 @@ struct ReaderOpeningDetail {
             if let openingDetail { detail = openingDetail }
             else { detail = try await session.galleryDetail(for: gallery.ref, pageURL: url, request: demand).detail }
             guard current == context, revision == session.generation, owner == library.owner else { return }
-            guard TagFilter.decision(tags: detail.gallery.tags, blocked: library.blockedIDs, complete: true) == .visible else { throw ViewerError.invalidQuery("此画廊命中本机屏蔽标签，可到账号的「标签与屏蔽」调整。") }
+            guard TagFilter.decision(tags: detail.gallery.tags, blocked: library.blockedIDs, complete: true) == .visible else { throw ViewerError.invalidQuery("画廊命中屏蔽标签 可在设置调整") }
             beforeAppending?()
             seen.insert(url); var indexes = Set(pages.map(\.index)); pages += detail.pages.filter { indexes.insert($0.index).inserted }
             pages.sort { $0.index < $1.index }
             total = detail.gallery.pages
             if let candidate = detail.next, seen.contains(candidate) || seen.count >= 100 {
                 next = nil
-                error = "站点没有返回可用的后续页，已保留当前已加载的页面。"
+                error = "后续页暂不可用 当前页面保留"
             } else {
                 next = detail.next
                 error = nil

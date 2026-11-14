@@ -2,6 +2,25 @@ import Foundation
 import SwiftUI
 import ExViewerCore
 
+private struct CoveredGalleryContentKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    @Entry var detailSearchDepth = 0
+    var coveredGalleryContent: Bool {
+        get { self[CoveredGalleryContentKey.self] }
+        set { self[CoveredGalleryContentKey.self] = newValue }
+    }
+}
+
+/// Tag menus share four-character action captions and use no leading icons.
+enum TagMenuTitle {
+    static let newSearch = "新建搜索"
+    static let addToSearch = "加入搜索"
+    static let favorite = "加入常用"
+    static let unfavorite = "移出常用"
+    static let block = "屏蔽标签"
+    static let unblock = "解除屏蔽"
+}
+
 /// The executed query of a particular results page.
 struct ExecutedGallerySearch: Equatable {
     let query: SearchQuery
@@ -10,8 +29,7 @@ struct ExecutedGallerySearch: Equatable {
     var summary: String { SearchPresentation.conditions(query) }
 }
 
-/// Selecting detail tags only prepares a draft. Submission remains the existing
-/// composer's explicit Search action, including when an old query is extended.
+/// Detail tags create a new executed search directly, or prepare additions to an existing query.
 struct DetailTagSearchDraft: Identifiable {
     enum Origin: Equatable { case newSearch, currentSearch, discoverSearch }
     let id = UUID()
@@ -83,7 +101,7 @@ struct DetailTagSearchDraft: Identifiable {
     }
 
     var isCurrent: Bool { navigation.current.id == entryID }
-    var menuTitle: String { origin == .discoverSearch ? "加入发现页搜索" : "加入当前搜索" }
+    var menuTitle: String { TagMenuTitle.addToSearch }
 
     func leaving(_ close: @escaping () -> Void) -> Self {
         var target = self
@@ -94,7 +112,7 @@ struct DetailTagSearchDraft: Identifiable {
 
     func update(query: SearchQuery, site: GallerySite, savedID: UUID?, session: SiteSession, library: LibraryStore) throws {
         guard isCurrent, session.generation == generation else {
-            throw ViewerError.invalidQuery("目标搜索已变化，请重新打开条件。")
+            throw ViewerError.invalidQuery("搜索条件应用失败 请重试")
         }
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
@@ -114,7 +132,7 @@ struct DetailSearchRequest: Identifiable {
 }
 
 struct GalleryDetailPresentationActions {
-    let search: (DetailSearchRequest) -> Void
+    let search: (DetailSearchRequest) throws -> Void
     let read: (Gallery, DetailSearchTarget?, ReaderOpeningDetail?) -> Void
     let readOffline: (Gallery) -> Void
 }
@@ -131,8 +149,8 @@ extension EnvironmentValues {
 }
 
 extension View {
-    func galleryDetailPresentations(inlineSearch: Bool = false, tab: Int? = nil) -> some View {
-        modifier(GalleryDetailPresentations(inlineSearch: inlineSearch, tab: tab))
+    func galleryDetailPresentations(tab: Int? = nil, retainsSearchSource: Bool = false, onSearchVisibilityChange: ((Bool) -> Void)? = nil, onNewSearch: ((DetailSearchRequest) throws -> Void)? = nil) -> some View {
+        modifier(GalleryDetailPresentations(tab: tab, retainsSearchSource: retainsSearchSource, onSearchVisibilityChange: onSearchVisibilityChange, onNewSearch: onNewSearch))
     }
 }
 
@@ -144,92 +162,161 @@ private struct GalleryDetailPresentations: ViewModifier {
         let target: DetailSearchTarget?
         let openingDetail: ReaderOpeningDetail?
         var offline = false
+        var returnPreview: PageReturnPreview? = nil
     }
 
-    let inlineSearch: Bool
     let tab: Int?
+    var retainsSearchSource: Bool
+    var onSearchVisibilityChange: ((Bool) -> Void)?
+    var onNewSearch: ((DetailSearchRequest) throws -> Void)? = nil
     @State private var search: DetailSearchRequest?
     @State private var reading: Reading?
+    @StateObject private var returnSource = PageReturnPreviewSource()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.galleryDetailPresentation) private var parentPresentation
+    @Environment(\.detailSearchDepth) private var searchDepth
 
     func body(content: Content) -> some View {
+        let actions = GalleryDetailPresentationActions(
+                search: { request in
+                    guard request.target != nil || searchDepth < DiscoveryNavigation.historyLimit else {
+                        throw ViewerError.invalidQuery("搜索层级过多 请先返回")
+                    }
+                    if request.target == nil, let onNewSearch {
+                        try onNewSearch(request)
+                        search = nil; reading = nil
+                    } else if request.target == nil, !retainsSearchSource, let parentPresentation {
+                        try parentPresentation.search(request)
+                    } else { search = request }
+                },
+                read: { reading = Reading(gallery: $0, target: $1, openingDetail: $2, returnPreview: returnSource.capture()) },
+                readOffline: { reading = Reading(gallery: $0, target: nil, openingDetail: nil, offline: true, returnPreview: returnSource.capture()) }
+            )
         let base = content
-            .environment(\.galleryDetailPresentation, .init(
-                search: { search = $0 },
-                read: { reading = Reading(gallery: $0, target: $1, openingDetail: $2) },
-                readOffline: { reading = Reading(gallery: $0, target: nil, openingDetail: nil, offline: true) }
-            ))
-            .accessibilityHidden(reading != nil || (inlineSearch && search != nil))
-            .allowsHitTesting(!inlineSearch || search == nil)
-            .suppressPinnedChromePreferences(inlineSearch && search != nil)
+            .environment(\.galleryDetailPresentation, actions)
+            .environment(\.coveredGalleryContent, reading != nil || search != nil)
+            .background { returnSource.probe }
+            .environment(\.headerSectionSuspended, reading != nil || search != nil)
+            .accessibilityHidden(reading != nil || (search != nil))
+            .allowsHitTesting(search == nil)
+            .suppressPinnedChromePreferences(search != nil)
             .hidePinnedChromeForReader(reading != nil)
             .fullScreenCover(item: $reading) { presentation in
                 ReaderView(gallery: presentation.gallery, offline: presentation.offline, searchTarget: presentation.target?.leaving { reading = nil },
-                           openingDetail: presentation.openingDetail)
+                           openingDetail: presentation.openingDetail, returnPreview: presentation.returnPreview)
                     .localPageChrome()
+                    .environment(\.galleryDetailPresentation, actions)
+                    .environment(\.coveredGalleryContent, false)
             }
-        if inlineSearch {
-            base
+        base
                 .overlay {
                     if let search {
-                        DetailSearchFlow(request: search, onClose: { self.search = nil })
+                        GallerySearchFlow(request: search, onClose: { self.search = nil })
+                            .environment(\.galleryDetailPresentation, actions)
+                            .environment(\.coveredGalleryContent, false)
                             .background(Color(uiColor: .systemBackground).ignoresSafeArea())
                             .transition(.move(edge: .trailing))
                     }
                 }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.23), value: search?.id)
                 .onChange(of: tab) { _, _ in search = nil }
-        } else {
-            base.fullScreenCover(item: $search) { DetailSearchFlow(request: $0) }
-        }
+                .onChange(of: search?.id) { _, value in onSearchVisibilityChange?(value != nil) }
     }
 }
 
-private struct DetailSearchFlow: View {
+struct GallerySearchFlow: View {
     let request: DetailSearchRequest
     var onClose: (() -> Void)? = nil
+    var showsDetailOrigin = true
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.detailSearchDepth) private var searchDepth
     @State private var navigation: DiscoveryNavigation?
-    @State private var path = NavigationPath()
+    @StateObject private var galleryRoutes = GalleryNavigation()
+    @State private var showsReadingHistory = false
     @State private var closing = false
+    @State private var visible = false
+    @State private var visibilityRevision = UUID()
+
+    init(request: DetailSearchRequest, onClose: (() -> Void)? = nil, showsDetailOrigin: Bool = true) {
+        self.request = request
+        self.onClose = onClose
+        self.showsDetailOrigin = showsDetailOrigin
+        // New-search is the user's execution action; only extending an existing query opens its editor.
+        _navigation = State(initialValue: request.target == nil ? DiscoveryNavigation(query: request.draft.query, site: request.draft.site) : nil)
+    }
 
     var body: some View {
         ZStack {
-            if let navigation {
-                NavigationStack(path: $path) {
-                    DiscoverView(navigation: navigation, showsReadingHistory: .constant(false), onClose: close)
+            if request.generation != session.generation || library.owner != session.owner {
+                Color.clear.onAppear(perform: close)
+            } else if let navigation {
+                NavigationStack(path: $galleryRoutes.path) {
+                    DiscoverView(navigation: navigation, showsReadingHistory: $showsReadingHistory, onClose: close)
                         .navigationDestination(for: Gallery.self) { gallery in
                             GalleryDetailView(gallery: gallery, searchTarget: DetailSearchTarget(
                                 navigation: navigation, generation: session.generation, origin: .currentSearch
-                            ) { _ in path = NavigationPath() })
+                            ) { _ in galleryRoutes.returnToList() })
                         }
                 }
-                .galleryDetailPresentations(inlineSearch: onClose != nil)
+                .environment(\.galleryNavigation, galleryRoutes)
+                .galleryDetailPresentations(retainsSearchSource: true)
                 .transition(.opacity)
             } else {
                 DiscoveryComposerView(query: request.draft.query, site: request.draft.site,
-                                      detailTagSource: request.draft, dismissesOnApply: false,
+                                      detailTagSource: showsDetailOrigin ? request.draft : nil, dismissesOnApply: false,
                                       updatesResults: request.target != nil, onCancel: close, onApply: apply)
                     .transition(.opacity)
             }
         }
-        .onDisappear { navigation?.cancelLoading() }
+        .overlay(alignment: .topLeading) {
+            if AppMode.qa {
+                Text("QA").font(.system(size: 1)).frame(width: 1, height: 1)
+                    .accessibilityIdentifier("search.flow.qa.\(searchDepth)")
+                    .accessibilityValue("path=\(galleryRoutes.path.count);depth=\(searchDepth);query=\(navigation?.current.query.rules.count ?? 0)")
+                    .allowsHitTesting(false)
+            }
+        }
+        .environment(\.detailSearchDepth, searchDepth + 1)
+        .appMenuHost(enabled: onClose == nil)
+        .onDisappear {
+            visible = false
+            let revision = UUID()
+            visibilityRevision = revision
+            let leaving = navigation
+            // Unmounting a SwiftUI subtree must not synchronously publish pager changes.
+            // A quick return supersedes this deferred cancellation.
+            Task { @MainActor in
+                await Task.yield()
+                guard !visible, visibilityRevision == revision else { return }
+                leaving?.cancelLoading()
+            }
+        }
         .onAppear {
-            if let pager = navigation?.current.pager, pager.interrupted { pager.retry(session: session) }
+            visible = true
+            let revision = UUID()
+            visibilityRevision = revision
+            Task { @MainActor in
+                await Task.yield()
+                guard visible, visibilityRevision == revision else { return }
+                if let pager = navigation?.current.pager, pager.interrupted { pager.retry(session: session) }
+            }
         }
     }
 
     private func close() {
+        visible = false
+        visibilityRevision = UUID()
+        navigation?.cancelLoading()
         if let onClose { onClose() } else { dismiss() }
     }
 
     private func apply(_ query: SearchQuery, _ site: GallerySite, _ savedID: UUID?) throws {
         guard !closing, navigation == nil else { return }
         guard request.generation == session.generation, library.owner == session.owner else {
-            throw ViewerError.invalidQuery("账号已切换，请重新打开搜索。")
+            throw ViewerError.invalidQuery("账号已切换 请重新打开搜索")
         }
         if let target = request.target {
             try target.update(query: query, site: site, savedID: savedID, session: session, library: library)

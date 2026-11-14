@@ -33,88 +33,307 @@ enum LibrarySelectionPolicy {
 struct TagsView: View {
     var use: (GalleryTag) -> Void
     @EnvironmentObject private var library: LibraryStore
-    @Environment(\.dynamicTypeSize) private var typeSize
+    @EnvironmentObject private var session: SiteSession
+    @Environment(\.dismiss) private var dismiss
     @State private var scope = 0
-    @State private var query = ""
-    @FocusState private var searchFocused: Bool
-    @State private var adding = false
+    private struct SearchDraft: Equatable {
+        var query = ""
+        var namespace = "all"
+    }
+    @State private var searchDrafts = [SearchDraft(), SearchDraft()]
+    private var addQuery: String {
+        get { searchDrafts[scope].query }
+        nonmutating set { searchDrafts[scope].query = newValue }
+    }
+    private var addNamespace: String {
+        get { searchDrafts[scope].namespace }
+        nonmutating set { searchDrafts[scope].namespace = newValue }
+    }
+    private func queryBinding(_ index: Int) -> Binding<String> { Binding(get: { searchDrafts[index].query }, set: { searchDrafts[index].query = $0 }) }
+    @State private var searchesToResume = Set<Int>()
+    @StateObject private var commonSuggestions = TagSuggestionModel()
+    @StateObject private var blockedSuggestions = TagSuggestionModel()
+    private var suggestions: TagSuggestionModel { scope == 0 ? commonSuggestions : blockedSuggestions }
+    @FocusState private var searchFocused: Int?
+    @State private var addFailure: String?
     @State private var undone: GalleryTag?
-    private var tags: [GalleryTag] { (scope == 0 ? library.snapshot.favoriteTags : library.snapshot.blockedTags).filter { query.isEmpty || $0.label.localizedCaseInsensitiveContains(query) } }
+    @State private var selectedSuggestions: [GalleryTag] = []
+    @State private var selectedSavedIDs = Set<String>()
+    private var tags: [GalleryTag] { scope == 0 ? library.snapshot.favoriteTags : library.snapshot.blockedTags }
+    private var hasQuery: Bool { !addQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    private var scopeBinding: Binding<Int> {
+        Binding(get: { scope }, set: { next in
+            guard next != scope else { return }
+            searchFocused = nil
+            clearSelection()
+            scope = next
+        })
+    }
+
     var body: some View {
-        List {
-            HStack(spacing: FeedChrome.contentSpacing) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                TextField("搜索标签原名", text: $query,
-                          prompt: Text("搜索标签原名").foregroundStyle(Palette.inputPrompt))
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
-                    .focused($searchFocused)
-                    .accessibilityIdentifier("tags.search")
+        HeaderSectionPages(selection: scope) { paneScope, active in
+            tagPane(paneScope, active: active)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .appNavigationChrome(backButton: true, showsToolbarBackButton: false)
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) { header }
+        .headerSectionGestureLocked(searchFocused != nil)
+        .headerSectionWillChange { clearSelection() }
+        .headerSectionPaging(selection: scopeBinding, count: 2, identifier: "tags.scope",
+                             identity: session.generation)
+        .onChange(of: searchDrafts) { old, new in
+            clearSelection(); addFailure = nil
+            for index in new.indices where old[index] != new[index] {
+                let model = index == 0 ? commonSuggestions : blockedSuggestions
+                model.update(prefix: new[index].query, namespace: new[index].namespace, session: session, qa: AppMode.qa)
             }
-            .accountPageCard(compactRows: true)
-            .contentShape(Rectangle())
-            .onTapGesture { searchFocused = true }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("tags.search-card")
+        }
+        .onChange(of: tags.map(\.id)) { _, ids in selectedSavedIDs.formIntersection(ids) }
+        .onChange(of: searchFocused) { _, focused in
+            if focused != nil { selectedSavedIDs = [] }
+        }
+        .onChange(of: session.generation) { _, _ in
+            clearSelection(); searchesToResume = []; searchDrafts = [SearchDraft(), SearchDraft()]
+            commonSuggestions.sessionChanged(); blockedSuggestions.sessionChanged()
+            commonSuggestions.update(prefix: "", namespace: "all", session: session, qa: AppMode.qa)
+            blockedSuggestions.update(prefix: "", namespace: "all", session: session, qa: AppMode.qa)
+        }
+        .onAppear {
+            for index in searchesToResume {
+                let draft = searchDrafts[index]
+                let model = index == 0 ? commonSuggestions : blockedSuggestions
+                model.update(prefix: draft.query, namespace: draft.namespace, session: session, qa: AppMode.qa)
+            }
+            searchesToResume = []
+        }
+        .onDisappear {
+            let models = [commonSuggestions, blockedSuggestions]
+            searchesToResume = Set(models.indices.filter { models[$0].state == .loading })
+            models.forEach { $0.cancel() }
+        }
+    }
 
-            CompactFormSegmentPicker(selection: $scope, options: [0, 1],
-                                     title: { $0 == 0 ? "常用标签" : "屏蔽标签" },
-                                     accessibilityLabel: "标签范围", identifier: "tags.scope")
-                .accountPageListRow()
-
+    private func tagPane(_ paneScope: Int, active: Bool) -> some View {
+        let savedTags = paneScope == 0 ? library.snapshot.favoriteTags : library.snapshot.blockedTags
+        return
+        List {
+            searchCard(paneScope)
+            if !searchDrafts[paneScope].query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                TagManagementGroup(title: "搜索结果", symbol: "magnifyingglass", isSearch: true) { addResults(paneScope) }
+                    .accessibilityElement(children: .contain).accessibilityIdentifier("tags.results")
+                    .accountPageListRow()
+            }
             if let undone {
                 HStack {
                     Text("已屏蔽 \(undone.name)").font(.caption)
                     Spacer()
                     Button("撤销") { library.unblock(undone); self.undone = nil }
-                }
-                .accountPageCard()
+                }.accountPageCard(compactRows: true)
             }
-
-            ForEach(tags) { tag in
-                TagListRowLabel(tag: tag, symbol: scope == 0 ? "arrow.up.left" : "eye.slash",
-                                allowsMultiline: true)
-                    .padding(.vertical, FeedChrome.panelSpacing)
-                    .frame(minHeight: FeedChrome.compactFormRowHeight)
-                    .accountPageCard(compactRows: true)
-                .contentShape(Rectangle())
-                .onTapGesture { if scope == 0 { use(tag) } }
-                .contextMenu {
-                    Button("用于组合搜索") { use(tag) }
-                    if scope == 0 {
-                        Button("屏蔽标签") { library.block(tag); undone = tag }
-                        Button("取消常用") { library.unpin(tag) }
-                    } else {
-                        Button("解除屏蔽") { library.unblock(tag) }
-                        Button("加入常用") { library.pin(tag) }
+            if !savedTags.isEmpty {
+                TagManagementGroup(title: paneScope == 0 ? "已有常用" : "已有屏蔽", symbol: paneScope == 0 ? "bookmark" : "eye.slash") {
+                    VStack(spacing: FeedChrome.panelSpacing) {
+                        ForEach(savedTags) { tag in
+                            TagListRowLabel(tag: tag, symbol: (active && selectedSavedIDs.contains(tag.id)) ? "checkmark.circle.fill" : "circle",
+                                            emphasized: (active && selectedSavedIDs.contains(tag.id)), allowsMultiline: true)
+                                .formRowLayout()
+                                .contentShape(Rectangle())
+                                .formRowSurface(shape: AppShape.control)
+                                .background((active && selectedSavedIDs.contains(tag.id)) ? Color.accentColor.opacity(0.12) : Color.clear,
+                                            in: AppShape.control)
+                                .overlay {
+                                    if (active && selectedSavedIDs.contains(tag.id)) {
+                                        AppShape.control.strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+                                    }
+                                }
+                                .onTapGesture {
+                                    selectedSuggestions = []
+                                    if !selectedSavedIDs.insert(tag.id).inserted { selectedSavedIDs.remove(tag.id) }
+                                }
+                                .accessibilityIdentifier("tags.saved.\(tag.id)")
+                                .accessibilityValue((active && selectedSavedIDs.contains(tag.id)) ? "已选中" : "未选中")
+                                .appContextMenu {
+                                    AppMenuItem(title: TagMenuTitle.addToSearch) { use(tag) }
+                                    if scope == 0 {
+                                        AppMenuItem(title: TagMenuTitle.block, role: .destructive) { library.block(tag); undone = tag }
+                                        AppMenuItem(title: TagMenuTitle.unfavorite, role: .destructive) { library.unpin(tag) }
+                                    } else {
+                                        AppMenuItem(title: TagMenuTitle.unblock) { library.unblock(tag) }
+                                        AppMenuItem(title: TagMenuTitle.favorite) { library.pin(tag) }
+                                    }
+                                }
+                            }
                     }
                 }
-                .swipeActions {
-                    if scope == 0 {
-                        Button("取消常用", role: .destructive) { library.unpin(tag) }
-                    } else {
-                        Button("解除屏蔽") { library.unblock(tag) }.tint(Palette.accent)
-                    }
-                }
-            }
-            if tags.isEmpty {
-                Text(scope == 0 ? "在画廊详情长按标签，可加入常用。" : "屏蔽按命名空间和标签原名精确匹配。")
-                    .foregroundStyle(.secondary)
-                    .accountPageCard()
+                .accessibilityElement(children: .contain).accessibilityIdentifier("tags.saved")
+                .accountPageListRow()
             }
         }
-            .scrollDismissesKeyboard(.interactively)
-            .accountSubpageHeader("标签与屏蔽", identifier: "account.tags-page") {
-                Button { adding = true } label: { Image(systemName: "plus") }
-                    .buttonStyle(FeedHeaderButtonStyle())
-                    .accessibilityLabel("添加标签").accessibilityIdentifier("tags.add")
-            }
-            .navigationDestination(isPresented: $adding) {
-                TagEntryView { tag, _ in
-                    if scope == 0 { library.pin(tag) }
-                    else { library.block(tag); undone = tag }
+        .appToast(message: active ? addFailure ?? library.error : nil, identifier: "tags.operation-error")
+        .appToast(message: active && (paneScope == 0 ? commonSuggestions : blockedSuggestions).state.isFailure
+                    ? (paneScope == 0 ? commonSuggestions : blockedSuggestions).state.message : nil,
+                  identifier: "tags.lookup-error")
+        .accountSubpageContent()
+    }
+
+    private var header: some View {
+        FloatingHeaderPanel(identifier: "account.tags-page.header") {
+            HStack(spacing: FeedChrome.panelSpacing) {
+                Button { dismiss() } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(FeedHeaderButtonStyle()).environment(\.pageHeaderAction, true)
+                    .accessibilityLabel("返回").accessibilityIdentifier("BackButton")
+                FeedScopePicker(selection: scopeBinding, options: [
+                    .init(id: 0, title: "常用标签", symbol: "tag"),
+                    .init(id: 1, title: "屏蔽标签", symbol: "eye.slash")
+                ], identifier: "tags.scope", showsSymbols: false, onSelection: { searchFocused = nil })
+                Button(action: applySelection) {
+                    Image(systemName: selectedSavedIDs.isEmpty ? "plus" : "minus")
                 }
-                .dynamicTypeSize(typeSize)
+                .buttonStyle(FeedHeaderButtonStyle()).environment(\.pageHeaderAction, true)
+                .foregroundStyle(selectedSavedIDs.isEmpty ? Color.accentColor : Color.red)
+                .disabled(selectedSuggestions.isEmpty && selectedSavedIDs.isEmpty)
+                .accessibilityLabel(selectedSavedIDs.isEmpty ? "添加所选标签" : "移除所选标签")
+                .accessibilityIdentifier("tags.add")
             }
+            .frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight)
+            .environment(\.feedHeaderRow, .single)
+        }
+    }
+
+    private func searchCard(_ paneScope: Int) -> some View {
+        let draft = searchDrafts[paneScope]
+        let hasQuery = !draft.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return FormGroup {
+            HStack(spacing: FeedChrome.panelSpacing) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).padding(.leading, FeedChrome.contentSpacing).accessibilityHidden(true)
+                TextField("中文名或标签原名", text: queryBinding(paneScope),
+                          prompt: Text("中文名或标签原名").foregroundStyle(Palette.inputPrompt))
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    .focused($searchFocused, equals: paneScope).submitLabel(.done).onSubmit { searchFocused = nil }
+                    .accessibilityIdentifier("tags.search")
+                if hasQuery { namespaceMenu(paneScope) }
+                Button { searchDrafts[paneScope].query = "" } label: {
+                    Image(systemName: "xmark").foregroundStyle(.secondary)
+                        .frame(width: FeedChrome.compactFormRowHeight, height: FeedChrome.compactFormRowHeight)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("清空搜索").accessibilityIdentifier("tags.search.clear")
+            }
+            .font(.footnote).frame(minHeight: FeedChrome.compactFormRowHeight)
+        }
+        .accountPageListRow()
+        .accessibilityElement(children: .contain).accessibilityIdentifier("tags.search-card")
+    }
+
+    private func namespaceMenu(_ paneScope: Int) -> some View {
+        AppMenu(onOpen: { searchFocused = nil }) {
+            ForEach(["all"] + TagNamespaceDisplay.namespaces, id: \.self) { namespace in
+                AppMenuItem(title: namespace == "all" ? "全部分类" : TagNamespaceDisplay.title(namespace),
+                            isSelected: searchDrafts[paneScope].namespace == namespace) { searchDrafts[paneScope].namespace = namespace }
+                    .accessibilityIdentifier(namespace == "all" ? "tags.add.namespace.all" : "tags.add.namespace.\(namespace)")
+            }
+        } label: { namespaceLabel(searchDrafts[paneScope].namespace) }
+        .buttonStyle(.plain)
+        .accessibilityLabel("标签分类").accessibilityValue(searchDrafts[paneScope].namespace)
+        .accessibilityIdentifier("tags.add.namespace")
+    }
+
+    private func namespaceLabel(_ namespace: String) -> some View {
+        AppMenuValueLabel(title: namespace == "all" ? "全部分类" : TagNamespaceDisplay.title(namespace))
+    }
+
+    private func addResults(_ paneScope: Int) -> some View {
+        resultRows(query: searchDrafts[paneScope].query, namespace: searchDrafts[paneScope].namespace,
+                   model: paneScope == 0 ? commonSuggestions : blockedSuggestions) { tag, identifier in
+            addButton(tag, paneScope: paneScope, identifier: identifier)
+        }
+    }
+
+    @ViewBuilder private func resultRows<Row: View>(query: String, namespace: String, model: TagSuggestionModel,
+                                                    @ViewBuilder row: @escaping (GalleryTag, String) -> Row) -> some View {
+        if model.state == .loading {
+            ProgressView().controlSize(.mini).frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight)
+                .formRowSurface(shape: AppShape.control)
+        }
+        ForEach(model.items) { item in
+            row(item.tag, "tag.suggestion.\(item.id)")
+        }
+        if namespace == "all", model.items.isEmpty, model.state == .ready {
+            Text("无匹配标签").foregroundStyle(.secondary)
+                .formRowLayout().formRowSurface(shape: AppShape.control)
+                .accessibilityIdentifier("tags.results.empty")
+        }
+        let name = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !model.items.contains(where: {
+            TagSuggestionRequest.matchRank(original: $0.tag.name, chinese: $0.chineseName,
+                                           normalizedPrefix: TagSuggestionRequest.normalized(name)) == 0
+        }) {
+            if namespace != "all" {
+                if TagInputValidation.error(name, namespace: namespace) == nil {
+                    row(.init(namespace: namespace, name: name), "tag.stage")
+                        .accessibilityHint("原名输入，尚未经站点核验")
+                }
+            }
+        }
+    }
+
+    private func addButton(_ tag: GalleryTag, paneScope: Int, identifier: String) -> some View {
+        let exists = (paneScope == 0 ? library.snapshot.favoriteTags : library.snapshot.blockedTags).contains { $0.id == tag.id }
+        return Button {
+            selectedSavedIDs = []
+            if let index = selectedSuggestions.firstIndex(where: { $0.id == tag.id }) {
+                selectedSuggestions.remove(at: index)
+            } else { selectedSuggestions.append(tag) }
+        } label: {
+            TagListRowLabel(tag: tag,
+                            symbol: exists || (paneScope == scope && selectedSuggestions.contains(where: { $0.id == tag.id })) ? "checkmark.circle.fill" : "circle",
+                            emphasized: exists || (paneScope == scope && selectedSuggestions.contains(where: { $0.id == tag.id })))
+                .formRowLayout()
+                .formRowSurface(shape: AppShape.control)
+        }
+        .buttonStyle(.plain).disabled(exists || !TagSuggestionRequest.isSelectable(tag))
+        .accessibilityIdentifier(identifier)
+        .accessibilityValue(exists ? "已添加" : (paneScope == scope && selectedSuggestions.contains(where: { $0.id == tag.id })) ? "已选中" : "未选中")
+    }
+
+    private func clearSelection() {
+        selectedSuggestions = []
+        selectedSavedIDs = []
+    }
+
+    private func applySelection() {
+        let saved: Bool
+        if !selectedSavedIDs.isEmpty {
+            let removing = tags.filter { selectedSavedIDs.contains($0.id) }
+            saved = scope == 0 ? library.unpin(removing) : library.unblock(removing)
+        } else {
+            guard !selectedSuggestions.isEmpty else { return }
+            saved = scope == 0 ? library.pin(selectedSuggestions) : library.block(selectedSuggestions)
+        }
+        if saved { clearSelection(); addFailure = nil }
+        else { addFailure = library.error ?? "标签保存失败 请重试" }
+    }
+
+
+}
+
+/// Short, useful section identity shares the same row and inset rules as its contents.
+private struct TagManagementGroup<Content: View>: View {
+    let title: String
+    let symbol: String
+    var isSearch = false
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        FormGroup {
+            HStack(spacing: FeedChrome.iconLabelSpacing) {
+                Image(systemName: symbol).accessibilityHidden(true)
+                Text(title).fontWeight(.medium)
+            }
+            .foregroundStyle(isSearch ? Color.accentColor : Color.secondary)
+            .formRowLayout()
+            content()
+        }
     }
 }
 
@@ -153,7 +372,9 @@ private enum ReadLaterFilter: String, CaseIterable {
 }
 
 struct LibraryView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.galleryDetailPresentation) private var presentation
+    @Environment(\.edgeTouchGate) private var edgeTouches
     @Binding var site: GallerySite
     var isActive = true
     @EnvironmentObject private var library: LibraryStore
@@ -188,13 +409,16 @@ struct LibraryView: View {
     private var localSource: LibraryBatchSource { scope == 3 ? .downloads : .readLater }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if scope == 1 { CloudFavoritesView(site: $site, scope: $scope, isActive: isActive) }
-            else if scope == 2 {
-                ReadingHistoryView(placement: .library($scope))
-            }
-            else { localLibrary }
+        HeaderSectionPages(selection: scope, topInset: FeedChrome.headerClearance(twoRows: true)) { paneScope, active in
+            if paneScope == 1 { CloudFavoritesView(site: $site, scope: $scope, isActive: isActive && active) }
+            else if paneScope == 2 { ReadingHistoryView(placement: .library($scope)) }
+            else { localLibrary(paneScope) }
         }
+        .headerSectionLocked(removingDownloads || confirmingLocalRemoval)
+        .exitMultiSelectionOnRightSwipe(selectingLocal, action: endLocalSelection)
+        .headerSectionWillChange { endLocalSelection() }
+        .headerSectionPaging(selection: $scope, count: 4, identifier: "library.scope", enabled: isActive,
+                             identity: site.rawValue)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear { sortOrders = sortPreferences.load() }
         .onChange(of: library.owner) { _, _ in sortOrders = sortPreferences.load() }
@@ -229,42 +453,60 @@ struct LibraryView: View {
                 }
             }
         } message: {
-            Text(scope == 3 ? "将删除所选的本机下载文件。" : "站点收藏、下载文件和阅读进度会保留。")
+            Text(scope == 3 ? "将删除所选的本机下载文件" : "保留站点收藏 下载文件和阅读进度")
         }
     }
 
-    private var localLibrary: some View {
-        FloatingFeedLayout { headerHeight in
+    private func localLibrary(_ paneScope: Int) -> some View {
+        FloatingFeedLayout(twoRows: true) { headerHeight in
             GeometryReader { geometry in
                 let viewport = GalleryFeedViewport(space: "local-library-feed", height: geometry.size.height,
                                                    topOcclusion: headerHeight)
-                ScrollView {
+                ScrollViewReader { proxy in
+                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 22) {
-                        if let error = library.error { StatusMessage(title: error) { library.load(owner: library.owner) } }
-                        if scope == 3 { downloadsSection }
+                        if library.error != nil {
+                            Button("重试加载") { library.load(owner: library.owner) }
+                                .buttonStyle(AppActionButtonStyle(tone: .accent))
+                                .appToast(message: library.error, identifier: "library.load-error")
+                        }
+                        if paneScope == 3 { downloadsSection }
                         else { bookmarksSection(viewport: viewport) }
                     }
-                    .padding(.top, headerHeight).padding(.bottom, 30)
+                    .padding(.top, headerHeight).padding(.bottom, FeedChrome.sectionSpacing)
+                    .id("library.local.section-top")
+                 }
+                 .onHeaderReselection {
+                     guard !selectingLocal else { return }
+                     withAnimation(reduceMotion ? nil : ChromeMotion.control) { proxy.scrollTo("library.local.section-top", anchor: .top) }
+                 }
                 }
                 .coordinateSpace(name: viewport.space)
                 .contentMargins(.top, headerHeight, for: .scrollIndicators)
+                .overlay {
+                    if library.error == nil && (paneScope == 3 ? visibleDownloads.isEmpty : matchingReadLater.isEmpty) {
+                        GalleryEmptyState()
+                            .accessibilityIdentifier(paneScope == 3 ? "downloads.empty" : "read-later.empty")
+                            .padding(.top, headerHeight)
+                    }
+                }
                 .accessibilityIdentifier("library.local")
             }
         } header: {
             LibraryFloatingHeader(selection: $scope, identifier: "library.header.floating", isSelecting: selectingLocal) {
                 if selectingLocal {
-                    LibraryBatchSelectionHeader(source: localSource, store: localSelection, summary: localSelection.summary,
+                    LibraryBatchSelectionHeader(source: paneScope == 3 ? .downloads : .readLater, store: localSelection, summary: localSelection.summary,
                                                 busy: removingDownloads, onExit: endLocalSelection)
                 } else {
                     if typeSize.isAccessibilitySize {
-                        AccessibilityHeaderActions { localLeading } trailing: {
-                            HStack(spacing: FeedChrome.panelSpacing) { localSort; localAction }
+                        AccessibilityHeaderActions { localLeading(paneScope) } trailing: {
+                            HStack(spacing: FeedChrome.panelSpacing) { localSort(paneScope); localAction(paneScope) }
                         }
                     } else {
                         FeedHeaderGrid(spans: [1, 1, 1]) {
-                            localLeading
-                            localSort
-                            localAction
+                            localLeading(paneScope)
+                            localSort(paneScope)
+                            localAction(paneScope)
                         }
                     }
                 }
@@ -272,8 +514,8 @@ struct LibraryView: View {
         }
     }
 
-    @ViewBuilder private var localLeading: some View {
-        if scope == 3 {
+    @ViewBuilder private func localLeading(_ paneScope: Int) -> some View {
+        if paneScope == 3 {
             LibraryFilterMenu(selection: $downloadFilter, options: DownloadFilter.allCases, title: \.title,
                               label: "下载状态筛选", identifier: "downloads.filter", symbol: "line.3.horizontal.decrease")
         } else {
@@ -282,12 +524,12 @@ struct LibraryView: View {
         }
     }
 
-    private var localSort: some View {
-        sortMenu(scope == 3 ? .downloads : .bookmarks)
+    private func localSort(_ paneScope: Int) -> some View {
+        sortMenu(paneScope == 3 ? .downloads : .bookmarks)
     }
 
-    private var localAction: some View {
-        LibraryBatchEntryButton(identifier: scope == 3 ? "downloads.select" : "read-later.select") {
+    private func localAction(_ paneScope: Int) -> some View {
+        LibraryBatchEntryButton(identifier: paneScope == 3 ? "downloads.select" : "read-later.select") {
             localSelection.clear()
             localSelection.updateLoadedIDs(localIDs)
             selectingLocal = true
@@ -297,10 +539,7 @@ struct LibraryView: View {
 
     private var downloadsSection: some View {
         LazyVStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
-            if visibleDownloads.isEmpty {
-                StatusMessage(title: downloadFilter == .all ? "暂无下载" : "没有符合该状态的下载",
-                              symbol: "arrow.down.circle")
-            } else {
+            if !visibleDownloads.isEmpty {
                 let records = LibrarySorting.downloads(visibleDownloads, order: sortOrders[.downloads] ?? .original,
                                                        history: library.snapshot.history)
                 LibraryCardRows(items: records, cover: { record in
@@ -321,40 +560,39 @@ struct LibraryView: View {
         } else {
             Group {
                 if record.status == .complete {
-                    Button { presentation?.readOffline(record.gallery) } label: {
+                    Button {
+                        guard edgeTouches?.blocksGalleryActions != true else { return }
+                        presentation?.readOffline(record.gallery)
+                    } label: {
                         DownloadRowLabel(record: record)
                     }
                 } else {
                     Button {
+                        guard edgeTouches?.blocksGalleryActions != true else { return }
                         if record.canPause { downloads.pause(record.id) }
                         else { downloads.enqueue(record.gallery) }
                     } label: { DownloadRowLabel(record: record) }
                 }
             }
             .buttonStyle(.plain)
-            .highPriorityGesture(LongPressGesture(minimumDuration: 0.55).onEnded { _ in beginLocalSelection(record.id) })
+            .highPriorityGesture(LongPressGesture(minimumDuration: 0.55).onEnded { _ in
+                guard edgeTouches?.blocksGalleryActions != true else { return }
+                beginLocalSelection(record.id)
+            })
             .accessibilityValue(record.accessibleDownloadStatus)
             .accessibilityHint(record.status == .complete ? "轻点打开离线阅读，长按选择" :
                                 record.requiresRetry ? [record.error, "轻点重试，长按选择"].compactMap { $0 }.joined(separator: "。") :
                                 record.canPause ? "轻点暂停，长按选择" : "轻点继续，长按选择")
             .accessibilityAction(named: Text("选择并管理")) { beginLocalSelection(record.id) }
             .disabled(removingDownloads)
+            .allowsHitTesting(edgeTouches?.blocksGalleryActions != true)
         }
     }
 
     private func bookmarksSection(viewport: GalleryFeedViewport) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            if library.snapshot.readLater.isEmpty {
-                Text("长按发现页的作品，或在详情的更多操作中加入稍后再读。").font(.subheadline).foregroundStyle(.secondary)
-                    .padding(.horizontal, FeedChrome.contentInset).padding(.vertical, 14)
-                    .accessibilityIdentifier("read-later.empty")
-            }
-            else if matchingReadLater.isEmpty {
-                StatusMessage(title: readLaterFilter == .unread ? "暂无未读作品" : "暂无有阅读记录的作品", symbol: "book")
-                    .padding(.horizontal, FeedChrome.contentInset)
-                    .padding(.top, FeedChrome.contentTopGap)
-            } else {
-                GalleryRows(galleries: LibrarySorting.galleries(matchingReadLater, order: sortOrders[.bookmarks] ?? .original, history: library.snapshot.history), layout: .grid,
+            if !matchingReadLater.isEmpty {
+                GalleryRows(galleries: LibrarySorting.galleries(matchingReadLater, order: sortOrders[.bookmarks] ?? .original, history: library.snapshot.history),
                             sourceIdentity: library.owner + ":read-later",
                             selectionStore: localSelection, isSelecting: selectingLocal, openIdentifier: "favorites.gallery",
                             onLongPressSelect: { beginLocalSelection($0.id) }, viewport: viewport)
@@ -374,14 +612,11 @@ struct LibraryView: View {
     }
 
     private func sortMenu(_ section: LibrarySortSection) -> some View {
-        Menu {
+        AppMenu {
             ForEach(section.options) { option in
-                Button {
+                AppMenuItem(title: option.title, isSelected: option == (sortOrders[section] ?? section.defaultOrder)) {
                     sortPreferences.set(option, for: section)
                     sortOrders[section] = option
-                } label: {
-                    if option == (sortOrders[section] ?? section.defaultOrder) { Label(option.title, systemImage: "checkmark") }
-                    else { Text(option.title) }
                 }.accessibilityIdentifier("library.sort.\(section.rawValue).\(option.rawValue)")
             }
         } label: {
@@ -400,9 +635,9 @@ private extension DownloadRecord {
     var accessibleDownloadStatus: String {
         guard status != .complete else { return downloadStatus }
         if let pageCount, pageCount > 0 {
-            return "\(downloadStatus)，已保存 \(completed.count)/\(pageCount) 页"
+            return "\(downloadStatus) 已保存 \(completed.count)/\(pageCount) 页"
         }
-        return completed.isEmpty ? downloadStatus : "\(downloadStatus)，已保存 \(completed.count) 页"
+        return completed.isEmpty ? downloadStatus : "\(downloadStatus) 已保存 \(completed.count) 页"
     }
 
     @MainActor func coverSource(in library: LibraryStore) -> LibraryCardCover? {
@@ -493,27 +728,20 @@ private struct SelectableDownloadRow: View {
     }
 }
 
-private struct FavoriteSortAnchor: PreferenceKey {
-    static let defaultValue: Anchor<CGRect>? = nil
-    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
-        value = nextValue() ?? value
-    }
-}
-
 struct CloudFavoritesView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var site: GallerySite
     @Binding var scope: Int
     var isActive = true
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dynamicTypeSize) private var typeSize
-    @ScaledMetric(relativeTo: .subheadline) private var sortMenuWidth: CGFloat = 152
     @StateObject private var pager = GalleryPager()
+    @StateObject private var pullRefresh = FeedPullRefresh()
     @StateObject private var selectionStore = LibrarySelectionStore()
     @StateObject private var submission = FavoriteBatchSubmission()
     @State private var web: WebDestination?
     @State private var category = "all"
-    @State private var showingSort = false
     @State private var selecting = false
     @State private var initialLayoutReady = false
     @State private var seenRemovals: [String: UUID] = [:]
@@ -548,7 +776,7 @@ struct CloudFavoritesView: View {
     private var sortOrder: SiteFavoriteOrder { sortPreferences.favoriteOrder(for: site) }
     private var working: Bool { submission.workingCount != nil }
     var body: some View {
-        FloatingFeedLayout { headerHeight in
+        FloatingFeedLayout(twoRows: true) { headerHeight in
         VStack(spacing: 0) {
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-library-large-selection") {
                 Text("QA").font(.system(size: 1)).foregroundStyle(.clear).frame(width: 1, height: 1)
@@ -556,14 +784,15 @@ struct CloudFavoritesView: View {
                     .accessibilityValue("galleries=\(displayedItems.count);blocked=\(library.snapshot.blockedTags.count)")
                     .allowsHitTesting(false)
             }
-            if !session.hasCredentials && !AppMode.qa {
+            if (!session.hasCredentials && !AppMode.qa) || (AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-favorites-login-required")) {
                 ContentUnavailableView {
                     Label("登录后读取站点收藏", systemImage: "heart")
                 } description: {
-                    Text("使用自己的站点账号访问收藏。")
+                    Text("请登录站点账号查看收藏")
                 } actions: {
                     Button("打开官方登录页") { web = .login }.buttonStyle(AppActionButtonStyle(tone: .accent))
                 }
+                .padding(.top, headerHeight)
             } else {
                 favoritesFeed(headerHeight: headerHeight)
             }
@@ -571,25 +800,9 @@ struct CloudFavoritesView: View {
         } header: {
             favoritesFloatingHeader
         }
-        .accessibilityHidden(showingSort)
-        .overlayPreferenceValue(FavoriteSortAnchor.self) { anchor in
-            if showingSort, let anchor {
-                GeometryReader { geometry in
-                    let button = geometry[anchor]
-                    let inset = FeedChrome.contentInset
-                    let width = min(sortMenuWidth, max(0, geometry.size.width - inset * 2))
-                    ZStack(alignment: .topLeading) {
-                        Color.clear.contentShape(Rectangle())
-                            .onTapGesture { showingSort = false }
-                            .accessibilityHidden(true)
-                        favoriteSortOptions
-                            .frame(width: width)
-                            .offset(x: max(inset, min(button.maxX - width, geometry.size.width - width - inset)),
-                                    y: button.maxY + 3)
-                    }
-                }
-            }
-        }
+        .headerSectionLocked(working || confirmingRemoval || moveSelection != nil)
+        .exitMultiSelectionOnRightSwipe(selecting && !working, action: endSelection)
+        .headerSectionWillChange { endSelection() }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if selecting && isActive {
                 LibraryBatchToolbar(source: .favorites, summary: selectionStore.summary, busy: working,
@@ -614,21 +827,25 @@ struct CloudFavoritesView: View {
                 try confirmMove(move, to: group.id)
             }
         }
-        .alert("取消收藏", isPresented: $confirmingRemoval) {
-            Button("移除所选收藏", role: .destructive) { perform(.remove, references: selectedGalleries.map(\.ref)) }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("从站点收藏移除 \(selectionStore.selectedIDs.count) 项？本机下载和稍后再读会保留。")
+        .appConfirmationDialog("取消收藏", message: "取消所选 \(selectionStore.selectedIDs.count) 部作品的收藏",
+                               isPresented: $confirmingRemoval, identifier: "favorites.remove") {
+            perform(.remove, references: selectedGalleries.map(\.ref))
         }
-        .sheet(item: $web) { OfficialWebView(destination: $0) }
-        .task { prepareVisible(); if !selecting { reload(force: false) } }
+        .officialWebPage(item: $web)
+        .task {
+            prepareVisible()
+            if isActive && !selecting { reload(force: false) }
+            else if let url = sortOrder.url(site: site, category: category) {
+                await pager.prepareCached(url: url, session: session, qa: AppMode.qa)
+            }
+        }
         .onChange(of: pager.items) { _, _ in prepareVisible() }
         .onChange(of: pager.loading) { _, loading in
             if !loading { submission.finishListRefresh(succeeded: pager.failure == nil && !pager.interrupted) }
         }
         .onChange(of: library.blockedIDs) { _, _ in selectionStore.clear(); selecting = false; prepareVisible() }
         .onChange(of: category) { _, _ in selectionStore.clear(); selecting = false; reload(force: false) }
-        .onChange(of: site) { _, _ in showingSort = false; submission.cancel(); submission.dismissNotice(); selectionStore.clear(); selecting = false; category = "all"; reload(force: false) }
+        .onChange(of: site) { _, _ in submission.cancel(); submission.dismissNotice(); selectionStore.clear(); selecting = false; category = "all"; reload(force: false) }
         .onChange(of: session.hasCredentials) { _, _ in reload(force: false) }
         .onChange(of: session.favoritesRevision) { _, _ in reload(force: false) }
         .onReceive(session.favoriteStateCache.$confirmedRemovals, perform: applyConfirmedRemovals)
@@ -636,11 +853,11 @@ struct CloudFavoritesView: View {
         .onChange(of: session.owner) { _, _ in accountChanged() }
         .onChange(of: isActive) { _, active in
             if active { reload(force: false) }
-            else { showingSort = false; initialLayoutReady = false; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false }
+            else { initialLayoutReady = false; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false }
         }
         .onDisappear {
             guard moveSelection == nil else { return }
-            showingSort = false; initialLayoutReady = false; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false
+            initialLayoutReady = false; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false
         }
     }
 
@@ -650,9 +867,9 @@ struct CloudFavoritesView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        GalleryRows(galleries: displayedItems, layout: .grid,
+                        GalleryRows(galleries: displayedItems,
                                     sourceIdentity: "\(site.rawValue):\(category):\(sortOrder.rawValue)",
-                                    selectionStore: selectionStore, isSelecting: selecting,
+                                    selectionStore: selectionStore, isSelecting: selecting, isLoading: pager.loading, loadFailure: pager.failure,
                                     openIdentifier: "favorites.gallery",
                                     onLongPressSelect: beginSelection(at:),
                                     onNearEnd: {
@@ -662,19 +879,31 @@ struct CloudFavoritesView: View {
                                     }, viewport: viewport, onVisibleAnchor: {
                                         if anchorAfterRemoval == nil { visibleGalleryID = $0 }
                                     })
-                        if !selecting { GalleryContinuationFooter(pager: pager) }
-                        if !pager.loading && pager.failure == nil && displayedItems.isEmpty {
-                            StatusMessage(title: "当前分组没有收藏结果。", symbol: "heart")
-                        }
+                        if !selecting && !pager.items.isEmpty { GalleryContinuationFooter(pager: pager) }
                     }
                     .padding(.top, headerHeight)
+                    .padding(.bottom, FeedChrome.sectionSpacing)
+                    .id("favorites.section-top")
+                    .feedRefreshProbe(pullRefresh, enabled: !working && isActive)
+                }
+                .overlay {
+                    if !selecting { GalleryFeedStatus(pager: pager).padding(.top, headerHeight) }
                 }
                 .coordinateSpace(name: viewport.space)
-                .refreshable {
+                .feedPullRefresh(pullRefresh, topInset: headerHeight, enabled: !working && isActive) {
                     if !working {
                         selectionStore.clear()
                         selecting = false
                         reload()
+                        await pager.waitForLoad()
+                    }
+                }
+                .onHeaderReselection {
+                    guard isActive, !working, !selecting else { return }
+                    withAnimation(reduceMotion ? nil : ChromeMotion.control) { proxy.scrollTo("favorites.section-top", anchor: .top) }
+                    await pullRefresh.refresh(enabled: isActive) {
+                        reload()
+                        await pager.waitForLoad()
                     }
                 }
                 .contentMargins(.top, headerHeight, for: .scrollIndicators)
@@ -743,20 +972,20 @@ struct CloudFavoritesView: View {
                     }
                 }
                 if FeedCacheQA.isEnabled { FeedCacheQAStatus(pager: pager, lane: "favorites") }
-                if let error = library.error {
-                    StatusMessage(title: error) { library.load(owner: library.owner) }
+                if library.error != nil {
+                    Button("重试加载") { library.load(owner: library.owner) }
+                        .buttonStyle(AppActionButtonStyle(tone: .accent))
+                        .appToast(message: library.error, identifier: "favorites.library-error")
                 }
                 if let notice = submissionNotice {
-                    HStack(alignment: .top) {
-                        Text(notice.text).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                    Group {
                         if notice.needsVerification {
                             Button("刷新核实") { submission.dismissNotice(); reload() }
-                                .font(.caption.weight(.semibold)).frame(minHeight: 44)
+                                .buttonStyle(AppActionButtonStyle(tone: .accent))
                                 .accessibilityIdentifier("favorites.verify-refresh")
-                        }
-                        Button { submission.dismissNotice() } label: { Image(systemName: "xmark.circle.fill").frame(minWidth: 44, minHeight: 44) }
-                            .accessibilityLabel("关闭操作提示")
+                        } else { Color.clear.frame(height: 0) }
                     }
+                    .appToast(message: notice.text, identifier: "favorites.operation-feedback")
                 }
                 if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-favorites-unknown-response") {
                     Text("QA 模拟提交次数：\(qaFavoriteAttemptCount)")
@@ -771,30 +1000,28 @@ struct CloudFavoritesView: View {
         switch submission.state {
         case .idle, .submitting:
             return nil
-        case .refreshingList(let submitted):
-            return ("已提交 \(submitted) 项操作，正在更新收藏列表…", false)
-        case .listRefreshed:
-            return ("收藏列表已更新。", false)
+        case .refreshingList, .listRefreshed:
+            return nil
         case .listRefreshFailed:
-            return ("操作已发送，列表暂未更新，请刷新。", false)
+            return ("操作已发送 请刷新列表", false)
         case .preview:
-            return ("测试模式仅检查多选交互，未修改站点收藏。", false)
+            return ("测试模式 未修改站点收藏", false)
         case .interrupted(let submitted, let count, let reason):
-            let prefix = submitted > 0 ? "此前已发送 \(submitted) 项操作。" : ""
+            let progress = submitted > 0 ? "已发送 \(submitted) 项 " : ""
             switch reason {
-            case .needsVerification(let error):
-                return (prefix + "本批 \(count) 项结果待确认，已暂停后续操作。\n" + ErrorMessages.message(error), true)
-            case .notSent(let error):
-                return (prefix + "本批 \(count) 项尚未发送，已暂停后续操作。\n" + ErrorMessages.message(error), false)
+            case .needsVerification:
+                return (progress + "本批 \(count) 项结果待确认 后续已暂停", true)
+            case .notSent:
+                return (progress + "本批 \(count) 项尚未发送 后续已暂停", false)
             }
         }
     }
     private var groupMenu: some View {
-        Menu {
-            Picker("收藏分组", selection: $category) {
-                Text("全部分组").tag("all")
-                ForEach(0...9, id: \.self) { index in
-                    Text(categoryName(index)).tag(String(index))
+        AppMenu {
+            AppMenuItem(title: "全部分组", isSelected: category == "all") { category = "all" }
+            ForEach(0...9, id: \.self) { index in
+                AppMenuItem(title: categoryName(index), isSelected: category == String(index)) {
+                    category = String(index)
                 }
             }
         } label: {
@@ -813,47 +1040,21 @@ struct CloudFavoritesView: View {
     }
 
     private var favoriteSortMenu: some View {
-        Button { showingSort.toggle() } label: {
+        AppMenu {
+            ForEach(SiteFavoriteOrder.allCases) { order in
+                AppMenuItem(title: order.title, isSelected: order == sortOrder) {
+                    sortPreferences.set(order, for: site)
+                    reload(force: false)
+                }
+                .accessibilityIdentifier("favorites.sort.\(order.rawValue)")
+            }
+        } label: {
             LibrarySortControlLabel(title: sortOrder == .siteDefault ? "排序" : sortOrder.title)
         }
         .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
         .accessibilityLabel("站点收藏排序").accessibilityValue(sortOrder.title)
         .accessibilityIdentifier("favorites.sort")
         .disabled(working)
-        .anchorPreference(key: FavoriteSortAnchor.self, value: .bounds) { $0 }
-    }
-    private var favoriteSortOptions: some View {
-        VStack(spacing: 0) {
-            ForEach(SiteFavoriteOrder.allCases) { order in
-                let selected = order == sortOrder
-                Button {
-                    showingSort = false
-                    sortPreferences.set(order, for: site)
-                    reload(force: false)
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(order.title).lineLimit(1)
-                        Spacer(minLength: 0)
-                        if selected { Image(systemName: "checkmark").accessibilityHidden(true) }
-                    }
-                    .font(FeedChrome.labelFont)
-                    .foregroundStyle(selected ? Color.accentColor : .primary)
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: 44)
-                    .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: AppShape.control)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(selected ? .isSelected : [])
-                .accessibilityIdentifier("favorites.sort.\(order.rawValue)")
-            }
-        }
-        .padding(AppShape.panelInset)
-        .background(FloatingChrome.headerBackground, in: AppShape.panel)
-        .overlay(AppShape.panel.strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5).allowsHitTesting(false))
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("站点收藏排序选项")
-        .accessibilityAction(.escape) { showingSort = false }
     }
     private func filteredItems() -> [Gallery] {
         LibrarySelectionPolicy.filtered(displayedItems, blocked: library.blockedIDs).visible
@@ -882,8 +1083,13 @@ struct CloudFavoritesView: View {
         SelectionPerformanceProbe.markStateSet(id: gallery.id, count: selectionStore.selectedIDs.count)
         selecting = true
     }
+    private func endSelection() {
+        guard selecting, !working else { return }
+        selecting = false; selectionStore.clear()
+        if pager.interrupted { pager.retry(session: session) }
+    }
     private func accountChanged() {
-        showingSort = false; submission.cancel(); submission.dismissNotice(); selectionStore.clear(); selecting = false
+        submission.cancel(); submission.dismissNotice(); selectionStore.clear(); selecting = false
         reload(force: false)
     }
     private func beginMove() {
@@ -895,7 +1101,7 @@ struct CloudFavoritesView: View {
         guard !working, isActive, selecting, move.owner == session.owner, move.generation == session.generation,
               move.category == category, move.references.allSatisfy({ $0.site == site }),
               Set(move.references) == Set(selectedGalleries.map(\.ref)) else {
-            throw ViewerError.invalidQuery("所选收藏已变化，请返回后重新选择。")
+            throw ViewerError.invalidQuery("所选收藏已变化 请重新选择")
         }
         perform(.move(group), references: move.references)
     }

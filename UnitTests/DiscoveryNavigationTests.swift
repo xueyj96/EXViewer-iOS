@@ -4,6 +4,73 @@ import ExViewerCore
 
 @MainActor
 final class DiscoveryNavigationTests: XCTestCase {
+    func testListGalleryOpeningKeepsOneDetailAndAcceptsNextOnlyAfterReturning() {
+        let routes = GalleryNavigation()
+        let galleries = QASamples.galleries
+        routes.open(galleries[0], animated: false)
+        routes.open(galleries[1], animated: false)
+        routes.open(galleries[2], animated: false)
+        XCTAssertEqual(routes.path.count, 1, "A list cannot stack hidden details while its first destination is already open")
+        routes.returnToList()
+        XCTAssertTrue(routes.path.isEmpty)
+        routes.open(galleries[1], animated: false)
+        XCTAssertEqual(routes.path.count, 1)
+        routes.path.removeLast()
+        routes.open(galleries[2], animated: false)
+        XCTAssertEqual(routes.path.count, 1)
+    }
+
+    func testPreparingSectionDoesNotNavigateOrStartAndCommitReusesItsExactOwner() async throws {
+        let session = SiteSession(qa: true), navigation = DiscoveryNavigation()
+        try navigation.startCurrent(session: session, qa: true)
+        let source = navigation.current
+        let incoming = try navigation.preparedEntry(query: SearchQuery(), site: .ex, lane: 1)
+        XCTAssertTrue(navigation.current === source)
+        XCTAssertTrue(navigation.history.isEmpty)
+        XCTAssertFalse(incoming.didStart)
+        await incoming.pager.prepareCached(url: incoming.requestURL, session: session, qa: true)
+        let ids = incoming.pager.items.map(\.id)
+        incoming.scrollAnchor = ids.first
+        XCTAssertFalse(ids.isEmpty)
+        XCTAssertFalse(incoming.pager.loading)
+        XCTAssertFalse(incoming.didStart, "Cache preparation is not query execution")
+        XCTAssertTrue(navigation.current === source, "A cancelled gesture can discard the prepared owner without navigating")
+        try navigation.submit(query: incoming.query, site: incoming.site, lane: incoming.lane, savedID: nil,
+                              session: session, qa: true, prepared: incoming)
+        XCTAssertTrue(navigation.current === incoming)
+        XCTAssertTrue(incoming.didStart)
+        XCTAssertEqual(incoming.pager.items.map(\.id), ids)
+        XCTAssertEqual(incoming.scrollAnchor, ids.first)
+        XCTAssertEqual(navigation.history.count, 1)
+        XCTAssertTrue(navigation.back())
+        XCTAssertTrue(navigation.current === source)
+    }
+
+    func testPreparedMetadataOnlyChangeKeepsTheIncomingEntryAndSharedFeed() throws {
+        let session = SiteSession(qa: true), navigation = DiscoveryNavigation()
+        try navigation.submit(query: SearchQuery(), site: .ex, lane: 0, savedID: UUID(), session: session, qa: true)
+        let original = navigation.current
+        original.scrollAnchor = original.pager.items.first?.id
+        let prepared = try navigation.preparedEntry(query: SearchQuery(), site: .ex, lane: 0)
+        XCTAssertTrue(prepared.pager === original.pager)
+        XCTAssertEqual(prepared.scrollAnchor, original.scrollAnchor)
+        try navigation.submit(query: SearchQuery(), site: .ex, lane: 0, savedID: nil,
+                              session: session, qa: true, prepared: prepared)
+        XCTAssertTrue(navigation.current === prepared)
+        XCTAssertTrue(navigation.current.pager === original.pager)
+    }
+
+    func testWrongPreparedOwnerIsRejectedBeforeChangingTheTrail() throws {
+        let session = SiteSession(qa: true), navigation = DiscoveryNavigation()
+        let source = navigation.current
+        let incoming = try navigation.preparedEntry(query: SearchQuery(), site: .ex, lane: 1)
+        XCTAssertThrowsError(try navigation.submit(query: SearchQuery(), site: .ex, lane: 0, savedID: nil,
+                                                   session: session, qa: true, prepared: incoming))
+        XCTAssertTrue(navigation.current === source)
+        XCTAssertTrue(navigation.history.isEmpty)
+        XCTAssertFalse(source.didStart)
+    }
+
     func testUnstartedVisitorEntryCanStartWhenRestoredFromHistory() throws {
         let session = SiteSession(qa: true), navigation = DiscoveryNavigation()
         let initial = navigation.current
@@ -17,6 +84,44 @@ final class DiscoveryNavigationTests: XCTestCase {
         XCTAssertFalse(initial.pager.items.isEmpty)
         XCTAssertTrue(navigation.forward())
         XCTAssertEqual(navigation.current.query.text, "visitor search")
+    }
+
+    func testGalleryStacksKeepIndependentPathsWhenReturningToSearch() {
+        let discovery = GalleryNavigation(), library = GalleryNavigation()
+        discovery.open(QASamples.galleries[0], animated: false)
+        library.open(QASamples.galleries[1], animated: false)
+        XCTAssertEqual(discovery.path.count, 1); XCTAssertEqual(library.path.count, 1)
+        discovery.returnToList()
+        XCTAssertEqual(discovery.path.count, 0); XCTAssertEqual(library.path.count, 1)
+        library.returnToList()
+        XCTAssertEqual(library.path.count, 0)
+    }
+
+    func testPreviousSearchSkipsBrowsingAndKeepsResultsCursorAndPosition() async throws {
+        let session = SiteSession(qa: true), navigation = DiscoveryNavigation()
+        try navigation.startCurrent(session: session, qa: true)
+        XCTAssertFalse(navigation.canGoBackToSearch)
+        XCTAssertFalse(navigation.backToPreviousSearch())
+        var query = SearchQuery(); query.text = "first-search"
+        try navigation.submit(query: query, site: .ex, lane: 0, savedID: nil, session: session, qa: true)
+        let first = navigation.current
+        try await Task.sleep(nanoseconds: 220_000_000)
+        first.scrollAnchor = "kept-anchor"
+        let items = first.pager.items, cursor = first.pager.next
+        try navigation.submit(query: SearchQuery(), site: .ex, lane: 1, savedID: nil, session: session, qa: true)
+        let popular = navigation.current
+        query.text = "second-search"
+        try navigation.submit(query: query, site: .ex, lane: 0, savedID: nil, session: session, qa: true)
+        let second = navigation.current
+        XCTAssertTrue(navigation.canGoBackToSearch)
+        XCTAssertTrue(navigation.backToPreviousSearch())
+        XCTAssertTrue(navigation.current === first)
+        XCTAssertEqual(first.scrollAnchor, "kept-anchor")
+        XCTAssertEqual(first.pager.items, items)
+        XCTAssertEqual(first.pager.next, cursor)
+        XCTAssertFalse(navigation.canGoBackToSearch)
+        XCTAssertTrue(navigation.forward()); XCTAssertTrue(navigation.current === popular)
+        XCTAssertTrue(navigation.forward()); XCTAssertTrue(navigation.current === second)
     }
 
     func testBackAndForwardKeepEntryObjectsLoadedPagesAndAnchors() async throws {

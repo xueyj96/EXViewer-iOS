@@ -20,6 +20,7 @@ final class ReaderNetworkMetrics: @unchecked Sendable {
         let outcome: String
         let bytes: Int?
         let page: Int?
+        let priority: String?
     }
     private struct Snapshot: Codable {
         let session: UUID
@@ -33,12 +34,13 @@ final class ReaderNetworkMetrics: @unchecked Sendable {
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1; return queue
     }()
     static func record(_ request: UUID, phase: String, started: TimeInterval? = nil,
-                       outcome: String = "ok", bytes: Int? = nil, page: Int? = nil, sharedRequest: UUID? = nil) {
+                       outcome: String = "ok", bytes: Int? = nil, page: Int? = nil, sharedRequest: UUID? = nil, priority: MediaRequestPriority? = nil) {
         guard enabled else { return }
         let now = ProcessInfo.processInfo.systemUptime
         shared.append(Event(request: request, sharedRequest: sharedRequest, phase: phase, uptime: now,
                             milliseconds: started.map { max(0, now - $0) * 1000 } ?? 0,
-                            outcome: outcome, bytes: bytes, page: page))
+                            outcome: outcome, bytes: bytes, page: page,
+                            priority: priority.map { String(describing: $0) }))
     }
     private func append(_ event: Event) {
         lock.lock(); events.append(event)

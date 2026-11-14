@@ -8,6 +8,7 @@ final class CachedDownloadV55Tests: XCTestCase {
     @MainActor private final class BackgroundGrant: DownloadBackgroundWork {
         var canContinue = false
         var begins = 0, requests = 0, finishes = 0
+        var endings: [DownloadBackgroundCompletion] = []
         var expiration: (@MainActor () -> Void)?
         var shortExpiration: (@MainActor () -> Void)?
         var progress: [Int] = []
@@ -17,7 +18,7 @@ final class CachedDownloadV55Tests: XCTestCase {
         }
         func requestContinuation(stopped: @escaping @MainActor () -> Void) { requests += 1; expiration = stopped }
         func report(completed: Int, total: Int?) { progress.append(completed) }
-        func finish(success: Bool) { finishes += 1; canContinue = false }
+        func finish(_ completion: DownloadBackgroundCompletion) { finishes += 1; endings.append(completion); canContinue = false }
         func expire() { canContinue = false; expiration?() }
     }
 
@@ -52,6 +53,70 @@ final class CachedDownloadV55Tests: XCTestCase {
         }
     }
 
+    @MainActor func testBackgroundEndingsDistinguishGracefulPauseFromFailureWithoutFakingProgress() {
+        for completion in [DownloadBackgroundCompletion.paused, .waiting, .foregroundOnly] {
+            let end = DownloadBackgroundEnd(completion: completion, completed: 3, total: 10)
+            XCTAssertTrue(completion.systemSuccess)
+            XCTAssertTrue(end.subtitle.contains("3/10"))
+            XCTAssertNotEqual(completion.title, DownloadBackgroundCompletion.completed.title)
+        }
+        XCTAssertFalse(DownloadBackgroundCompletion.failed.systemSuccess)
+        XCTAssertEqual(DownloadBackgroundCompletion.failed.title, "下载失败")
+    }
+
+    @MainActor func testLateContinuationPreservesItsOriginalEndingAndDoesNotChangeTheNewRequest() throws {
+        for completion in [DownloadBackgroundCompletion.paused, .waiting, .failed, .completed] {
+            let old = DownloadBackgroundRequestState(identifier: "old")
+            old.finish(completion, completed: 3, total: 10)
+            let next = DownloadBackgroundRequestState(identifier: "next")
+            old.finish(.failed, completed: 0, total: nil)
+            let end = try XCTUnwrap(old.end)
+            XCTAssertEqual(end, .init(completion: completion, completed: 3, total: 10))
+            XCTAssertEqual(end.completion.systemSuccess, completion != .failed)
+            XCTAssertNil(next.end)
+        }
+    }
+
+    @MainActor func testManualPauseKeepsSavedPagesAndNeverReportsSystemFailureOrAutoResumes() async throws {
+        OfflineTraffic.reset(delay: 200)
+        let rig = BackgroundRig(enabled: true); defer { rig.clean() }
+        let gallery = Gallery(ref: .init(site: .eh, gid: 158, token: "fixture"), title: "Partial", pages: OfflineTraffic.pageCount)
+        XCTAssertTrue(rig.manager.enqueue(gallery))
+        try await rig.wait { (rig.library.download(for: gallery.ref)?.completed.count ?? 0) > 0 }
+        rig.manager.pause(gallery.id)
+        let saved = try XCTUnwrap(rig.library.download(for: gallery.ref))
+        XCTAssertEqual(saved.status, .paused); XCTAssertNil(saved.error)
+        XCTAssertFalse(saved.completed.isEmpty); XCTAssertLessThan(saved.completed.count, OfflineTraffic.pageCount)
+        XCTAssertEqual(rig.grant.endings.last, .paused)
+        rig.manager.resumeQueuedDownloads()
+        XCTAssertNil(rig.manager.running)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let restored = LibraryStore(qa: true, storageRoot: rig.root)
+        XCTAssertEqual(restored.download(for: gallery.ref)?.status, .paused)
+        XCTAssertEqual(restored.download(for: gallery.ref)?.completed, saved.completed)
+        XCTAssertNil(restored.download(for: gallery.ref)?.error)
+    }
+
+    @MainActor func testPausingAWaitingJobClearsItsOldErrorAndFailurePresentation() throws {
+        let rig = BackgroundRig(enabled: true); defer { rig.clean() }
+        rig.library.updateDownload(.init(gallery: rig.first, status: .waiting, total: 1, error: "旧的网络错误"))
+        rig.manager.pause(rig.first.id)
+        let saved = try XCTUnwrap(rig.library.download(for: rig.first.ref))
+        XCTAssertEqual(saved.status, .paused); XCTAssertNil(saved.error)
+        XCTAssertFalse(saved.requiresRetry)
+    }
+
+    @MainActor func testPauseCheckpointStorageFailureStillReportsARealFailure() throws {
+        let rig = BackgroundRig(enabled: true); defer { rig.clean() }
+        XCTAssertTrue(rig.manager.enqueue(rig.first))
+        let index = rig.library.directory.appendingPathComponent("library.json")
+        try FileManager.default.removeItem(at: index)
+        try FileManager.default.createDirectory(at: index, withIntermediateDirectories: true)
+        rig.manager.pause(rig.first.id)
+        XCTAssertNotNil(rig.library.error)
+        XCTAssertEqual(rig.grant.endings.last, .failed)
+    }
+
     @MainActor func testBackgroundQueueContinuesIntoNextGalleryAndReportsMonotonicProgress() async throws {
         OfflineTraffic.reset(delay: 100)
         let rig = BackgroundRig(enabled: true); defer { rig.clean() }
@@ -62,6 +127,7 @@ final class CachedDownloadV55Tests: XCTestCase {
         XCTAssertEqual(rig.library.download(for: rig.second.ref)?.status, .complete)
         XCTAssertEqual(rig.grant.begins, 1, "A queue should retain its grant between galleries")
         XCTAssertEqual(rig.grant.finishes, 1)
+        XCTAssertEqual(rig.grant.endings, [.completed])
         XCTAssertEqual(rig.grant.progress, rig.grant.progress.sorted())
         XCTAssertEqual(rig.grant.progress.last, 2)
     }
@@ -89,6 +155,7 @@ final class CachedDownloadV55Tests: XCTestCase {
         let oldExpiry = rig.grant.expiration
         rig.defaults.set(false, forKey: DownloadLoadPolicy.backgroundKey)
         rig.manager.updateBackgroundDownloadPreference()
+        XCTAssertEqual(rig.grant.endings.last, .foregroundOnly)
         XCTAssertEqual(rig.manager.running, rig.first.id)
         rig.manager.suspendForBackground()
         XCTAssertNil(rig.manager.running)
@@ -104,6 +171,7 @@ final class CachedDownloadV55Tests: XCTestCase {
         OfflineTraffic.reset(delay: 200)
         let rig = BackgroundRig(enabled: true); defer { rig.clean() }
         XCTAssertTrue(rig.manager.enqueue(rig.first)); rig.manager.suspendForBackground(); rig.grant.expire()
+        XCTAssertEqual(rig.grant.endings, [.waiting])
         XCTAssertNil(rig.manager.running)
         XCTAssertEqual(rig.library.download(for: rig.first.ref)?.status, .waiting)
         rig.manager.resumeQueuedDownloads()
@@ -119,6 +187,7 @@ final class CachedDownloadV55Tests: XCTestCase {
         let rig = BackgroundRig(enabled: true); defer { rig.clean() }
         XCTAssertTrue(rig.manager.enqueue(rig.first)); XCTAssertTrue(rig.manager.enqueue(rig.second))
         rig.grant.expire()
+        XCTAssertEqual(rig.grant.endings, [.waiting], "A system stop ends the grant once without reporting failure")
         XCTAssertNil(rig.manager.running)
         let requests = rig.grant.requests
         rig.manager.resumeQueuedDownloads()
@@ -454,7 +523,8 @@ final class CachedDownloadV55Tests: XCTestCase {
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
             defaults.set(1, forKey: DownloadLoadPolicy.concurrencyKey)
-            let manager = DownloadManager(session: session, library: library, repository: repository, preferences: defaults)
+            let grant = BackgroundGrant()
+            let manager = DownloadManager(session: session, library: library, repository: repository, preferences: defaults, backgroundWork: grant)
             defer { manager.pauseAll() }
             let first = Gallery(ref: .init(site: .eh, gid: 158, token: "fixture"), title: "First", pages: OfflineTraffic.pageCount)
             let next = Gallery(ref: .init(site: .eh, gid: 159, token: "fixture"), title: "Next", pages: 1)
@@ -465,6 +535,7 @@ final class CachedDownloadV55Tests: XCTestCase {
                 try await Task.sleep(nanoseconds: 25_000_000)
             }
             XCTAssertNil(manager.running)
+            XCTAssertEqual(grant.endings.last, .failed, "An earlier failed gallery must not become a completed queue after a later success")
             XCTAssertEqual(library.download(for: first.ref)?.status, .failed)
             XCTAssertEqual(library.download(for: next.ref)?.status, status == 404 ? .complete : .waiting)
             XCTAssertEqual(OfflineTraffic.imageRequests().contains("/159/1.png"), status == 404)

@@ -52,7 +52,7 @@ final class LibrarySortingV28UITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["reading-history.summary"].firstMatch.exists)
         period.tap()
         app.buttons["reading-history.period.today"].tap()
-        XCTAssertTrue(app.staticTexts["这段时间暂无阅读记录"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["无作品"].waitForExistence(timeout: 5))
         period.tap()
         app.buttons["reading-history.period.all"].tap()
         XCTAssertTrue(app.buttons["reading-history.item.7203"].waitForExistence(timeout: 5))
@@ -121,7 +121,7 @@ final class LibrarySortingV28UITests: XCTestCase {
         }
         choose(empty, section: "bookmarks", title: "标题")
         openHistory(empty)
-        XCTAssertTrue(empty.staticTexts["暂无阅读记录"].waitForExistence(timeout: 5))
+        XCTAssertTrue(empty.staticTexts["无作品"].waitForExistence(timeout: 5))
         choose(empty, section: "history", title: "标题")
         empty.terminate()
         let large = openLibrary(extra: ["--qa-dark", "--qa-large-type"])

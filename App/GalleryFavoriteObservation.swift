@@ -121,6 +121,14 @@ struct GalleryFavoritePreparation {
         : GalleryFavoriteClient.live(reference: gallery.ref, session: session)
 }
 
+func favoriteToggleTitle(_ state: GalleryFavoriteState) -> String {
+    switch state {
+    case .unknown: "站点收藏"
+    case .notFavorited: "添加收藏"
+    case .favorited: "取消收藏"
+    }
+}
+
 func favoriteStateDescription(_ state: GalleryFavoriteState) -> String {
     switch state {
     case .unknown: return "收藏状态尚未读取"

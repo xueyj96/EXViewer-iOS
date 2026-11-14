@@ -65,7 +65,7 @@ public struct SearchQuery: Codable, Equatable, Sendable {
     private func quote(_ text: String) throws -> String {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.contains("\""), !text.contains("\\"), !text.contains(where: { $0.isNewline || $0.asciiValue.map { $0 < 32 } == true }) else {
-            throw ViewerError.invalidQuery("条件中不能包含引号、反斜线或控制字符。")
+            throw ViewerError.invalidQuery("条件不能包含引号 反斜线或控制字符")
         }
         return "\"" + text + "\""
     }
@@ -86,22 +86,22 @@ public struct SearchQuery: Codable, Equatable, Sendable {
         if !artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { append("artist:" + (try quote(artist.lowercased())) + "$") }
         if !uploader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { append("uploader:" + (try quote(uploader)), counted: false) }
         for rule in rules {
-            guard !rule.tag.name.isEmpty, rule.tag.namespace.allSatisfy({ $0.isASCII && $0.isLetter }) else { throw ViewerError.invalidQuery("请使用 namespace:tag 格式的有效标签。") }
+            guard !rule.tag.name.isEmpty, rule.tag.namespace.allSatisfy({ $0.isASCII && $0.isLetter }) else { throw ViewerError.invalidQuery("标签格式应为 namespace:tag") }
             let prefix = rule.match == .exclude ? "-" : rule.match == .any ? "~" : ""
             append(prefix + rule.tag.namespace.lowercased() + ":" + (try quote(rule.tag.name.lowercased())) + "$", excluded: rule.match == .exclude)
         }
-        guard includes <= 5 else { throw ViewerError.invalidQuery("包含条件共 \(includes) 个，超过站点上限 5 个；作者、关键词与标签合计计算，请在筛选中删减。") }
-        guard excludes <= 10 else { throw ViewerError.invalidQuery("排除条件共 \(excludes) 个，超过站点上限 10 个，请在筛选中删减。") }
+        guard includes <= 5 else { throw ViewerError.invalidQuery("包含条件合计 \(includes) 个 最多 5 个") }
+        guard excludes <= 10 else { throw ViewerError.invalidQuery("排除条件合计 \(excludes) 个 最多 10 个") }
         let expression = terms.joined(separator: " ")
-        guard expression.count <= 200 else { throw ViewerError.invalidQuery("搜索条件超过站点 200 字符限制，请减少条件。") }
+        guard expression.count <= 200 else { throw ViewerError.invalidQuery("搜索条件最多 200 字符 请删减") }
         return expression
     }
     public func url(site: GallerySite, favorites: Bool = false) throws -> URL {
-        if let minPages, minPages < 0 { throw ViewerError.invalidQuery("最小页数不能小于 0。") }
-        if let maxPages, maxPages < 0 { throw ViewerError.invalidQuery("最大页数不能小于 0。") }
-        if let minPages, let maxPages, minPages > maxPages { throw ViewerError.invalidQuery("最小页数不能大于最大页数。") }
-        if let minRating, !(2...5).contains(minRating) { throw ViewerError.invalidQuery("最低评分应为 2 至 5 星。") }
-        guard excludedCategories.isSubset(of: Set(GalleryCategory.all.map(\.id))), excludedCategories.count < 10 else { throw ViewerError.invalidQuery("请至少选择一个画廊分类。") }
+        if let minPages, minPages < 0 { throw ViewerError.invalidQuery("最小页数不能小于 0") }
+        if let maxPages, maxPages < 0 { throw ViewerError.invalidQuery("最大页数不能小于 0") }
+        if let minPages, let maxPages, minPages > maxPages { throw ViewerError.invalidQuery("最小页数不能大于最大页数") }
+        if let minRating, !(2...5).contains(minRating) { throw ViewerError.invalidQuery("最低评分应为 2 至 5 星") }
+        guard excludedCategories.isSubset(of: Set(GalleryCategory.all.map(\.id))), excludedCategories.count < 10 else { throw ViewerError.invalidQuery("请至少选择一个画廊分类") }
         var components = URLComponents(url: site.baseURL.appendingPathComponent(favorites ? "favorites.php" : ""), resolvingAgainstBaseURL: false)!
         var items = [URLQueryItem(name: "f_search", value: try expression()), URLQueryItem(name: "inline_set", value: "dm_e")]
         if favorites { items.append(.init(name: "favcat", value: "all")) }
@@ -119,9 +119,9 @@ public struct SearchQuery: Codable, Equatable, Sendable {
     public var count: Int { (text.isEmpty ? 0 : 1) + (artist.isEmpty ? 0 : 1) + (uploader.isEmpty ? 0 : 1) + rules.count + (excludedCategories.isEmpty ? 0 : 1) + (minRating == nil ? 0 : 1) + (minPages == nil && maxPages == nil ? 0 : 1) + (requireTorrent ? 1 : 0) }
     public var hasSettings: Bool { count > 0 }
     public var pageRangeWarning: String? {
-        if let minPages, minPages > 1000 { return "站点可能拒绝过窄或超过 1000 页的范围。" }
-        if let maxPages, maxPages < 10 { return "站点可能拒绝最大页数小于 10 的范围。" }
-        if let minPages, let maxPages, maxPages - minPages < 20 || Double(minPages) > Double(maxPages) * 0.8 { return "站点可能拒绝过窄的页数范围。" }
+        if let minPages, minPages > 1000 { return "超过 1000 页的范围可能被站点拒绝" }
+        if let maxPages, maxPages < 10 { return "最大页数小于 10 可能被站点拒绝" }
+        if let minPages, let maxPages, maxPages - minPages < 20 || Double(minPages) > Double(maxPages) * 0.8 { return "页数范围过窄 可能被站点拒绝" }
         return nil
     }
 }

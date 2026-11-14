@@ -44,7 +44,8 @@ final class ReaderImmersionV34UITests: XCTestCase {
     }
 
     private func detailsAndReturn(_ app: XCUIApplication) {
-        coordinate(app).doubleTap()
+        if !app.buttons["reader.details.open"].exists { coordinate(app).tap() }
+        app.buttons["reader.details.open"].tap()
         XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["detail.site-favorite"].exists)
         let read = app.buttons["返回阅读"]
@@ -76,7 +77,7 @@ final class ReaderImmersionV34UITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["画廊详情"].waitForExistence(timeout: 5))
     }
 
-    func testLoadedImageDoubleTapDetailsAndLongPressImmersionPreservePageAndZoom() {
+    func testLoadedImageDetailsAndImmersionPreservePageWithoutDoubleTapZoom() {
         let app = openReader()
         let image = app.otherElements.matching(identifier: "media.static").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 6))
@@ -102,16 +103,13 @@ final class ReaderImmersionV34UITests: XCTestCase {
         chrome(true, in: app)
         page(1, in: app)
 
-        coordinate(app, x: 0.18, y: 0.38).doubleTap()
-        expectation(for: NSPredicate { _, _ in (image.value as? String ?? "").contains("zoomed") }, evaluatedWith: image)
-        waitForExpectations(timeout: 5)
+        // The reader uses immediate single taps; a double tap must not invoke
+        // the standalone image preview's zoom recognizer.
+        coordinate(app).doubleTap()
+        XCTAssertTrue((image.value as? String ?? "").contains("fit"))
         page(1, in: app)
         XCTAssertFalse(app.descendants(matching: .any)["reader.details"].firstMatch.exists)
-        coordinate(app, x: 0.82, y: 0.38).tap()
-        page(1, in: app)
-        coordinate(app, x: 0.18, y: 0.38).doubleTap()
-        expectation(for: NSPredicate { _, _ in (image.value as? String ?? "").contains("fit") }, evaluatedWith: image)
-        waitForExpectations(timeout: 5)
+        if !app.buttons["reader.settings"].exists { coordinate(app).tap() }
         app.buttons["reader.settings"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["reader.settings-page.header"].firstMatch.waitForExistence(timeout: 4))
         app.buttons["完成"].tap()
@@ -125,20 +123,20 @@ final class ReaderImmersionV34UITests: XCTestCase {
         coordinate(app, x: 0.82, y: 0.64).tap()
         let retry = app.buttons["reader.page.retry.3"]
         XCTAssertTrue(retry.waitForExistence(timeout: 4))
-        page(2, in: app)
+        page(3, in: app)
         retry.tap()
-        page(2, in: app)
+        page(3, in: app)
         chrome(true, in: app)
         XCTAssertFalse(app.descendants(matching: .any)["reader.details"].firstMatch.exists)
         detailsAndReturn(app)
-        page(2, in: app)
-        XCTAssertFalse(retry.exists)
+        page(3, in: app)
+        XCTAssertTrue(retry.exists)
         coordinate(app, y: 0.45).press(forDuration: 0.7)
         chrome(false, in: app)
-        page(2, in: app)
+        page(3, in: app)
         capture(app, "reader34.loading-immersive")
         coordinate(app, x: 0.18, y: 0.64).tap()
-        page(1, in: app)
+        page(2, in: app)
         XCTAssertFalse(app.buttons["reader.next"].exists)
     }
 
@@ -175,6 +173,18 @@ final class ReaderImmersionV34UITests: XCTestCase {
         ReaderSettingsUIHelpers.setDirection("leftToRight", in: app)
         page(2, in: app)
 
+        let canvas = app.descendants(matching: .any).matching(identifier: "reader.page.frame")
+            .matching(NSPredicate(format: "value == %@", "page 2")).firstMatch
+        XCTAssertTrue(canvas.waitForExistence(timeout: 5))
+        let original = canvas.frame
+        for left in [true, false] {
+            let start = coordinate(app, x: left ? 0.008 : 0.992)
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(.init(dx: left ? 30 : -30, dy: 0)),
+                        withVelocity: .slow, thenHoldForDuration: 0.2)
+            page(2, in: app)
+            XCTAssertEqual(canvas.frame.minX, original.minX, accuracy: 2)
+            XCTAssertEqual(canvas.frame.minY, original.minY, accuracy: 2)
+        }
         coordinate(app, x: 0.008).press(forDuration: 0.05, thenDragTo: coordinate(app, x: 0.88),
                                         withVelocity: .fast, thenHoldForDuration: 0.05)
         XCTAssertTrue(read.waitForExistence(timeout: 5))

@@ -64,11 +64,11 @@ public struct FavoriteSettingsForm: Sendable {
     }
 
     public func requestRenaming(group: Int, to name: String) throws -> GalleryFavoriteRequest {
-        guard (0...9).contains(group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组。") }
+        guard (0...9).contains(group) else { throw ViewerError.invalidQuery("请选择有效的收藏分组") }
         let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, value.count <= nameLimits[group],
               !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
-            throw ViewerError.invalidQuery("分组名称需为 1 至 \(nameLimits[group]) 个字符。")
+            throw ViewerError.invalidQuery("分组名称需为 1 至 \(nameLimits[group]) 个字符")
         }
         let safe = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._*")
         func encode(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: safe)!.replacingOccurrences(of: "%20", with: "+") }

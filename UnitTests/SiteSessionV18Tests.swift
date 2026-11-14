@@ -106,7 +106,7 @@ import ExViewerCore
 
         func report(completed: Int, total: Int?) {}
 
-        func finish(success: Bool) {
+        func finish(_ completion: DownloadBackgroundCompletion) {
             shortExpiration = nil
             continuedExpiration = nil
         }
@@ -327,6 +327,22 @@ import ExViewerCore
         _ = try await session.html(url("/settings-fixture"))
         XCTAssertNotEqual(session.pageReadScope, saved)
         XCTAssertEqual(session.pageReadScope.generation, saved.generation)
+    }
+
+    func testReadOnlyMetadataRecoversLostConnectionOnceAndKeepsItsBudget() async throws {
+        let json = #"{"gmetadata":[{"gid":55,"rating":"4.31","tags":["language:english"]}]}"#
+        PageProtocol.reset { _, count in count == 1 ? .lost : .response(200, json, [:]) }
+        let client = session()
+        let gallery = Gallery(ref: .init(site: .eh, gid: 55, token: "fixture"), title: "Fixture")
+        let result = try await client.galleryMetadata([gallery], priority: .foreground)
+        XCTAssertEqual(PageProtocol.count("/api.php"), 2)
+        XCTAssertEqual(result.first?.tagsComplete, true)
+        PageProtocol.reset { _, _ in .lost }
+        let failing = session()
+        do {
+            _ = try await failing.galleryMetadata([gallery], priority: .foreground)
+            XCTFail("Persistent metadata failure must reach the caller")
+        } catch { XCTAssertEqual(PageProtocol.count("/api.php"), 2) }
     }
 
     func testGalleryMetadataSharesIdenticalBatchesAndPacesTheNextDistinctBatch() async throws {

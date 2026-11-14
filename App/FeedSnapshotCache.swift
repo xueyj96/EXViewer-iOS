@@ -16,16 +16,21 @@ struct FeedSnapshot: Codable, Sendable {
     }
 }
 
-/// Private, bounded first-page snapshots. They are always revalidated on use;
-/// savedAt describes last-known content, never a claim that it is current.
+/// Private, bounded first-page snapshots, always revalidated on use.
+/// Invalidation rejects obsolete writes while preserving a last-known view.
 actor FeedSnapshotCache {
     static let shared = FeedSnapshotCache()
     private let root: URL
-    private let maxEntries = 12
+    // Searching must not evict the user's last-known favorites list.
+    // Both pools remain bounded and share the existing total byte budget.
+    private let maxEntriesPerPool = 12
     private let maxBytes = 20_000_000
     private let maxEntryBytes = 4_000_000
     private var epochs: [String: Int] = [:]
     private var memory: [String: (FeedSnapshot, Int)] = [:]
+    private enum Pool: CaseIterable { case browsing, favorites }
+    private func pool(_ url: URL) -> Pool { url.path == "/favorites.php" ? .favorites : .browsing }
+    private struct Header: Decodable { let root: URL }
 
     init(root: URL? = nil) {
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -77,33 +82,48 @@ actor FeedSnapshotCache {
             memory[id] = (snapshot, data.count); trimMemory()
             let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
                 .filter { $0.pathExtension == "json" }
-                .compactMap { file -> (URL, Int, Date)? in
+                .compactMap { file -> (file: URL, size: Int, date: Date, pool: Pool)? in
                     guard let v = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
-                    return (file, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
-                }.sorted { $0.2 < $1.2 }
-            var count = files.count, bytes = files.reduce(0) { $0 + $1.1 }
-            for (file, size, _) in files where count > maxEntries || bytes > maxBytes {
-                try? FileManager.default.removeItem(at: file); count -= 1; bytes -= size
+                    let size = v.fileSize ?? 0
+                    let header = size <= maxEntryBytes ? (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(Header.self, from: $0) } : nil
+                    return (file, size, v.contentModificationDate ?? .distantPast, header.map { pool($0.root) } ?? .browsing)
+                }.sorted { $0.date < $1.date }
+            var counts = Dictionary(grouping: files, by: \.pool).mapValues(\.count)
+            var bytes = files.reduce(0) { $0 + $1.size }
+            for entry in files where counts[entry.pool, default: 0] > maxEntriesPerPool || bytes > maxBytes {
+                let file = entry.file
+                try? FileManager.default.removeItem(at: file)
+                counts[entry.pool, default: 0] -= 1; bytes -= entry.size
                 memory.removeValue(forKey: file.deletingPathExtension().lastPathComponent)
             }
         } catch { /* Cache failure must never clear visible content or prevent browsing. */ }
     }
-    func invalidateFavorites(owner: String) {
+    func invalidateFavorites(owner: String, site: GallerySite? = nil, discardSnapshots: Bool = false) {
         guard validOwner(owner) else { return }
         epochs[owner, default: 0] += 1
-        memory = memory.filter { !($0.value.0.owner == owner && $0.value.0.root.path == "/favorites.php") }
+        // A normal mutation keeps last-known rows for immediate display. Reads
+        // always revalidate, so no persisted freshness or dirty flag is needed.
+        guard discardSnapshots else { return }
+        func affected(_ snapshot: FeedSnapshot) -> Bool {
+            snapshot.owner == owner && snapshot.root.path == "/favorites.php" && (site == nil || snapshot.root.host == site?.host)
+        }
+        memory = memory.filter { !affected($0.value.0) }
         let directory = root.appendingPathComponent(owner, isDirectory: true)
         for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? [] where file.pathExtension == "json" {
             guard let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= maxEntryBytes,
                   let data = try? Data(contentsOf: file), data.count <= maxEntryBytes,
-                  let value = try? JSONDecoder().decode(FeedSnapshot.self, from: data), value.root.path == "/favorites.php" else { continue }
+                  let value = try? JSONDecoder().decode(FeedSnapshot.self, from: data), affected(value) else { continue }
             try? FileManager.default.removeItem(at: file)
         }
     }
     private func trimMemory() {
+        var counts = Dictionary(grouping: memory.values, by: { pool($0.0.root) }).mapValues(\.count)
+        var bytes = memory.values.reduce(0) { $0 + $1.1 }
         for entry in memory.sorted(by: { $0.value.0.savedAt < $1.value.0.savedAt }) {
-            guard memory.count > maxEntries || memory.values.reduce(0, { $0 + $1.1 }) > maxBytes else { break }
+            let pool = pool(entry.value.0.root)
+            guard counts[pool, default: 0] > maxEntriesPerPool || bytes > maxBytes else { continue }
             memory.removeValue(forKey: entry.key)
+            counts[pool, default: 0] -= 1; bytes -= entry.value.1
         }
     }
 }

@@ -61,13 +61,12 @@ final class ReaderNonblockingV16UITests: XCTestCase {
         app.descendants(matching: .any)["reader.page.loading.\(page)"].firstMatch
     }
 
-    func testSlowAdjacentTapKeepsTheCurrentPageAndManualJumpSupersedesIt() {
+    func testSlowAdjacentTapUsesTargetLoadingPageAndManualJumpSupersedesIt() {
         let app = openReader(["--qa-prefetch=0", "--qa-concurrency=16", "--qa-transfer-ms=6000"])
         app.coordinate(withNormalizedOffset: .init(dx: 0.82, dy: 0.5)).tap()
-        let pending = app.staticTexts["正在加载第 2 页…"]
+        let pending = loadingPlaceholder(2, app: app)
         XCTAssertTrue(pending.waitForExistence(timeout: 3))
-        XCTAssertEqual(app.buttons["reader.page"].label, "1 / 12")
-        XCTAssertTrue((app.otherElements["media.static"].firstMatch.value as? String)?.contains("reader-v11-page-1.png") == true)
+        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 12")
 
         app.sliders["reader.progress"].adjust(toNormalizedSliderPosition: 1)
         waitForPage("12 / 12", app: app, timeout: 3)
@@ -76,14 +75,14 @@ final class ReaderNonblockingV16UITests: XCTestCase {
         XCTAssertEqual(app.buttons["reader.page"].label, "12 / 12")
     }
 
-    func testAdjacentTurnWaitsForMetadataAndImage() {
+    func testAdjacentTurnUsesTargetLoadingPageWhileMetadataAndImageArrive() {
         let app = openReader(["--qa-reader-paging", "--qa-prefetch=0", "--qa-metadata-ms=5500"])
         turnNext(app, to: 2, timeout: 4)
         dragForward(app)
-        XCTAssertTrue(app.staticTexts["正在加载第 3 页…"].waitForExistence(timeout: 3))
-        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 12")
-        waitForPage("3 / 12", app: app, timeout: 12)
-        XCTAssertFalse(loadingPlaceholder(3, app: app).exists)
+        XCTAssertTrue(loadingPlaceholder(3, app: app).waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["reader.page"].label, "3 / 12")
+        waitForLoadedPage(3, app: app)
+        XCTAssertTrue(loadingPlaceholder(3, app: app).waitForNonExistence(timeout: 3))
     }
 
     func testMissingPageMetadataShowsExplicitRetryInsteadOfAutoRetryLoop() {
@@ -93,7 +92,7 @@ final class ReaderNonblockingV16UITests: XCTestCase {
         let retry = app.buttons["reader.page.retry.3"]
         XCTAssertTrue(retry.waitForExistence(timeout: 5))
         XCTAssertTrue(cacheValue(app).contains("metadataCalls=1;"))
-        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 12")
+        XCTAssertEqual(app.buttons["reader.page"].label, "3 / 12")
         retry.tap()
         let diagnostic = app.descendants(matching: .any)["reader.cache.qa"].firstMatch
         expectation(for: NSPredicate { _, _ in
@@ -101,7 +100,7 @@ final class ReaderNonblockingV16UITests: XCTestCase {
         }, evaluatedWith: diagnostic)
         waitForExpectations(timeout: 5)
         XCTAssertTrue(retry.exists)
-        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 12")
+        XCTAssertEqual(app.buttons["reader.page"].label, "3 / 12")
     }
 
     func testCachedNeighborRoundTripKeepsPresentationIdentity() {
@@ -129,7 +128,7 @@ final class ReaderNonblockingV16UITests: XCTestCase {
         XCTAssertEqual(presentation(cacheValue(app)), identity, "A cached neighboring page should retain its decoded presentation across a round trip")
     }
 
-    func testSlowTurnsCanBeCancelledInAllFourDirections() {
+    func testSlowTurnsCanReverseFromLoadingPageInAllFourDirections() {
         let app = openReader(["--qa-prefetch=0", "--qa-transfer-ms=15000"])
         let directions: [(String, CGVector, CGVector)] = [
             ("leftToRight", .init(dx: 0.75, dy: 0.5), .init(dx: 0.25, dy: 0.5)),
@@ -141,12 +140,12 @@ final class ReaderNonblockingV16UITests: XCTestCase {
             ReaderSettingsUIHelpers.setDirection(title, in: app)
             app.coordinate(withNormalizedOffset: start).press(forDuration: 0.03,
                 thenDragTo: app.coordinate(withNormalizedOffset: end), withVelocity: .fast, thenHoldForDuration: 0.02)
-            XCTAssertTrue(app.staticTexts["正在加载第 2 页…"].waitForExistence(timeout: 3))
-            XCTAssertEqual(app.buttons["reader.page"].label, "1 / 12")
+            waitForPage("2 / 12", app: app)
+            XCTAssertFalse(app.staticTexts["正在加载第 2 页…"].exists)
             app.coordinate(withNormalizedOffset: end).press(forDuration: 0.03,
                 thenDragTo: app.coordinate(withNormalizedOffset: start), withVelocity: .fast, thenHoldForDuration: 0.02)
             waitForPage("1 / 12", app: app, timeout: 2)
-            XCTAssertTrue(app.staticTexts["正在加载第 2 页…"].waitForNonExistence(timeout: 2))
+            XCTAssertTrue(loadingPlaceholder(2, app: app).waitForNonExistence(timeout: 2))
         }
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import ExViewerCore
 
-struct ReadingRecord: Codable, Identifiable {
+struct ReadingRecord: Codable, Identifiable, Equatable {
     var gallery: Gallery
     var page: Int
     var date: Date
@@ -55,6 +55,7 @@ private struct RecentSearchFile: Codable {
 }
 
 @MainActor final class LibraryStore: ObservableObject {
+    let historyBrowsing = HistoryBrowseStore()
     struct ReadLaterNotice: Identifiable { let id = UUID(); let text: String }
     @Published private(set) var readLaterNotice: ReadLaterNotice?
     @Published private(set) var snapshot = LibrarySnapshot()
@@ -104,7 +105,7 @@ private struct RecentSearchFile: Codable {
                     } else { try FileManager.default.removeItem(at: item) }
                 }
             }
-        } catch { self.error = "资料库暂时无法读取，原文件已保留。请重试，避免覆盖。" }
+        } catch { self.error = "资料库暂不可读 原文件保留" }
         loadSearchHistory()
         if LibrarySelectionQA.seedsBlockedTags(isQA: ephemeral, arguments: ProcessInfo.processInfo.arguments) {
             var qaSnapshot = snapshot
@@ -131,7 +132,7 @@ private struct RecentSearchFile: Codable {
                 _ = try entry.query.url(site: entry.site)
             }
             recentSearches = file.entries
-        } catch { searchHistoryError = "搜索记录暂时无法读取，原文件已保留；可清空搜索记录后重新记录。" }
+        } catch { searchHistoryError = "搜索记录暂不可读 原文件保留" }
     }
 
     @discardableResult private func saveSearchHistory(_ entries: [RecentSearchRecord], resetting: Bool = false) -> Bool {
@@ -142,7 +143,7 @@ private struct RecentSearchFile: Codable {
             try data.write(to: searchHistoryFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             recentSearches = entries; searchHistoryError = nil
             return true
-        } catch { searchHistoryError = "搜索记录保存失败，原有记录保留；请检查本机空间。"; return false }
+        } catch { searchHistoryError = "搜索记录保存失败 请检查可用空间"; return false }
     }
 
     @discardableResult func recordSearch(query: SearchQuery, site: GallerySite, date: Date = Date()) -> Bool {
@@ -171,9 +172,14 @@ private struct RecentSearchFile: Codable {
             let data = try JSONEncoder().encode(copy)
             guard data.count < 12_000_000 else { throw ViewerError.storage }
             try data.write(to: directory.appendingPathComponent("library.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            if copy.history != snapshot.history || copy.blockedTags != snapshot.blockedTags {
+                // Freeze the saved viewport before publishing a reordered layout;
+                // callbacks from the old rows must not replace its anchor.
+                historyBrowsing.historyWillChange(owner: owner, before: snapshot, after: copy)
+            }
             snapshot = copy
             return true
-        } catch { self.error = "保存失败，当前资料保留。请检查本机空间。"; return false }
+        } catch { self.error = "保存失败 请检查可用空间"; return false }
     }
     @discardableResult func saveSearch(name: String, site: GallerySite, query: SearchQuery, replacing: UUID? = nil, expectedOwner: String? = nil) -> UUID? {
         guard expectedOwner == nil || expectedOwner == owner else { return nil }
@@ -210,7 +216,12 @@ private struct RecentSearchFile: Codable {
         guard !additions.isEmpty else { return true }
         return commit { $0.favoriteTags.append(contentsOf: additions) }
     }
-    func unpin(_ tag: GalleryTag) { commit { $0.favoriteTags.removeAll { $0.id == tag.id } } }
+    func unpin(_ tag: GalleryTag) { unpin([tag]) }
+    @discardableResult func unpin(_ tags: [GalleryTag]) -> Bool {
+        let ids = Set(tags.map(\.id))
+        guard snapshot.favoriteTags.contains(where: { ids.contains($0.id) }) else { return true }
+        return commit { $0.favoriteTags.removeAll { ids.contains($0.id) } }
+    }
     func block(_ tag: GalleryTag) { block([tag]) }
     @discardableResult func block(_ tags: [GalleryTag]) -> Bool {
         var seen = blockedIDs
@@ -237,12 +248,12 @@ private struct RecentSearchFile: Codable {
     }
     @discardableResult func setReadLater(_ gallery: Gallery, included: Bool) -> Bool {
         let saved = included ? addReadLater([gallery]) != nil : commit { $0.readLater.removeAll { $0.id == gallery.id } }
-        readLaterNotice = .init(text: saved ? (included ? "已加入稍后再读" : "已移出稍后再读") : "稍后再读未能保存，请重试")
+        readLaterNotice = .init(text: saved ? (included ? "已加入稍后再读" : "已移出稍后再读") : "稍后再读保存失败 请重试")
         return saved
     }
     @discardableResult func removeReadLater(_ ids: Set<String>) -> Bool {
         let saved = commit { $0.readLater.removeAll { ids.contains($0.id) } }
-        readLaterNotice = .init(text: saved ? "所选作品已移出稍后再读" : "稍后再读未能保存，请重试")
+        readLaterNotice = .init(text: saved ? "所选作品已移出稍后再读" : "稍后再读保存失败 请重试")
         return saved
     }
     func dismissReadLaterNotice(_ id: UUID) { if readLaterNotice?.id == id { readLaterNotice = nil } }
@@ -350,13 +361,13 @@ private struct RecentSearchFile: Codable {
             }) else { throw ViewerError.storage }
         } catch {
             for move in moves.reversed() { try? manager.moveItem(at: move.staged, to: move.original) }
-            self.error = "本机副本未能移除，请重试。"
+            self.error = "本机副本移除失败 请重试"
             return false
         }
         do {
             for move in moves { try manager.removeItem(at: move.staged) }
         } catch {
-            self.error = "下载记录已移除，文件清理将在重试时完成。"
+            self.error = "记录已移除 文件清理待重试"
         }
         return true
     }

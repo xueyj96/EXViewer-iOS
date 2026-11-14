@@ -63,12 +63,21 @@ final class SingleRowDesignV118UITests: XCTestCase {
         }
     }
     func testFavoriteManagementIsOnePageWithoutNotesAndRemovalNeedsOnlyOneAlert() {
-        let app = launch(["--qa-favorite-existing"])
+        let app = launch(["--qa-favorite-existing", "--qa-dark"])
         app.buttons["gallery.open.1"].tap(); app.buttons["detail.site-favorite"].tap()
         let picker = app.buttons["favorite.editor.group-picker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 8))
         XCTAssertFalse(app.buttons["favorite.editor.edit"].exists)
         XCTAssertFalse(app.textFields["favorite.editor.note"].exists)
+        let groupTitle = app.staticTexts["favorite.editor.group-title"]
+        XCTAssertTrue(groupTitle.exists)
+        XCTAssertLessThan(groupTitle.frame.maxX, picker.frame.minX)
+        groupTitle.tap()
+        XCTAssertFalse(app.descendants(matching: .any)["favorite.editor.group.0"].firstMatch.exists,
+                       "The readonly group title must not open the menu")
+        picker.tap()
+        let currentGroup = app.descendants(matching: .any)["favorite.editor.group.2"].firstMatch
+        XCTAssertTrue(currentGroup.waitForExistence(timeout: 5)); currentGroup.tap()
         for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
             rotate(orientation, in: app)
             assertBars(app, header: "favorite.editor.header", back: app.buttons["favorite.editor.cancel"])

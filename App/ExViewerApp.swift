@@ -68,13 +68,22 @@ private enum BrowserPreferenceDefaults {
             library.remember(QASamples.galleries[0], page: 2)
             library.load(owner: session.owner)
         }
+        if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-ui-tail-rows") {
+            for index in 1...12 {
+                let gallery = Gallery(ref: .init(site: .ex, gid: Int64(8000 + index), token: "qaTail"),
+                                      title: "QA Tail \(String(format: "%02d", index))", category: "Non-H", pages: 3)
+                library.bookmark(gallery)
+                library.remember(gallery, page: 2)
+                library.updateDownload(.init(gallery: gallery, status: .paused, total: 3))
+            }
+        }
         if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-offline-layout") {
             QASamples.installOfflineSample(in: library)
         }
         if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-failed-download") {
             let gallery = QASamples.galleries[0]
             library.updateDownload(.init(gallery: gallery, status: .failed, completed: [1: "page-1.media"],
-                                         total: gallery.pages, error: "站点请求过于频繁（429），请稍后重试。"))
+                                         total: gallery.pages, error: "站点请求过快 HTTP 429 请稍后重试"))
         }
         _session = StateObject(wrappedValue: session); _library = StateObject(wrappedValue: library)
         _downloads = StateObject(wrappedValue: DownloadManager(session: session, library: library,
@@ -83,6 +92,7 @@ private enum BrowserPreferenceDefaults {
     var body: some Scene {
         WindowGroup {
             RootView().environmentObject(session).environmentObject(library).environmentObject(downloads).tint(Palette.accent)
+                .appToastHost()
                 .modifier(AppVisualEnvironment())
                 .overlay { SelectionPerformanceProbeInstaller() }
                 .task {
@@ -110,15 +120,20 @@ private enum BrowserPreferenceDefaults {
 struct RootView: View {
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @State private var selection = AppMode.screen == "tags" || AppMode.screen == "account" ? 2 : 0
     @StateObject private var discovery: DiscoveryNavigation
     @AppStorage("browser.site", store: BrowserPreferenceDefaults.store) private var browserSiteRaw = GallerySite.ex.rawValue
-    @State private var discoveryPath = NavigationPath()
+    @StateObject private var discoveryRoutes = GalleryNavigation()
     @State private var showsDiscoveryHistory = false
-    @State private var libraryPath = NavigationPath()
+    @StateObject private var libraryRoutes = GalleryNavigation()
     @State private var accountPath = NavigationPath()
+    @State private var detailSearch: DetailSearchRequest?
+    @State private var detailSearchSourceTab: Int?
+    @State private var detailSearchRequests = 0
+    @State private var detailSearchSourceDepth = 0
 
     init() {
         let storedSite = BrowserPreferenceDefaults.store.string(forKey: "browser.site")
@@ -142,23 +157,25 @@ struct RootView: View {
     var body: some View {
         CompactMainTabs(selection: $selection) {
             TabView(selection: $selection) {
-                NavigationStack(path: $discoveryPath) {
+                NavigationStack(path: $discoveryRoutes.path) {
                     DiscoverView(navigation: discovery, showsReadingHistory: $showsDiscoveryHistory, onSiteChange: { browserSite = $0 })
                         .navigationDestination(for: Gallery.self) { gallery in
-                            let origin: DetailTagSearchDraft.Origin = showsDiscoveryHistory || discoveryPath.count > 1 ? .discoverSearch : .currentSearch
-                            GalleryDetailView(gallery: gallery, searchTarget: searchTarget(origin))
+                            let origin: DetailTagSearchDraft.Origin = showsDiscoveryHistory || discoveryRoutes.path.count > 1 ? .discoverSearch : .currentSearch
+                            GalleryDetailView(gallery: gallery, searchTarget: searchTarget(origin), externallyCovered: detailSearch != nil)
                         }
                 }
                 .toolbar(.hidden, for: .tabBar)
+                .environment(\.galleryNavigation, discoveryRoutes)
                 .suppressPinnedChromePreferences(selection != 0)
                 .tabItem { Label("发现", systemImage: "square.grid.2x2") }.tag(0)
-                NavigationStack(path: $libraryPath) {
+                NavigationStack(path: $libraryRoutes.path) {
                     LibraryView(site: browserSiteBinding, isActive: selection == 1)
                         .navigationDestination(for: Gallery.self) { gallery in
-                            GalleryDetailView(gallery: gallery, searchTarget: searchTarget(.discoverSearch))
+                            GalleryDetailView(gallery: gallery, searchTarget: searchTarget(.discoverSearch), externallyCovered: detailSearch != nil)
                         }
                 }
                 .toolbar(.hidden, for: .tabBar)
+                .environment(\.galleryNavigation, libraryRoutes)
                 .suppressPinnedChromePreferences(selection != 1)
                 .tabItem { Label("资料库", systemImage: "books.vertical") }.tag(1)
                 NavigationStack(path: $accountPath) {
@@ -168,27 +185,44 @@ struct RootView: View {
                 .suppressPinnedChromePreferences(selection != 2)
                 .tabItem { Label("我的", systemImage: "person.crop.circle") }.tag(2)
             }
-            .galleryDetailPresentations(inlineSearch: true, tab: selection)
+            .accessibilityHidden(detailSearch != nil)
+            .allowsHitTesting(detailSearch == nil)
+            .suppressPinnedChromePreferences(detailSearch != nil)
+            .overlay {
+                if let detailSearch {
+                    GallerySearchFlow(request: detailSearch, onClose: closeDetailSearch)
+                        .background(Palette.background.ignoresSafeArea())
+                        .transition(.move(edge: .trailing))
+                }
+            }
+            .animation(reduceMotion ? nil : ChromeMotion.resize, value: detailSearch?.id)
+            .galleryDetailPresentations(tab: selection, onNewSearch: openDetailSearch)
         }
         .id(session.generation)
-        .overlay(alignment: .bottom) {
-            if let notice = library.readLaterNotice {
-                Text(notice.text).font(FeedChrome.labelFont).padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(FloatingChrome.background, in: AppShape.control).padding(.bottom, 68)
-                    .allowsHitTesting(false).accessibilityIdentifier("read-later.feedback")
-                    .task(id: notice.id) {
-                        try? await Task.sleep(nanoseconds: 2_500_000_000)
-                        guard !Task.isCancelled else { return }; library.dismissReadLaterNotice(notice.id)
-                    }
+        .overlay(alignment: .topLeading) {
+            if AppMode.qa {
+                Text("QA").font(.system(size: 1)).frame(width: 1, height: 1)
+                    .accessibilityIdentifier("root.navigation.qa")
+                    .accessibilityValue("tab=\(selection);discovery=\(discoveryRoutes.path.count);library=\(libraryRoutes.path.count);searches=\(detailSearchRequests);rules=\(discovery.current.query.rules.count);sourceDepth=\(detailSearchSourceDepth)")
+                    .allowsHitTesting(false)
             }
         }
+        .appToast(message: Binding(get: { library.readLaterNotice?.text }, set: { value in
+            if value == nil, let notice = library.readLaterNotice { library.dismissReadLaterNotice(notice.id) }
+        }), identifier: "read-later.feedback")
         .onChange(of: session.generation) { _, _ in
-            discoveryPath = NavigationPath(); libraryPath = NavigationPath(); accountPath = NavigationPath()
+            detailSearch = nil; detailSearchSourceTab = nil
+            discoveryRoutes.returnToList(); libraryRoutes.returnToList(); accountPath = NavigationPath()
             discovery.reset(query: discovery.current.query, site: browserSite, savedID: discovery.current.savedID)
         }
         .onChange(of: session.owner) { _, _ in
+            detailSearch = nil; detailSearchSourceTab = nil
             discovery.reset(site: browserSite)
             selection = 0
+        }
+        .onChange(of: selection) { _, tab in
+            // Explicit main-tab navigation abandons the temporary search, not its source route.
+            if detailSearch != nil, tab != 0 { detailSearch = nil; detailSearchSourceTab = nil }
         }
         .onChange(of: scenePhase) { _, phase in if phase == .active { session.favoriteStateCache.refreshActive() } }
         .sheet(isPresented: .constant(AppMode.screen == "reader" || AppMode.screen == "web-compat")) {
@@ -208,6 +242,24 @@ struct RootView: View {
         showDiscovery(discovery.current.site)
     }
 
+    private func openDetailSearch(_ request: DetailSearchRequest) throws {
+        guard request.generation == session.generation, library.owner == session.owner else { throw ViewerError.stale }
+        _ = try request.draft.query.url(site: request.draft.site)
+        if AppMode.qa { detailSearchRequests += 1; detailSearchSourceDepth = discoveryRoutes.path.count }
+        // Keep the source stack mounted: closing this separate search reveals
+        // the exact detail and list state rather than rebuilding either route.
+        detailSearchSourceTab = selection
+        detailSearch = request
+        selection = 0
+    }
+
+    private func closeDetailSearch() {
+        let sourceTab = detailSearchSourceTab ?? 0
+        detailSearch = nil
+        detailSearchSourceTab = nil
+        selection = sourceTab
+    }
+
     private func executeDiscovery(_ query: SearchQuery, site: GallerySite, savedID: UUID?) {
         do {
             try discovery.execute(query: query, site: site, savedID: savedID, session: session, library: library)
@@ -224,7 +276,7 @@ struct RootView: View {
     private func showDiscovery(_ site: GallerySite) {
         browserSite = site
         showsDiscoveryHistory = false
-        discoveryPath = NavigationPath()
+        discoveryRoutes.returnToList()
         selection = 0
     }
 }

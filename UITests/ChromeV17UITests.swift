@@ -355,24 +355,33 @@ final class ChromeV17UITests: XCTestCase {
         start.press(forDuration: 0.04, thenDragTo: end, withVelocity: .default, thenHoldForDuration: 0.08)
     }
 
+    private func waitForExecutedQuery(_ query: String, app: XCUIApplication) {
+        expectation(for: NSPredicate(format: "value CONTAINS %@", query), evaluatedWith: app.buttons["discover.search-entry"])
+        waitForExpectations(timeout: 6)
+    }
+
     func testBrowseSwipeBackForwardAndNewSearchBranch() {
         continueAfterFailure = false
         let app = launch()
         XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 12))
         submitHistorySearch(app, "coast")
-        XCTAssertTrue(app.staticTexts["已执行：EX · coast"].waitForExistence(timeout: 6))
+        waitForExecutedQuery("coast", app: app)
         submitHistorySearch(app, "mountain")
-        XCTAssertTrue(app.staticTexts["已执行：EX · mountain"].waitForExistence(timeout: 6))
-        historySwipe(app, right: true)
-        XCTAssertTrue(app.staticTexts["已执行：EX · coast"].waitForExistence(timeout: 6))
+        waitForExecutedQuery("mountain", app: app)
+        let back = app.buttons["discover.back"]
+        XCTAssertTrue(back.isHittable)
+        XCTAssertEqual(back.frame.width, 34, accuracy: 1)
+        XCTAssertEqual(back.frame.height, 44, accuracy: 1)
+        back.tap()
+        waitForExecutedQuery("coast", app: app)
         historySwipe(app, right: false)
-        XCTAssertTrue(app.staticTexts["已执行：EX · mountain"].waitForExistence(timeout: 6))
+        waitForExecutedQuery("mountain", app: app)
         historySwipe(app, right: true)
-        XCTAssertTrue(app.staticTexts["已执行：EX · coast"].waitForExistence(timeout: 6))
+        waitForExecutedQuery("coast", app: app)
         submitHistorySearch(app, "forest")
-        XCTAssertTrue(app.staticTexts["已执行：EX · forest"].waitForExistence(timeout: 6))
+        waitForExecutedQuery("forest", app: app)
         historySwipe(app, right: false)
-        XCTAssertTrue(app.staticTexts["已执行：EX · forest"].exists)
+        XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("forest") == true)
     }
 
     func testBrowseSwipeLeavesVerticalScrollAndHeaderChipsUsable() {
@@ -672,7 +681,7 @@ final class ChromeV17UITests: XCTestCase {
         XCTAssertNotNil(exclude); exclude?.tap()
         XCTAssertEqual(mode.value as? String, "排除")
         app.buttons["compose.apply"].tap()
-        let applied = app.buttons["discover.condition-summary"]
+        let applied = app.buttons["discover.search-entry"]
         XCTAssertTrue(applied.waitForExistence(timeout: 7))
         XCTAssertTrue((applied.value as? String)?.contains("排除 language:english") == true)
     }
@@ -701,7 +710,7 @@ final class ChromeV17UITests: XCTestCase {
         let app = authorSearchApp()
         authorComposer(app, text: "coast language:english"); app.buttons["compose.apply"].tap()
         let active = app.buttons["discover.search-entry"]
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 6))
         let applied = try? XCTUnwrap(active.value as? String)
         XCTAssertTrue(applied?.contains("coast") == true)
@@ -795,7 +804,7 @@ final class ChromeV17UITests: XCTestCase {
     }
 
     private func assertAuthorResult(_ app: XCUIApplication, author: String, without previous: String? = nil) {
-        let result = app.buttons["discover.condition-summary"]
+        let result = app.buttons["discover.search-entry"]
         let authorIsApplied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", author), object: result)
         XCTAssertEqual(XCTWaiter.wait(for: [authorIsApplied], timeout: 7), .completed)
         if let previous { XCTAssertFalse((result.value as? String ?? "").contains(previous)) }

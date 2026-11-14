@@ -2,6 +2,13 @@ import SwiftUI
 import ExViewerCore
 
 extension SiteSession {
+    func toggleSiteFavorite(_ gallery: Gallery) throws {
+        guard hasCredentials || AppMode.qa else { throw ViewerError.authentication }
+        let group = favoriteGroups.defaultGroup(owner: owner, site: gallery.ref.site)
+        try favoriteStateCache.enqueueToggle(scope: .init(gallery, self), client: favoriteClient(for: gallery, session: self),
+                                            group: group, groupName: favoriteGroups.name(group, owner: owner, site: gallery.ref.site), title: gallery.title)
+    }
+
     @discardableResult func addToDefaultFavorites(_ galleries: [Gallery]) throws -> Int {
         guard hasCredentials || AppMode.qa else { throw ViewerError.authentication }
         // Persist all intents before any network work; each worker checks whether
@@ -77,11 +84,11 @@ extension SiteSession {
             guard isCurrent, !Task.isCancelled else { throw ViewerError.stale }
             try await applyConfirmedNames(confirmed)
             guard confirmed.names[group] == value else {
-                throw ViewerError.invalidQuery("站点尚未确认改名，请刷新后检查。")
+                throw ViewerError.invalidQuery("改名结果待确认 请刷新检查")
             }
             return true
         } catch {
-            if isCurrent { self.error = ErrorMessages.message(error, fallback: "改名结果未确认，请刷新后检查") }
+            if isCurrent { self.error = ErrorMessages.message(error, fallback: "改名结果待确认 请刷新检查") }
             return false
         }
     }

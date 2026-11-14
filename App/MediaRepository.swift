@@ -4,22 +4,43 @@ import ImageIO
 import ExViewerCore
 
 actor TransferGate {
+    static func mediaTransfers() -> TransferGate {
+        TransferGate(limit: ReaderLoadPolicy.maxConcurrency,
+                     prefetchLimit: ReaderLoadPolicy.maxConcurrency - 1,
+                     allowFullWithForeground: true, totalLimit: MediaTransferClient.maxConnections,
+                     reservedCoverCapacity: MediaTransferClient.coverCapacity)
+    }
+
     private let browsingLimit: Int
     private var permits: Int
     private let prefetchLimit: Int
     private let thumbnailLimit: Int
+    private let reservedCoverCapacity: Int
     private let allowFullWithForeground: Bool
     private var foregroundInUse = 0
     private var prefetchInUse = 0
     private var thumbnailsInUse = 0
-    init(limit: Int = 3, prefetchLimit: Int = 1, allowFullWithForeground: Bool = false, totalLimit: Int? = nil) {
-        browsingLimit = max(1, limit)
-        permits = max(browsingLimit, totalLimit ?? browsingLimit)
-        self.prefetchLimit = min(max(1, prefetchLimit), max(1, limit - 1))
-        thumbnailLimit = min(2, max(0, limit - 1))
+    private var coverPrefetchInUse = 0
+    init(limit: Int = 3, prefetchLimit: Int = 1, allowFullWithForeground: Bool = false,
+         totalLimit: Int? = nil, reservedCoverCapacity: Int = 0) {
+        let readerLimit = max(1, limit)
+        let total = max(readerLimit, totalLimit ?? readerLimit)
+        let covers = min(max(0, reservedCoverCapacity), total - 1)
+        browsingLimit = readerLimit
+        permits = total
+        self.prefetchLimit = min(max(1, prefetchLimit), max(1, readerLimit - 1))
+        self.reservedCoverCapacity = covers
+        thumbnailLimit = covers > 0 ? covers : min(2, max(0, readerLimit - 1))
         self.allowFullWithForeground = allowFullWithForeground
     }
-    private var browsingPermits: Int { min(permits, browsingLimit - foregroundInUse - prefetchInUse - thumbnailsInUse) }
+
+    // Reader/preload/download traffic cannot spend unused dedicated cover slots.
+    // Small standalone gates retain their shared-budget behavior for other users.
+    private var unusedCoverCapacity: Int { max(0, reservedCoverCapacity - thumbnailsInUse) }
+    private var browsingPermits: Int {
+        let sharedCovers = reservedCoverCapacity == 0 ? thumbnailsInUse : 0
+        return min(permits - unusedCoverCapacity, browsingLimit - foregroundInUse - prefetchInUse - sharedCovers)
+    }
     private struct Waiter {
         let id: UUID
         let request: MediaRequestDemand
@@ -67,7 +88,8 @@ actor TransferGate {
         switch priority {
         case .foreground: foregroundInUse -= 1
         case .prefetch: prefetchInUse -= 1
-        case .thumbnail, .thumbnailPrefetch: thumbnailsInUse -= 1
+        case .thumbnail: thumbnailsInUse -= 1
+        case .thumbnailPrefetch: thumbnailsInUse -= 1; coverPrefetchInUse -= 1
         case .download: break
         }
         resumeWaiting()
@@ -77,16 +99,23 @@ actor TransferGate {
             let selected: (Int, MediaRequestPriority)?
             let browse = browsingPermits
             let allowsBackgroundBrowse = browse > 1 || (browse > 0 && allowFullWithForeground && foregroundInUse > 0)
+            let allowsCover = thumbnailsInUse < thumbnailLimit
+                && (reservedCoverCapacity > 0 || allowsBackgroundBrowse)
+            let allowsCoverPrefetch = reservedCoverCapacity > 0
+                ? coverPrefetchInUse < max(1, thumbnailLimit - 1)
+                : thumbnailsInUse == 0
             if browse > 0, let foreground = waiting.firstIndex(where: { $0.request.priority == .foreground }) { selected = (foreground, .foreground) }
+            else if allowsCover, let thumbnail = waiting.firstIndex(where: { $0.request.priority == .thumbnail }) {
+                selected = (thumbnail, .thumbnail)
+            }
             else if allowsBackgroundBrowse, prefetchInUse < prefetchLimit,
                     let prefetch = waiting.firstIndex(where: { $0.request.priority == .prefetch }) { selected = (prefetch, .prefetch) }
-            else if allowsBackgroundBrowse, thumbnailsInUse < thumbnailLimit,
-                    let thumbnail = waiting.firstIndex(where: { $0.request.priority == .thumbnail }) { selected = (thumbnail, .thumbnail) }
-            else if allowsBackgroundBrowse, thumbnailLimit > 0, thumbnailsInUse == 0,
+            else if allowsCover, allowsCoverPrefetch,
                     let upcoming = waiting.firstIndex(where: { $0.request.priority == .thumbnailPrefetch }) {
                 selected = (upcoming, .thumbnailPrefetch)
             }
-            else if permits > 1, let download = waiting.firstIndex(where: { $0.request.priority == .download }) { selected = (download, .download) }
+            else if permits > 1 + unusedCoverCapacity,
+                    let download = waiting.firstIndex(where: { $0.request.priority == .download }) { selected = (download, .download) }
             else { selected = nil }
             guard let (index, lease) = selected else { return }
             let waiter = waiting.remove(at: index)
@@ -94,7 +123,8 @@ actor TransferGate {
             switch lease {
             case .foreground: foregroundInUse += 1
             case .prefetch: prefetchInUse += 1
-            case .thumbnail, .thumbnailPrefetch: thumbnailsInUse += 1
+            case .thumbnail: thumbnailsInUse += 1
+            case .thumbnailPrefetch: thumbnailsInUse += 1; coverPrefetchInUse += 1
             case .download: break
             }
             waiter.request.removeObserver(waiter.observer)
@@ -116,11 +146,16 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
     private var lastProgressTime: TimeInterval = 0
     private var progressDemand: MediaRequestDemand?
     private var cancelled = false
+    private var receivedResponse = false
+    private var firstResponseTask: Task<Void, Never>?
+    private let firstResponseTimeout: TimeInterval
     private let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     private let limit: Int64?
     private let client: MediaTransferClient
-    init(limit: Int64?, configuration: URLSessionConfiguration? = nil, client: MediaTransferClient? = nil) {
+    init(limit: Int64?, configuration: URLSessionConfiguration? = nil, client: MediaTransferClient? = nil,
+         firstResponseTimeout: TimeInterval = 10) {
         self.limit = limit
+        self.firstResponseTimeout = max(0.001, firstResponseTimeout)
         self.client = client ?? (configuration == nil ? .shared : MediaTransferClient(configuration: configuration))
     }
     func fetch(_ url: URL, request demand: MediaRequestDemand? = nil) async throws -> URL {
@@ -143,7 +178,13 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
                     task.priority = demand?.priority == .foreground || demand == nil ? URLSessionTask.highPriority : URLSessionTask.lowPriority
                     networkTask = task
                     traceID = demand?.id; networkStarted = ProcessInfo.processInfo.systemUptime
-                    task.resume(); lock.unlock()
+                    lock.unlock()
+                    // The gate has granted a slot. Waiting for response headers is
+                    // network connection work, not time spent in our download queue.
+                    if let trace = demand?.id { ReaderNetworkMetrics.record(trace, phase: "transfer-start", priority: demand?.priority) }
+                    demand?.reportProgress(MediaLoadProgress(phase: .connecting))
+                    updateFirstResponseDeadline(priority: demand?.priority)
+                    task.resume()
                 } catch { lock.unlock(); finish(.failure(ViewerError.storage)) }
             }
         } onCancel: { self.cancel() }
@@ -151,12 +192,38 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
     private func applyPriority(_ priority: MediaRequestPriority) {
         lock.lock(); let task = networkTask; lock.unlock()
         task?.priority = priority == .foreground ? URLSessionTask.highPriority : URLSessionTask.lowPriority
+        updateFirstResponseDeadline(priority: priority)
+    }
+    /// Bound only a visible reader's wait for HTTP headers. Promotion of a
+    /// stalled prefetch uses the elapsed connection time; body transfer and
+    /// downloads keep the existing URLSession timeout policy.
+    private func updateFirstResponseDeadline(priority: MediaRequestPriority?) {
+        lock.lock(); defer { lock.unlock() }
+        firstResponseTask?.cancel(); firstResponseTask = nil
+        guard priority == .foreground, continuation != nil, !receivedResponse,
+              let started = networkStarted else { return }
+        let remaining = max(0, firstResponseTimeout - (ProcessInfo.processInfo.systemUptime - started))
+        firstResponseTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+            self?.expireFirstResponse()
+        }
+    }
+    private func expireFirstResponse() {
+        lock.lock()
+        let shouldExpire = continuation != nil && !receivedResponse && progressDemand?.priority == .foreground
+        let trace = traceID, started = networkStarted
+        lock.unlock()
+        guard shouldExpire else { return }
+        if finish(.failure(RequestFailure.transport(.media, URLError.timedOut.rawValue))), let trace {
+            ReaderNetworkMetrics.record(trace, phase: "first-response-timeout", started: started, outcome: "timeout")
+        }
     }
     func cancel() { lock.lock(); cancelled = true; lock.unlock(); finish(.failure(CancellationError())) }
-    private func finish(_ result: Result<URL, Error>) {
+    @discardableResult private func finish(_ result: Result<URL, Error>) -> Bool {
         lock.lock()
-        guard let continuation else { lock.unlock(); return }
+        guard let continuation else { lock.unlock(); return false }
         self.continuation = nil
+        firstResponseTask?.cancel(); firstResponseTask = nil
         try? handle?.close(); handle = nil
         let task = networkTask; networkTask = nil
         let trace = traceID, started = networkStarted, byteCount = bytes
@@ -165,7 +232,7 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
         self.progressDemand = nil
         traceID = nil; networkStarted = nil
         lock.unlock()
-        progressDemand?.reportProgress(progress)
+        if case .success = result { progressDemand?.reportProgress(progress) }
         if case .failure = result { task?.cancel() }
         if let trace {
             let outcome: String
@@ -177,8 +244,12 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
         }
         if case .failure = result { try? FileManager.default.removeItem(at: file) }
         continuation.resume(with: result)
+        return true
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        lock.lock()
+        guard continuation != nil else { lock.unlock(); completionHandler(.cancel); return }
+        receivedResponse = true; firstResponseTask?.cancel(); firstResponseTask = nil; lock.unlock()
         guard let response = response as? HTTPURLResponse, let url = response.url, URLPolicy.media(url) else { completionHandler(.cancel); finish(.failure(ViewerError.restricted)); return }
         if response.statusCode == 509 { completionHandler(.cancel); finish(.failure(ViewerError.imageLimit)); return }
         if response.value(forHTTPHeaderField: "cf-mitigated")?.lowercased() == "challenge" {
@@ -195,6 +266,7 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
         lastProgressBytes = bytes; lastProgressTime = ProcessInfo.processInfo.systemUptime
         lock.unlock()
         demand?.reportProgress(MediaLoadProgress(phase: .transferring, completedBytes: received, totalBytes: total))
+        if let trace = demand?.id { ReaderNetworkMetrics.record(trace, phase: "response-headers") }
         completionHandler(.allow)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -228,9 +300,7 @@ final class FileTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable 
 
 actor MediaRepository {
     static let shared = MediaRepository()
-    private let gate = TransferGate(limit: ReaderLoadPolicy.maxConcurrency,
-                                    prefetchLimit: ReaderLoadPolicy.maxConcurrency - 1,
-                                    allowFullWithForeground: true, totalLimit: MediaTransferClient.maxConnections)
+    private let gate = TransferGate.mediaTransfers()
     nonisolated let root: URL
     private nonisolated let browseCachePins = BrowseCachePinRegistry()
     private let transferClient: MediaTransferClient
@@ -283,7 +353,7 @@ actor MediaRepository {
         if Self.cachedImageExists(at: target) {
             touch(target, owner: owner)
             request.reportProgress(MediaLoadProgress(phase: .ready))
-            ReaderNetworkMetrics.record(request.id, phase: "cache-hit")
+            ReaderNetworkMetrics.record(request.id, phase: "cache-hit", priority: request.priority)
             return target
         }
         guard flights[key] != nil || flights.count < 80 else { throw RequestFailure.queueFull }
@@ -295,7 +365,7 @@ actor MediaRepository {
                 guard flight.consumers.count < 64 else { continuation.resume(throwing: RequestFailure.queueFull); return }
                 flights[key] = flight
                 let flightID = flight.id, sharedDemand = flight.demand
-                ReaderNetworkMetrics.record(request.id, phase: "media-consumer", sharedRequest: sharedDemand.id)
+                ReaderNetworkMetrics.record(request.id, phase: "media-consumer", sharedRequest: sharedDemand.id, priority: request.priority)
                 let observer = request.observe { [weak self] in Task { await self?.refreshPriority(key: key, flightID: flightID) } }
                 let progressBindingToken = consumerID
                 request.beginProgressForwarding(source: sharedDemand.id, token: progressBindingToken)
@@ -391,10 +461,11 @@ actor MediaRepository {
     private func transfer(url: URL, owner: String, epoch: UUID, request: MediaRequestDemand) async throws -> URL {
         let queued = ProcessInfo.processInfo.systemUptime
         request.reportProgress(MediaLoadProgress(phase: .queued))
+        ReaderNetworkMetrics.record(request.id, phase: "queue-start", priority: request.priority)
         let lease: MediaRequestPriority
         do { lease = try await gate.acquire(request: request) }
         catch { ReaderNetworkMetrics.record(request.id, phase: "queue", started: queued, outcome: error is CancellationError ? "cancelled" : "failed"); throw error }
-        ReaderNetworkMetrics.record(request.id, phase: "queue", started: queued)
+        ReaderNetworkMetrics.record(request.id, phase: "queue", started: queued, priority: request.priority)
         defer { Task { await gate.release(priority: lease) } }
         try Task.checkCancellation()
         guard epochs[owner] == epoch else { throw CancellationError() }

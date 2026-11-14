@@ -74,6 +74,31 @@ import ExViewerCore
         XCTAssertNil(missingGroup)
     }
 
+    func testBrowsingChurnCannotEvictFavoritesAndBothPoolsStayBoundedOnDisk() async throws {
+        let directory = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FeedSnapshotCache(root: directory)
+        let favorite = try url("https://exhentai.org/favorites.php?favcat=all")
+        await cache.save(snapshot(owner: "guest", root: favorite, site: .ex, gid: 81, title: "Favorite"), expectedEpoch: 0)
+        for index in 0..<20 {
+            let search = try url("https://exhentai.org/?f_search=query-\(index)")
+            await cache.save(snapshot(owner: "guest", root: search, site: .ex, gid: Int64(100 + index), title: "Search"), expectedEpoch: 0)
+        }
+        let restarted = FeedSnapshotCache(root: directory)
+        let retained = await restarted.read(owner: "guest", url: favorite)
+        XCTAssertEqual(retained?.items.first?.ref.gid, 81)
+        let files = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("guest"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(files.filter { $0.pathExtension == "json" }.count, 13)
+        for index in 0..<15 {
+            let group = try url("https://exhentai.org/favorites.php?favcat=all&f_search=group-\(index)")
+            await cache.save(snapshot(owner: "guest", root: group, site: .ex, gid: Int64(200 + index), title: "Group"), expectedEpoch: 0)
+        }
+        let boundedFiles = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("guest"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(boundedFiles.filter { $0.pathExtension == "json" }.count, 24)
+        let newestSearch = try url("https://exhentai.org/?f_search=query-19")
+        let search = await FeedSnapshotCache(root: directory).read(owner: "guest", url: newestSearch)
+        XCTAssertNotNil(search)
+    }
+
     func testMalformedAndOversizedSnapshotFilesAreIgnored() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -107,14 +132,86 @@ import ExViewerCore
         await cache.invalidateFavorites(owner: "a1b2")
         let newEpoch = await cache.epoch(owner: "a1b2")
         XCTAssertEqual(newEpoch, oldEpoch + 1)
-        await cache.save(staleSnapshot, expectedEpoch: oldEpoch)
+        let late = snapshot(owner: "a1b2", root: favorites, site: .eh, gid: 99, title: "Obsolete late response")
+        await cache.save(late, expectedEpoch: oldEpoch)
         let afterStaleSave = await FeedSnapshotCache(root: root).read(owner: "a1b2", url: favorites)
-        XCTAssertNil(afterStaleSave, "A stale completion must not repopulate invalidated favorites")
+        XCTAssertEqual(afterStaleSave?.items.first?.title, "Before invalidation", "Soft invalidation keeps the existing snapshot, but rejects an obsolete write")
 
         let fresh = snapshot(owner: "a1b2", root: favorites, site: .eh, gid: 8, title: "After invalidation")
         await cache.save(fresh, expectedEpoch: newEpoch)
         let reloaded = await FeedSnapshotCache(root: root).read(owner: "a1b2", url: favorites)
         XCTAssertEqual(reloaded?.items.first?.title, "After invalidation")
+    }
+
+    func testBatchInvalidationStillDiscardsUnverifiedMembershipSnapshots() async throws {
+        let directory = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+        let feed = try url("https://exhentai.org/favorites.php?favcat=all")
+        let cache = FeedSnapshotCache(root: directory)
+        await cache.save(snapshot(owner: "guest", root: feed, site: .ex, gid: 81, title: "Before batch"), expectedEpoch: 0)
+        await cache.invalidateFavorites(owner: "guest", discardSnapshots: true)
+        let retained = await FeedSnapshotCache(root: directory).read(owner: "guest", url: feed)
+        XCTAssertNil(retained, "Batch edits retain hard invalidation until a server list confirms membership")
+    }
+
+    func testBatchInvalidationOnlyDiscardsTheAffectedSite() async throws {
+        let directory = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FeedSnapshotCache(root: directory)
+        let ex = try url("https://exhentai.org/favorites.php?favcat=all")
+        let eh = try url("https://e-hentai.org/favorites.php?favcat=all")
+        await cache.save(snapshot(owner: "guest", root: ex, site: .ex, gid: 81, title: "EX"), expectedEpoch: 0)
+        await cache.save(snapshot(owner: "guest", root: eh, site: .eh, gid: 82, title: "EH"), expectedEpoch: 0)
+        let pager = GalleryPager(loadHTML: { _, _, _ in throw URLError(.notConnectedToInternet) }, cache: cache)
+        pager.reset(url: ex, session: SiteSession(qa: true))
+        await waitUntil { !pager.loading }
+        await pager.invalidateFavoriteCache(owner: "guest")
+        let reopened = FeedSnapshotCache(root: directory)
+        let removed = await reopened.read(owner: "guest", url: ex)
+        let preserved = await reopened.read(owner: "guest", url: eh)
+        XCTAssertNil(removed)
+        XCTAssertEqual(preserved?.items.first?.ref.gid, 82)
+    }
+
+    func testFavoritesSnapshotIsUsableWhileSlowRevalidationStaysQuietAndOfflineKeepsRows() async throws {
+        let directory = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+        let feed = try url("https://exhentai.org/favorites.php?favcat=all")
+        let cache = FeedSnapshotCache(root: directory)
+        await cache.save(snapshot(owner: "guest", root: feed, site: .ex, gid: 81, title: "Cached favorite"), expectedEpoch: 0)
+        await cache.invalidateFavorites(owner: "guest")
+        var response: CheckedContinuation<String, Error>?
+        let pager = GalleryPager(loadHTML: { _, _, _ in
+            try await withCheckedThrowingContinuation { response = $0 }
+        }, cache: FeedSnapshotCache(root: directory))
+        defer { response?.resume(throwing: CancellationError()) }
+        let start = ProcessInfo.processInfo.systemUptime
+        pager.reset(url: feed, session: SiteSession(qa: true))
+        await waitUntil { response != nil && pager.items.count == 1 }
+        XCTAssertTrue(pager.loading)
+        XCTAssertEqual(pager.loadingPresentation, .hidden)
+        XCTAssertNotNil(pager.cachedAt)
+        print("FAVORITE_CACHE_FIRST_PAINT_MS=\((ProcessInfo.processInfo.systemUptime - start) * 1000); blocked network; rows=\(pager.items.count)")
+        response?.resume(throwing: URLError(.notConnectedToInternet)); response = nil
+        await waitUntil { !pager.loading }
+        XCTAssertEqual(pager.items.first?.title, "Cached favorite")
+        XCTAssertNotNil(pager.failure)
+    }
+
+    func testPanePreparationReadsCacheWithoutHTTPAndActivationRetainsRows() async throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let feed = GallerySite.ex.baseURL, cache = FeedSnapshotCache(root: root)
+        let stored = snapshot(owner: "guest", root: feed, site: .ex, gid: 81, title: "Cached pane")
+        await cache.save(stored, expectedEpoch: 0)
+        var requests = 0
+        let pager = GalleryPager(loadHTML: { _, _, _ in requests += 1; throw URLError(.notConnectedToInternet) }, cache: cache)
+        let session = SiteSession(qa: true)
+        await pager.prepareCached(url: feed, session: session, qa: false)
+        XCTAssertEqual(requests, 0)
+        XCTAssertFalse(pager.loading)
+        XCTAssertEqual(pager.items.map(\.title), ["Cached pane"])
+        pager.reset(url: feed, session: session)
+        XCTAssertEqual(pager.items.map(\.title), ["Cached pane"], "The committed pane must not blank its prepared rows")
+        await waitUntil { requests == 1 && !pager.loading }
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(pager.items.map(\.title), ["Cached pane"])
     }
 
     func testCachedFirstPagePublishesBeforeOfflineLoadAndRefreshSharesOneRequest() async throws {

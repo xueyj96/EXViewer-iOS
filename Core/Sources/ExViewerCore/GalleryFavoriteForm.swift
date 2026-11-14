@@ -39,7 +39,7 @@ public struct GalleryFavoriteForm: Sendable {
     public static func endpoint(for reference: GalleryRef) throws -> URL {
         guard reference.gid > 0, !reference.token.isEmpty, reference.token.count <= 256,
               reference.token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
-            throw ViewerError.invalidQuery("画廊引用无效。")
+            throw ViewerError.invalidQuery("画廊引用无效")
         }
         var url = URLComponents(url: reference.site.baseURL.appendingPathComponent("gallerypopups.php"), resolvingAgainstBaseURL: false)!
         url.queryItems = [.init(name: "gid", value: String(reference.gid)), .init(name: "t", value: reference.token), .init(name: "act", value: "addfav")]
@@ -121,10 +121,10 @@ public struct GalleryFavoriteForm: Sendable {
     }
 
     public func request(action: FavoriteAction, note: String) throws -> GalleryFavoriteRequest {
-        if case let .move(index) = action, !groups.contains(where: { $0.id == index }) { throw ViewerError.invalidQuery("请选择有效的收藏分组。") }
+        if case let .move(index) = action, !groups.contains(where: { $0.id == index }) { throw ViewerError.invalidQuery("请选择有效的收藏分组") }
         let note = Self.normalizedNote(action == .remove ? "" : note)
         guard (note.utf8.count <= 200 || note == self.note), !note.unicodeScalars.contains(where: { $0.value < 32 && ![9, 10].contains($0.value) }) else {
-            throw ViewerError.invalidQuery("收藏备注过长或包含不支持的字符，请删减后保存。")
+            throw ViewerError.invalidQuery("备注过长或含无效字符 请修改")
         }
         let value: String
         switch action { case .move(let index): value = String(index); case .remove: value = "favdel" }

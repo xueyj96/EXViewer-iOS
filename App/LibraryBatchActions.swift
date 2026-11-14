@@ -6,7 +6,7 @@ enum LibraryBatchSource: String {
 }
 
 private enum LibraryBatchAction: String, Identifiable {
-    case readLater = "add-read-later", favorite, download, manage, back, move, remove
+    case readLater = "add-read-later", favorite, download, move, remove
 
     var id: Self { self }
 
@@ -15,8 +15,6 @@ private enum LibraryBatchAction: String, Identifiable {
         case .readLater: "稍后再读"
         case .favorite: "站点收藏"
         case .download: "下载"
-        case .manage: "管理"
-        case .back: "返回"
         case .move: "移到分组"
         case .remove:
             switch source {
@@ -32,8 +30,6 @@ private enum LibraryBatchAction: String, Identifiable {
         case .readLater: "text.badge.plus"
         case .favorite: "heart"
         case .download: "arrow.down.circle"
-        case .manage: "ellipsis"
-        case .back: "chevron.left"
         case .move: "folder"
         case .remove: "trash"
         }
@@ -41,7 +37,7 @@ private enum LibraryBatchAction: String, Identifiable {
 
     var tone: AppActionButtonStyle.Tone {
         switch self {
-        case .favorite, .manage, .move: .accent
+        case .favorite, .move: .accent
         case .remove: .destructive
         default: .neutral
         }
@@ -95,6 +91,7 @@ struct LibraryBatchSelectionHeader: View {
         let all = summary.value.allLoadedSelected
         return Button { store.toggleAllLoaded() } label: {
             Text(all ? "取消全选" : "全选列表")
+                .animation(nil, value: all)
                 .frame(maxWidth: typeSize.isAccessibilitySize ? nil : .infinity)
         }
         .buttonStyle(FeedHeaderButtonStyle(truncatesLabel: true, expandsHorizontally: !typeSize.isAccessibilitySize))
@@ -128,7 +125,6 @@ struct LibraryBatchToolbar: View {
     @EnvironmentObject private var downloads: DownloadManager
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var managing = false
     @State private var notice: Notice?
 
     private struct Notice: Identifiable {
@@ -140,7 +136,7 @@ struct LibraryBatchToolbar: View {
         switch source {
         case .discover, .history: [.readLater, .favorite, .download]
         case .readLater: [.favorite, .download, .remove]
-        case .favorites: managing ? [.move, .remove, .back] : [.readLater, .download, .manage]
+        case .favorites: [.remove, .download, .move]
         case .downloads: [.remove]
         }
     }
@@ -154,7 +150,7 @@ struct LibraryBatchToolbar: View {
                     let symbol = action == .remove && source == .favorites ? "heart.slash" : action.symbol
                     Button { perform(action) } label: {
                         ZStack {
-                            HStack(spacing: 5) {
+                            HStack(spacing: FeedChrome.iconLabelSpacing) {
                                 Image(systemName: symbol).imageScale(FeedChrome.iconScale)
                                 if !typeSize.isAccessibilitySize || source == .downloads {
                                     Text(title).lineLimit(1).minimumScaleFactor(0.80)
@@ -169,28 +165,11 @@ struct LibraryBatchToolbar: View {
                                                      labelFont: FeedChrome.labelFont))
                     .accessibilityLabel(accessibilityTitle(action, title: title))
                     .accessibilityIdentifier("\(source.rawValue).\(action.rawValue)")
-                    .disabled(busy || (summary.value.count == 0 && action != .back))
+                    .disabled(busy || (summary.value.count == 0))
                 }
             }
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: managing)
-            .overlay(alignment: .top) {
-                if let notice {
-                    Text(notice.text)
-                        .font(FeedChrome.labelFont)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: AppShape.control)
-                        .overlay(AppShape.control.strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5))
-                        .padding(.horizontal, FeedChrome.contentInset)
-                        .alignmentGuide(.top) { $0[.bottom] + 6 }
-                        .allowsHitTesting(false)
-                        .accessibilityIdentifier("\(source.rawValue).feedback")
-                        .task(id: notice.id) {
-                            try? await Task.sleep(for: .seconds(3))
-                            if !Task.isCancelled { self.notice = nil }
-                        }
-                }
-            }
+            .appToast(message: Binding(get: { notice?.text }, set: { if $0 == nil { notice = nil } }),
+                      identifier: "\(source.rawValue).feedback")
         }
     }
 
@@ -202,21 +181,19 @@ struct LibraryBatchToolbar: View {
 
     private func perform(_ action: LibraryBatchAction) {
         switch action {
-        case .manage: managing = true
-        case .back: managing = false
         case .move: onMove()
         case .remove: onRemove()
         case .readLater:
-            guard library.owner == session.owner else { show("账号已切换，请重新选择作品。"); return }
+            guard library.owner == session.owner else { show("账号已切换 请重新选择作品"); return }
             let selected = galleries()
             let count = library.addReadLater(selected)
-            show(count.map { resultText("已加入稍后再读", $0, of: selected.count, skipped: "已有") } ?? "稍后再读未能保存，请重试。")
+            show(count.map { resultText("已加入稍后再读", $0, of: selected.count, skipped: "已有") } ?? "稍后再读保存失败 请重试")
         case .download:
             let selected = galleries()
             let count = downloads.enqueueNew(selected)
-            show(count.map { resultText("已加入下载队列", $0, of: selected.count, skipped: "已有记录") } ?? "下载队列未能保存，请重试。")
+            show(count.map { resultText("已加入下载队列", $0, of: selected.count, skipped: "已有记录") } ?? "下载队列保存失败 请重试")
         case .favorite:
-            guard session.hasCredentials || AppMode.qa else { show("登录站点账号后可批量收藏。"); return }
+            guard session.hasCredentials || AppMode.qa else { show("请先登录站点账号"); return }
             guard session.owner == library.owner else { show(ErrorMessages.message(ViewerError.stale)); return }
             let selected = galleries()
             guard !selected.isEmpty else { return }
@@ -256,8 +233,8 @@ struct FavoriteGroupPicker: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let loadError {
-                    StatusMessage(title: loadError) { attempt += 1 }
+                if loadError != nil {
+                    Button("重试加载") { attempt += 1 }.buttonStyle(AppActionButtonStyle(tone: .accent))
                 } else if choices.isEmpty {
                     ProgressView("读取收藏分组…").frame(maxWidth: .infinity).padding(.vertical, 36)
                 } else {
@@ -271,38 +248,23 @@ struct FavoriteGroupPicker: View {
                     .background(FloatingChrome.headerBackground, in: FeedChrome.panelShape)
                     .overlay(FeedChrome.panelShape.strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5))
                 }
-                if let confirmError { Text(confirmError).font(.footnote).foregroundStyle(.secondary) }
             }
             .padding(.horizontal, FeedChrome.contentInset)
             .padding(.top, FeedChrome.contentTopGap).padding(.bottom, 16)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            PinnedBottomSlot(id: "favorites.groups.actions") {
-                Button {
-                    guard let choice = choices.first(where: { $0.id == selected }) else { return }
-                    do { try onConfirm(choice); dismiss() }
-                    catch { confirmError = ErrorMessages.message(error) }
-                } label: {
-                    Label(moving ? "移动 \(count) 项" : "收藏 \(count) 项", systemImage: moving ? "folder" : "heart")
-                        .font(FeedChrome.emphasizedLabelFont)
-                        .frame(maxWidth: .infinity, minHeight: FeedChrome.rowSurfaceHeight)
-                        .foregroundStyle(.white)
-                        .background(Color.accentColor.opacity(selected == nil ? 0.38 : 1), in: AppShape.control)
-                        .frame(minHeight: FeedChrome.rowHeight).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(selected == nil)
-                .accessibilityIdentifier(moving ? "favorites.confirm-move" : "favorites.confirm-add")
-            }
-        }
-        .appNavigationChrome(backButton: true, showsToolbarBackButton: false)
+        .appToast(message: loadError ?? confirmError, identifier: "favorites.groups.error")
+        .detailEdgeBack(commitAllowed: true, committing: { confirmSelection() })
+        .appNavigationChrome(backButton: true, showsToolbarBackButton: false, customEdgeBack: true)
         .floatingPageHeader(moving ? "移到分组" : "加入站点收藏", identifier: "favorites.groups", pinned: true) {
             Button { dismiss() } label: { Image(systemName: "chevron.left") }
                 .buttonStyle(FeedHeaderButtonStyle())
                 .accessibilityLabel(moving ? "管理" : "返回")
                 .accessibilityIdentifier("favorites.groups.back")
         } trailing: {
-            EmptyView()
+            Button { _ = confirmSelection() } label: { Image(systemName: "checkmark") }
+                .buttonStyle(FeedHeaderButtonStyle()).foregroundStyle(Color.accentColor)
+                .accessibilityLabel("确认")
+                .accessibilityIdentifier(moving ? "favorites.confirm-move" : "favorites.confirm-add")
         }
         .task(id: attempt) {
             loadError = nil
@@ -319,6 +281,12 @@ struct FavoriteGroupPicker: View {
         }
     }
 
+    @discardableResult private func confirmSelection() -> Bool {
+        guard let choice = choices.first(where: { $0.id == selected }) else { dismiss(); return true }
+        do { try onConfirm(choice); dismiss(); return true }
+        catch { confirmError = ErrorMessages.message(error); return false }
+    }
+
     private func groupRow(_ choice: FavoriteGroupChoice) -> some View {
         let active = selected == choice.id
         return Button {
@@ -327,7 +295,7 @@ struct FavoriteGroupPicker: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "folder").foregroundStyle(active ? Color.accentColor : Color.secondary)
-                Text(choice.name).font(.subheadline.weight(active ? .semibold : .regular))
+                Text(choice.name).font(FeedChrome.labelFont)
                 Spacer(minLength: 8)
                 Image(systemName: active ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(active ? Color.accentColor : Color.secondary.opacity(0.45))
@@ -340,5 +308,34 @@ struct FavoriteGroupPicker: View {
         .buttonStyle(.plain)
         .accessibilityAddTraits(active ? .isSelected : [])
         .accessibilityIdentifier("favorites.\(moving ? "move" : "add")-to.\(choice.id)")
+    }
+}
+
+/// Center swipes leave management; edge swipes remain owned by section navigation.
+enum MultiSelectionSwipePolicy {
+    static func exits(startX: CGFloat, width: CGFloat, translation: CGSize) -> Bool {
+        let edge = PageEdgeGestureMetrics.activationWidth
+        return width > edge * 2 && startX > edge && startX < width - edge &&
+            translation.width >= 48 && translation.width > abs(translation.height) * 1.5
+    }
+}
+
+private struct MultiSelectionExitSwipe: ViewModifier {
+    let selecting: Bool
+    let action: () -> Void
+    @State private var width: CGFloat = 0
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .simultaneousGesture(DragGesture(minimumDistance: 18).onEnded { value in
+                guard selecting, MultiSelectionSwipePolicy.exits(startX: value.startLocation.x, width: width,
+                                                               translation: value.translation) else { return }
+                action()
+            }, including: selecting ? .all : .none)
+    }
+}
+
+extension View {
+    func exitMultiSelectionOnRightSwipe(_ selecting: Bool, action: @escaping () -> Void) -> some View {
+        modifier(MultiSelectionExitSwipe(selecting: selecting, action: action))
     }
 }

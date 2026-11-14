@@ -10,62 +10,40 @@ final class TagSelectionV28UITests: XCTestCase {
         app.buttons["main.tab.account"].tap()
         let settings = app.buttons["account.tags"]
         for _ in 0..<4 { if settings.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(settings.isHittable)
         settings.tap()
-        app.buttons["tags.add"].tap()
-        let input = app.textFields["tag.name"]
+        let input = app.textFields["tags.search"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["main.tab.account"].isHittable)
+        input.tap(); input.typeText("英语\n")
+        let candidate = app.buttons["tag.suggestion.language:english"]
+        XCTAssertTrue(candidate.waitForExistence(timeout: 8)); candidate.tap(); app.buttons["tags.add"].tap()
         XCTAssertFalse(app.buttons["tag.match.0"].exists)
-        input.tap()
-        input.typeText("英语\n")
-        tapCandidate(app)
-        XCTAssertFalse(app.buttons["tag.pending.match.language:english"].exists)
-        XCTAssertTrue(app.buttons["tag.pending.remove.language:english"].exists)
-        app.buttons["tag.confirm"].tap()
-        XCTAssertTrue(app.buttons["tags.add"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["english"].exists)
+        XCTAssertFalse(app.buttons["tag.confirm"].exists)
+        XCTAssertEqual(candidate.value as? String, "已添加")
+        app.buttons["tags.search.clear"].tap()
         let filter = app.textFields["tags.search"]
         XCTAssertTrue(filter.isHittable)
         let searchCard = app.descendants(matching: .any)["tags.search-card"].firstMatch
-        XCTAssertTrue(searchCard.exists)
         XCTAssertEqual(searchCard.frame.height, 36, accuracy: 1)
         XCTAssertEqual(searchCard.frame.midY, filter.frame.midY, accuracy: 1)
-        XCTAssertEqual(app.buttons["tags.scope.0"].frame.minY - searchCard.frame.maxY, 4, accuracy: 1)
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = "tags-management.separate-search"; shot.lifetime = .keepAlways; add(shot)
-        filter.tap(); filter.typeText("zzzz")
-        XCTAssertFalse(app.staticTexts["english"].exists)
-        filter.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
-        XCTAssertTrue(app.staticTexts["english"].exists)
-        let blocked = app.buttons["tags.scope.1"]
-        let common = app.buttons["tags.scope.0"]
-        XCTAssertEqual(common.frame.height, 36, accuracy: 1)
+        let saved = app.descendants(matching: .any)["tags.saved"].firstMatch
+        filter.tap(); filter.typeText("zzzz\n")
+        XCTAssertTrue(saved.staticTexts["english"].exists)
+        app.buttons["tags.search.clear"].tap()
+        let common = app.buttons["tags.scope.0"], blocked = app.buttons["tags.scope.1"]
+        XCTAssertEqual(common.frame.height, 44, accuracy: 1)
         XCTAssertEqual(blocked.frame.height, common.frame.height, accuracy: 1)
-        XCTAssertEqual(common.frame.midY, blocked.frame.midY, accuracy: 1)
-        blocked.tap()
-        XCTAssertTrue(blocked.isSelected)
-        XCTAssertFalse(app.staticTexts["english"].exists)
-        common.tap()
-        XCTAssertTrue(common.isSelected)
-        XCTAssertTrue(app.staticTexts["english"].exists)
-        XCTAssertTrue(app.buttons["main.tab.account"].isHittable)
-
+        blocked.tap(); XCTAssertFalse(saved.staticTexts["english"].exists)
+        common.tap(); XCTAssertTrue(saved.staticTexts["english"].exists)
         let longName = "an unusually long local tag name with a distinctive ending for layout checks"
-        app.buttons["tags.add"].tap()
-        app.selectTagNamespace("other")
-        XCTAssertTrue(input.waitForExistence(timeout: 5))
-        input.tap()
-        input.typeText(longName + "\n")
-        let manualTag = app.buttons["tag.stage"]
-        XCTAssertTrue(manualTag.waitForExistence(timeout: 5))
-        for _ in 0..<3 { if manualTag.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(manualTag.isHittable)
-        manualTag.tap()
-        app.buttons["tag.confirm"].tap()
-        let longTag = app.staticTexts[longName]
+        input.tap(); input.typeText(longName + "\n")
+        app.buttons["tags.add.namespace"].tap(); app.buttons["tags.add.namespace.other"].tap()
+        let manual = app.buttons["tag.stage"]
+        XCTAssertTrue(manual.waitForExistence(timeout: 8)); manual.tap(); app.buttons["tags.add"].tap()
+        app.buttons["tags.search.clear"].tap()
+        let longTag = saved.staticTexts[longName]
         XCTAssertTrue(longTag.waitForExistence(timeout: 5))
-        XCTAssertGreaterThan(longTag.frame.height, app.staticTexts["english"].frame.height)
+        XCTAssertGreaterThan(longTag.frame.height, saved.staticTexts["english"].frame.height)
+        XCTAssertTrue(app.buttons["main.tab.account"].isHittable)
     }
 
     private func openTags(_ extra: [String] = []) -> XCUIApplication {
@@ -130,7 +108,14 @@ final class TagSelectionV28UITests: XCTestCase {
         XCTAssertFalse(shortcut.isEnabled)
         XCTAssertEqual(add.frame.height, 36, accuracy: 1)
         XCTAssertEqual(common.frame.height, shortcut.frame.height, accuracy: 1)
-        XCTAssertEqual(shortcut.frame.minY - common.frame.maxY, 4, accuracy: 1)
+        let commonTitle = app.staticTexts["tag.section.title.常用标签"]
+        let selectedTitle = app.staticTexts["tag.section.title.已选标签"]
+        let selectedRule = app.buttons["compose.rule.match.language:english"]
+        XCTAssertTrue(commonTitle.exists); XCTAssertTrue(selectedTitle.exists)
+        XCTAssertGreaterThan(commonTitle.frame.minY, common.frame.maxY)
+        XCTAssertLessThan(commonTitle.frame.maxY, shortcut.frame.minY)
+        XCTAssertEqual(shortcut.frame.minY - commonTitle.frame.maxY,
+                       selectedRule.frame.minY - selectedTitle.frame.maxY, accuracy: 1)
         XCTAssertEqual(common.frame.minX - add.frame.maxX, 4, accuracy: 1)
         XCTAssertEqual(shortcut.frame.minX, add.frame.minX, accuracy: 1)
         XCTAssertEqual(shortcut.frame.maxX, common.frame.maxX, accuracy: 1)
@@ -190,7 +175,7 @@ final class TagSelectionV28UITests: XCTestCase {
         XCTAssertEqual(app.textFields["compose.text"].value as? String, "coast")
         XCTAssertFalse(app.buttons["discover.condition-summary"].exists)
         app.buttons["compose.apply"].tap()
-        let result = app.buttons["discover.condition-summary"]
+        let result = app.buttons["discover.search-entry"]
         XCTAssertTrue(result.waitForExistence(timeout: 6))
         XCTAssertTrue((result.value as? String)?.contains("排除 language:english") == true)
         app.buttons["discover.search-entry"].tap(); app.buttons["compose.records"].tap()

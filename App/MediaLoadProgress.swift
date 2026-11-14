@@ -3,6 +3,7 @@ import Foundation
 enum MediaLoadPhase: Equatable, Sendable {
     case resolvingPage
     case queued
+    case connecting
     case transferring
     case ready
 }

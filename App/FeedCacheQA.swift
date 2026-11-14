@@ -1,4 +1,5 @@
 import Foundation
+import ExViewerCore
 import SwiftUI
 
 /// Deterministic local transport and isolated persistent cache for simulator QA.
@@ -6,6 +7,7 @@ import SwiftUI
 /// `--qa-feed-cache` launch argument is present.
 enum FeedCacheQA {
     private static let arguments = ProcessInfo.processInfo.arguments
+    @MainActor private static var listRequestsByPath: [String: Int] = [:]
 
     static var isEnabled: Bool {
         AppMode.qa && arguments.contains("--qa-feed-cache")
@@ -31,19 +33,32 @@ enum FeedCacheQA {
     }
 
     @MainActor static func stateValue(pager: GalleryPager) -> String {
-        "cached=\(pager.cachedAt != nil);loading=\(pager.loading);items=\(pager.items.count);next=\(pager.next != nil);failure=\(pager.failure != nil)"
+        "cached=\(pager.cachedAt != nil);loading=\(pager.loading);items=\(pager.items.count);next=\(pager.next != nil);failure=\(pager.failure != nil);latestRequests=\(listRequestsByPath["/", default: 0]);popularRequests=\(listRequestsByPath["/popular", default: 0]);favoriteRequests=\(listRequestsByPath["/favorites.php", default: 0])"
     }
+    @MainActor private static func recordListRequest(_ url: URL) { listRequestsByPath[url.path, default: 0] += 1 }
 
     /// Loader signature matches GalleryPager's injected transport. API metadata
     /// requests are synthesized from their gids; list pages are selected by URL.
     static func loadHTML(_ url: URL, search: Bool, body: Data?) async throws -> String {
         guard isEnabled else { throw URLError(.unsupportedURL) }
+        if search { await recordListRequest(url) }
+        if arguments.contains("--qa-feed-cache-login-expired") { throw ViewerError.authentication }
+        if arguments.contains("--qa-feed-cache-failure") { throw URLError(.timedOut) }
+        if arguments.contains("--qa-feed-cache-empty") {
+            return "<html><body><div class=\"itg\">No hits found</div></body></html>"
+        }
+        if arguments.contains("--qa-feed-cache-slow") {
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        }
         if arguments.contains("--qa-feed-cache-offline") {
             try await Task.sleep(nanoseconds: 12_000_000_000)
             try Task.checkCancellation()
             throw URLError(.notConnectedToInternet)
         }
         try await Task.sleep(nanoseconds: 300_000_000)
+        if search, arguments.contains("--qa-feed-cache-refresh-delay") {
+            try await Task.sleep(for: .seconds(3))
+        }
         try Task.checkCancellation()
 
         if let body, url.host == "api.e-hentai.org" {

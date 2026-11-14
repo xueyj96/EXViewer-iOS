@@ -66,7 +66,7 @@ final class TagSuggestionsV9UITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["language:english"].waitForExistence(timeout: 5))
         app.buttons["compose.apply"].tap()
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 8))
         XCTAssertTrue((summary.value as? String)?.contains("language:english") == true)
     }
@@ -91,7 +91,7 @@ final class TagSuggestionsV9UITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["artist:qa stencil"].waitForExistence(timeout: 5))
         app.buttons["compose.apply"].tap()
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 8))
         XCTAssertTrue((summary.value as? String ?? "").contains("artist:qa stencil"))
     }
@@ -127,7 +127,7 @@ final class TagSuggestionsV9UITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["language:zz-no-real-tag"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["language:zz-other-tag"].exists)
         app.buttons["compose.apply"].tap()
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 8))
         XCTAssertTrue((summary.value as? String ?? "").contains("language:zz-no-real-tag"))
     }

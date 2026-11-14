@@ -24,14 +24,14 @@ public enum SearchInputError: Error, Equatable, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .unclosedQuote: return "搜索内容有未闭合的引号。"
-        case .invalidQuotedValue(let token): return "引号后的内容无法解析：\(token)"
-        case .invalidTag: return "标签请使用 namespace:tag、-namespace:tag 或 ~namespace:tag。"
-        case .emptyValue(let scope): return "\(scope)条件不能为空。"
-        case .unsupportedScope(let scope): return "当前组合输入暂不支持 \(scope): 范围，请使用已列出的关键词与标签条件。"
-        case .mixedTitleScope: return "当前组合输入一次使用同一种关键词范围；请统一标题范围，或在筛选中设置。"
-        case .mixedPhraseScope: return "当前组合输入暂不支持混合多个短语与普通词；请使用关键词模式或一个完整短语。"
-        case .repeatedUploader: return "搜索栏只能指定一个 uploader 条件。"
+        case .unclosedQuote: return "请补全搜索内容的引号"
+        case .invalidQuotedValue: return "引号后的内容无法解析"
+        case .invalidTag: return "标签格式应为 namespace:tag"
+        case .emptyValue(let scope): return "\(scope)条件不能为空"
+        case .unsupportedScope: return "暂不支持此搜索范围"
+        case .mixedTitleScope: return "请统一关键词范围"
+        case .mixedPhraseScope: return "请使用普通关键词或一个完整短语"
+        case .repeatedUploader: return "只能指定一个 uploader 条件"
         }
     }
 }

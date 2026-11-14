@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 import Foundation
 import CoreGraphics
 import ImageIO
@@ -6,6 +7,35 @@ import ExViewerCore
 @testable import ExViewer
 
 final class ReaderImagePipelineV17Tests: XCTestCase {
+    @MainActor func testDecodeFailureShowsStandardFontAndRetryRecoversSameCanvas() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("recover.png")
+        try Data("invalid image".utf8).write(to: file)
+        let canvas = ImageCanvasView(frame: CGRect(x: 0, y: 0, width: 320, height: 500))
+        defer { canvas.dispose() }
+        let failed = expectation(description: "Decode fails")
+        canvas.onDecodeFailure = { _ in failed.fulfill() }
+        canvas.load(file, animate: false)
+        canvas.layoutIfNeeded()
+        await fulfillment(of: [failed], timeout: 3)
+        let status = try XCTUnwrap(canvas.subviews.compactMap { $0 as? UILabel }.first)
+        let retry = try XCTUnwrap(canvas.subviews.compactMap { $0 as? UIButton }.first)
+        XCTAssertFalse(retry.isHidden)
+        XCTAssertEqual(status.font, ReaderStatusAppearance.uiFont)
+        XCTAssertEqual(retry.titleLabel?.font, status.font)
+        XCTAssertEqual(retry.currentTitle, "重试")
+        XCTAssertGreaterThanOrEqual(retry.frame.height, 44)
+        let presented = expectation(description: "Retry displays repaired file")
+        canvas.onPresentation = { _ in presented.fulfill() }
+        try writePNG(file, image: image())
+        retry.sendActions(for: .touchUpInside)
+        await fulfillment(of: [presented], timeout: 3)
+        XCTAssertTrue(retry.isHidden)
+        XCTAssertTrue(status.isHidden)
+        XCTAssertEqual(canvas.file, file)
+    }
+
     private final class DecodeCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0

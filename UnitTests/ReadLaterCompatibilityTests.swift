@@ -68,7 +68,7 @@ import ExViewerCore
             let store = LibraryStore(storageRoot: root); store.load(owner: "aa"); store.error = "Controlled failure"
             XCTAssertFalse(store.setReadLater(a, included: false)); XCTAssertTrue(store.containsReadLater(a))
             XCTAssertEqual(try Data(contentsOf: file), bytes)
-            XCTAssertTrue(store.readLaterNotice?.text.contains("未能保存") == true)
+            XCTAssertTrue(store.readLaterNotice?.text.contains("保存失败") == true)
         }
     }
     func testSameStableIDCannotCreateDuplicatesWhenGalleryMetadataChanges() throws {

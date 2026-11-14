@@ -36,7 +36,7 @@ enum GalleryDownloadState {
         if record.status == .waiting { return "等待中" }
         let completed = record.completed.count
         let count = record.total.map { "已保存 \(completed)/\($0) 页" } ?? "已保存 \(completed) 页"
-        return record.requiresRetry ? [record.error ?? "下载失败", count].joined(separator: "，") : count
+        return record.requiresRetry ? [record.error ?? "下载失败", count].joined(separator: " ") : count
     }
 
     static func resolve(_ reference: GalleryRef, records: [DownloadRecord],
@@ -87,6 +87,7 @@ enum GalleryDownloadState {
 
     @Published private var result: (query: Query, phase: Phase)?
     private var revision = UUID()
+    private var flight: Task<GalleryVersionLinks?, Error>?
 
     static func query(for reference: GalleryRef, library: LibraryStore, session: SiteSession) -> Query? {
         guard library.owner == session.owner,
@@ -105,26 +106,39 @@ enum GalleryDownloadState {
     }
 
     func refresh(_ gallery: Gallery, query: Query?, session: SiteSession, force: Bool = false) async {
-        guard let query else { result = nil; revision = UUID(); return }
-        guard force || result?.query != query else { return }
+        guard let query else {
+            flight?.cancel(); flight = nil; result = nil; revision = UUID(); return
+        }
+        if !force && result?.query == query {
+            if let flight { _ = try? await flight.value }
+            return
+        }
+        flight?.cancel()
         let revision = UUID()
         self.revision = revision
         result = (query, .checking)
-        do {
-            let links: GalleryVersionLinks?
+        // The shared model owns this request. Popping/pushing either subscriber
+        // must not cancel a version check still needed by the other page.
+        let task = Task<GalleryVersionLinks?, Error> { @MainActor in
             if AppMode.qa {
-                links = Self.fixture(for: gallery.ref)
-            } else {
-                links = try await session.galleryVersionLinks(gallery, priority: force ? .foreground : .prefetch, refresh: force)
+                if ProcessInfo.processInfo.arguments.contains("--qa-version-slow") {
+                    try await Task.sleep(for: .seconds(20))
+                }
+                return Self.fixture(for: gallery.ref)
             }
-            try Task.checkCancellation()
+            return try await session.galleryVersionLinks(gallery, priority: force ? .foreground : .prefetch, refresh: force)
+        }
+        flight = task
+        defer { if self.revision == revision { flight = nil } }
+        do {
+            let links = try await task.value
             guard self.revision == revision, session.generation == query.generation, session.owner == query.owner else { return }
             result = (query, .ready(links))
         } catch is CancellationError {
             if self.revision == revision { result = nil }
         } catch {
             guard self.revision == revision, session.generation == query.generation, session.owner == query.owner else { return }
-            result = (query, .failed(ErrorMessages.message(error, fallback: "暂时无法检查画廊版本。")))
+            result = (query, .failed(ErrorMessages.message(error, fallback: "暂时无法检查画廊版本")))
         }
     }
 
@@ -141,12 +155,12 @@ enum GalleryDownloadState {
 extension View {
     func confirmOfflineUpdate(_ update: Binding<GalleryOfflineUpdate?>,
                               onConfirm: @escaping (GalleryOfflineUpdate) -> Void) -> some View {
-        confirmationDialog("更新离线副本？", isPresented: Binding(get: { update.wrappedValue != nil }, set: { if !$0 { update.wrappedValue = nil } }),
+        confirmationDialog("更新离线副本", isPresented: Binding(get: { update.wrappedValue != nil }, set: { if !$0 { update.wrappedValue = nil } }),
                            titleVisibility: .visible, presenting: update.wrappedValue) { plan in
             Button("更新到新版") { onConfirm(plan) }
             Button("取消", role: .cancel) { }
         } message: { _ in
-            Text("能核对的图片会直接复用，其余图片重新缓存。新版完整后，旧副本将在结束阅读时移除。")
+            Text("新版下载完整且阅读结束后移除旧副本")
         }
     }
 }
@@ -165,32 +179,30 @@ struct GalleryDownloadsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Text(gallery.title).lineLimit(2).foregroundStyle(.secondary)
-                    .accountPageCard(compactRows: true)
-                downloadAction(for: versions.downloadState(for: gallery.ref, library: library, session: session))
-                NavigationLink { GalleryTorrentsView(gallery: gallery, session: session) } label: {
-                    Label("BT 种子", systemImage: "point.3.connected.trianglepath.dotted")
-                        .downloadOptionTarget()
-                }
-                .accessibilityIdentifier("downloads.torrents")
+        List {
+            Text(gallery.title).lineLimit(2).foregroundStyle(.secondary)
                 .accountPageCard(compactRows: true)
+            downloadAction(for: versions.downloadState(for: gallery.ref, library: library, session: session))
+            NavigationLink { GalleryTorrentsView(gallery: gallery, session: session) } label: {
+                Label("BT 种子", systemImage: "point.3.connected.trianglepath.dotted")
+                    .downloadOptionTarget()
             }
-            .accountSubpageContent()
-            .floatingPageHeader("下载方式", identifier: "downloads.options") {
-                Button { dismiss() } label: { Label("关闭", systemImage: "xmark") }.buttonStyle(FeedHeaderButtonStyle())
-                    .accessibilityIdentifier("downloads.options.close")
-            } trailing: {
-                EmptyView()
-            }
-            .task(id: query) { await versions.refresh(gallery, query: query, session: session) }
-            .confirmOfflineUpdate($pendingUpdate) { update in
-                if downloads.enqueueUpdate(update, from: gallery) { dismiss() }
-            }
+            .accessibilityIdentifier("downloads.torrents")
+            .accountPageCard(compactRows: true)
         }
-        .localPageChrome()
-        .presentationDetents([.medium, .large])
+        .accountSubpageContent()
+        .appNavigationChrome(backButton: true, showsToolbarBackButton: false)
+        .appToast(message: library.download(for: gallery.ref)?.error, identifier: "downloads.error")
+        .floatingPageHeader("下载方式", identifier: "downloads.options", pinned: true) {
+            Button { dismiss() } label: { Label("返回", systemImage: "chevron.left") }.buttonStyle(FeedHeaderButtonStyle())
+                .accessibilityIdentifier("downloads.options.close")
+        } trailing: {
+            EmptyView()
+        }
+        .task(id: query) { await versions.refresh(gallery, query: query, session: session) }
+        .confirmOfflineUpdate($pendingUpdate) { update in
+            if downloads.enqueueUpdate(update, from: gallery) { dismiss() }
+        }
     }
 
     @ViewBuilder private func downloadAction(for state: GalleryDownloadState) -> some View {
@@ -209,9 +221,6 @@ struct GalleryDownloadsView: View {
                     .downloadOptionTarget()
             }.accessibilityIdentifier("downloads.save").accessibilityValue(state.progress)
                 .accountPageCard(compactRows: true)
-            if let error = record.error {
-                Text(error).font(.caption).foregroundStyle(.secondary).accountPageCard()
-            }
         case .saved:
             Label(state.title, systemImage: state.symbol).foregroundStyle(.secondary)
                 .accountPageCard(compactRows: true)
@@ -355,7 +364,7 @@ final class TorrentShare: Identifiable {
                 guard revision == token, generation == session.generation else { return }
                 share = try TorrentShare(data: data, infoHash: torrent.infoHash)
             } catch is CancellationError { }
-            catch { if revision == token { self.error = "种子文件未能准备，请重试。" } }
+            catch { if revision == token { self.error = "种子文件准备失败 请重试" } }
         }
     }
     func cancel() {
@@ -377,7 +386,7 @@ struct GalleryTorrentsView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var session: SiteSession
     @StateObject private var model: GalleryTorrentsModel
-    @State private var copied: String?
+    @State private var copyFeedback: String?
     init(gallery: Gallery, session: SiteSession) {
         self.gallery = gallery; self.session = session
         _model = StateObject(wrappedValue: GalleryTorrentsModel(gallery: gallery, session: session))
@@ -385,15 +394,9 @@ struct GalleryTorrentsView: View {
     var body: some View {
         List {
             if model.loading && model.items.isEmpty { ProgressView("读取种子…").accountPageCard() }
-            if let error = model.error {
-                VStack(alignment: .leading, spacing: FeedChrome.panelSpacing) {
-                    Text(error).foregroundStyle(.secondary)
-                    if model.items.isEmpty {
-                        Button("重试") { Task { await model.load() } }
-                            .buttonStyle(AppActionButtonStyle(tone: .accent))
-                    }
-                }
-                .accountPageCard()
+            if model.error != nil && model.items.isEmpty {
+                Button("重试加载") { Task { await model.load() } }
+                    .buttonStyle(AppActionButtonStyle(tone: .accent)).accountPageCard()
             }
             if !model.loading && model.error == nil && model.items.isEmpty {
                 Text("这部作品暂无种子").foregroundStyle(.secondary).accountPageCard(compactRows: true)
@@ -402,9 +405,11 @@ struct GalleryTorrentsView: View {
                 torrentCard(torrent)
             }
         }
+        .appToast(message: model.error, identifier: "torrent.error")
+        .appToast(message: $copyFeedback, identifier: "torrent.feedback")
         .accountSubpageHeader("BT 种子", identifier: "torrent") { EmptyView() }
         .task { await model.load() }.onDisappear { model.cancel() }
-        .onChange(of: session.generation) { _, _ in model.cancel(); model.items = []; model.error = "账号状态已变化，请重新打开。" }
+        .onChange(of: session.generation) { _, _ in model.cancel(); model.items = []; model.error = "账号已切换 请重新打开" }
         .sheet(item: $model.share) { share in
             TorrentShareView(file: share.file) {
                 model.finishSharing(share.id)
@@ -432,8 +437,8 @@ struct GalleryTorrentsView: View {
                 .buttonStyle(AppActionButtonStyle(tone: .accent))
                 .disabled(model.preparing != nil)
                 .accessibilityIdentifier("torrent.export")
-                Button { UIPasteboard.general.string = magnet; copied = torrent.id } label: {
-                    torrentActionLabel(copied == torrent.id ? "已复制" : "复制磁链", symbol: "link")
+                Button { UIPasteboard.general.string = magnet; copyFeedback = "磁链已复制" } label: {
+                    torrentActionLabel("复制磁链", symbol: "link")
                 }
                 .buttonStyle(AppActionButtonStyle())
                 .accessibilityIdentifier("torrent.copy-magnet")

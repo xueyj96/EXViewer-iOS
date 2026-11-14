@@ -203,7 +203,7 @@ struct ReaderMediaScope: Hashable, Sendable {
         requests.removeAll()
         inflight.removeAll()
         progress.removeAll()
-        backgroundWork?.finish(success: false)
+        backgroundWork?.finish(.paused)
     }
 
     private func cancelRequest(at index: Int) {
@@ -212,7 +212,7 @@ struct ReaderMediaScope: Hashable, Sendable {
         request.task.cancel()
         inflight.removeValue(forKey: index)
         progress.removeValue(forKey: index)
-        if requests.isEmpty { backgroundWork?.finish(success: false) }
+        if requests.isEmpty { backgroundWork?.finish(.paused) }
     }
 
     private func desiredRequests(current: Int, count: Int, in pages: [Int: GalleryPage]) -> [Int: MediaRequestPriority] {
@@ -344,7 +344,7 @@ struct ReaderMediaScope: Hashable, Sendable {
             self.requests.removeValue(forKey: index)
             self.inflight.removeValue(forKey: index)
             self.schedule()
-            if self.requests.isEmpty { self.backgroundWork?.finish(success: true) }
+            if self.requests.isEmpty { self.backgroundWork?.finish(.completed) }
         }
         requests[index] = RunningRequest(token: token, demand: demand, progressObserver: progressObserver,
                                          url: page.url, task: task)

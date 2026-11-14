@@ -58,7 +58,7 @@ public struct GalleryMetadata: Sendable {
     }
 
     public static func request(_ galleries: [Gallery]) throws -> Data {
-        guard !galleries.isEmpty, galleries.count <= 25 else { throw ViewerError.invalidQuery("元数据每批最多 25 项。") }
+        guard !galleries.isEmpty, galleries.count <= 25 else { throw ViewerError.invalidQuery("作品资料每批最多 25 项") }
         let list: [[Any]] = galleries.map { [$0.ref.gid, $0.ref.token] }
         return try JSONSerialization.data(withJSONObject: ["method": "gdata", "gidlist": list, "namespace": 1])
     }

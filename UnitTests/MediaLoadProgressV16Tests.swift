@@ -15,6 +15,7 @@ import ExViewerCore
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {
             guard let url = request.url, let client else { return }
+            if url.path == "/hold" { return } // Accepted transport; response headers deliberately withheld.
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                                            headerFields: ["Content-Type": "image/png",
                                                           "Content-Length": String(Self.png.count)])!
@@ -140,6 +141,22 @@ import ExViewerCore
         XCTAssertEqual(transferred.fraction, 1)
         let source = CGImageSourceCreateWithURL(file as CFURL, nil)
         XCTAssertGreaterThan(source.map(CGImageSourceGetCount) ?? 0, 0)
+    }
+
+    func testWaitingForHeadersIsConnectingAndCancellationStillCompletes() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PNGProtocol.self]
+        let demand = MediaRequestDemand()
+        demand.reportProgress(MediaLoadProgress(phase: .queued))
+        let transfer = FileTransfer(limit: 64_000_000, client: MediaTransferClient(configuration: configuration))
+        let task = Task { try await transfer.fetch(URL(string: "https://progress.fixture.hath.network/hold")!, request: demand) }
+        let connected = await waitUntil { demand.progress.phase == .connecting }
+        XCTAssertTrue(connected, "An admitted request must stop claiming it is in the download queue")
+        XCTAssertEqual(demand.progress.completedBytes, 0)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancellation must stop the held request") }
+        catch is CancellationError { }
+        XCTAssertEqual(demand.progress.phase, .connecting, "Cancellation before headers must not invent a transferring phase")
     }
 
     func testOldGenerationProgressCannotReplaceCurrentPageProgress() async throws {

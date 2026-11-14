@@ -51,8 +51,8 @@ final class DetailActionLayoutV32UITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["已选 10/10"].exists)
         XCTAssertEqual(selectAll.frame.midY, invert.frame.midY, accuracy: 1)
         XCTAssertEqual(selectAll.frame.width, invert.frame.width, accuracy: 1)
-        let scopeRows = [app.staticTexts["搜索范围"], app.switches["仅搜标题"],
-                         app.switches["匹配完整短语"], app.textFields["compose.artist"]]
+        let scopeRows = [app.textFields["compose.artist"], app.textFields["compose.uploader"],
+                         app.textFields["compose.min-pages"]]
         for row in scopeRows { XCTAssertTrue(row.exists) }
         for (first, second) in zip(scopeRows, scopeRows.dropFirst()) {
             XCTAssertEqual(second.frame.midY - first.frame.midY, 40, accuracy: 1)
@@ -154,7 +154,7 @@ final class DetailActionLayoutV32UITests: XCTestCase {
         let settled = NSPredicate { _, _ in app.frame.width > app.frame.height && favorite.isHittable }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: settled, object: favorite)], timeout: 6), .completed)
         favorite.tap()
-        let edit = app.buttons["favorite.editor.edit"]
+        let edit = app.buttons["favorite.editor.group-picker"]
         XCTAssertTrue(edit.waitForExistence(timeout: 5))
         XCTAssertTrue(edit.isHittable)
         capturePreview("detail-landscape-favorite-editor", app: app)
@@ -348,7 +348,7 @@ final class DetailActionLayoutV32UITests: XCTestCase {
                 XCTAssertEqual(title.frame.minX - group.frame.minX, 8, accuracy: 1)
                 XCTAssertEqual(chip.frame.minX - title.frame.maxX, 4, accuracy: 1)
                 XCTAssertEqual(chip.frame.midY, title.frame.midY, accuracy: 1)
-                XCTAssertEqual(chip.frame.height, max(32, title.frame.height), accuracy: 1)
+                XCTAssertEqual(chip.frame.height, max(30, title.frame.height), accuracy: 1)
                 XCTAssertEqual(group.frame.minX - tags.frame.minX, 4, accuracy: 1)
                 XCTAssertEqual(tags.frame.maxX - group.frame.maxX, 4, accuracy: 1)
             }

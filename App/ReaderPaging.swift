@@ -85,9 +85,11 @@ enum ReaderDragPolicy {
         return offset * forwardSign > 0 ? 1 : -1
     }
     static func commits(offset: CGFloat, predicted: CGFloat, extent: CGFloat) -> Bool {
-        guard extent > 0, abs(offset) >= 36 else { return false }
-        return abs(offset) >= max(44, extent * 0.23) ||
-            (offset * predicted > 0 && abs(predicted) >= extent * 0.5)
+        guard extent.isFinite, extent > 0, offset.isFinite, predicted.isFinite, abs(offset) >= 24 else { return false }
+        // A comfortable thumb stroke should not grow with the full landscape width.
+        let threshold = min(56, max(28, extent * 0.10))
+        return abs(offset) >= threshold ||
+            (offset * predicted > 0 && abs(predicted) >= threshold * 2)
     }
     static func boundedOffset(_ offset: CGFloat, extent: CGFloat, hasNeighbor: Bool) -> CGFloat {
         let clamped = min(extent, max(-extent, offset))
@@ -106,21 +108,19 @@ struct ReaderSinglePageTurn {
 
     enum Release: Equatable {
         case rebound
-        case waitForPresentation(Int)
         case commit(Int)
     }
 
     var dragPhase: DragPhase = .idle
     var dragOffset: CGFloat = 0
     var dragPreview: Int?
-    var pendingPage: Int?
 
     var isDraggingOrSettling: Bool { dragPhase != .idle }
-    var requestedNeighbor: Int? { dragPreview ?? pendingPage }
+    var requestedNeighbor: Int? { dragPreview }
 
-    func release(commit: Bool, isPresented: (Int) -> Bool) -> Release {
+    func release(commit: Bool) -> Release {
         guard commit, let target = dragPreview else { return .rebound }
-        return isPresented(target) ? .commit(target) : .waitForPresentation(target)
+        return .commit(target)
     }
 
     mutating func resetDrag() {
@@ -130,19 +130,16 @@ struct ReaderSinglePageTurn {
     }
 
     mutating func cancel() {
-        pendingPage = nil
         resetDrag()
     }
 }
 
 enum ReaderEdgeBackPolicy {
-    static let leadingInset: CGFloat = 20
+    static let leadingInset = PageEdgeGestureMetrics.activationWidth
 
-    static func isLeadingSwipe(startX: CGFloat, translation: CGSize) -> Bool {
-        (0...leadingInset).contains(startX) && translation.width > abs(translation.height) * 1.4
-    }
-
-    static func completes(startX: CGFloat, translation: CGSize) -> Bool {
-        translation.width >= 56 && isLeadingSwipe(startX: startX, translation: translation)
+    static func isInwardSwipe(startX: CGFloat, width: CGFloat, translation: CGSize) -> Bool {
+        guard width > leadingInset * 2, abs(translation.width) > abs(translation.height) * 1.4 else { return false }
+        return (startX <= leadingInset && translation.width > 0) ||
+            (startX >= width - leadingInset && translation.width < 0)
     }
 }

@@ -3,7 +3,10 @@ import Foundation
 /// Owns one reusable, private media session. Individual transfers supply their
 /// own task delegate so concurrent downloads keep independent response state.
 final class MediaTransferClient: @unchecked Sendable {
-    static let maxConnections = max(ReaderLoadPolicy.maxConcurrency, DownloadLoadPolicy.concurrencyRange.upperBound + 1)
+    // Four cover transfers are isolated from the existing download/reader budget.
+    // Lookahead uses at most three; a newly visible cover can start immediately.
+    static let coverCapacity = 4
+    static let maxConnections = max(ReaderLoadPolicy.maxConcurrency, DownloadLoadPolicy.concurrencyRange.upperBound + 1) + coverCapacity
     static let shared = MediaTransferClient()
 
     private let session: URLSession

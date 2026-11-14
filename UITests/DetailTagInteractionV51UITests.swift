@@ -58,7 +58,7 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         XCTAssertEqual(rows.count, 3); rows.element(boundBy: 0).tap()
         XCTAssertEqual(app.textFields["compose.text"].value as? String, expectedText)
         app.buttons["compose.apply"].tap()
-        XCTAssertTrue(app.buttons["discover.condition-summary"].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 6))
     }
 
     func testSelectionNewDraftCancelAndExplicitSubmitKeepTabsAndSingleLineInput() {
@@ -104,7 +104,7 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         let resultsBar = app.descendants(matching: .any)["discover.header.floating"].firstMatch
         XCTAssertTrue(resultsBar.waitForExistence(timeout: 6))
         XCTAssertEqual(resultsBar.frame.width, app.frame.width - 40, accuracy: 1, "Standalone results use the shared side insets")
-        let result = app.buttons["discover.condition-summary"]
+        let result = app.buttons["discover.search-entry"]
         XCTAssertTrue(result.waitForExistence(timeout: 6))
         XCTAssertTrue((result.value as? String)?.contains("language:chinese") == true)
         XCTAssertTrue((result.value as? String)?.contains("artist:preview studio") == true)
@@ -147,7 +147,7 @@ final class DetailTagInteractionV51UITests: XCTestCase {
     func testAddingToCurrentSearchPreservesFiltersAndCancelLeavesOldResultsAndSavedPreset() {
         let app = launch(["--qa-multiline-search"])
         startPreset(app, expectedText: "coast field notes")
-        let original = app.buttons["discover.condition-summary"].value as? String
+        let original = app.buttons["discover.search-entry"].value as? String
         openDetail(app)
         _ = select("language:chinese", in: app); _ = select("artist:preview studio", in: app)
         app.buttons["detail.tags.search-menu"].tap()
@@ -162,12 +162,12 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         capture(app, "detail51.merge-draft")
         app.buttons["compose.cancel"].tap()
         app.buttons["detail.tags.cancel"].tap(); app.buttons["BackButton"].tap()
-        XCTAssertEqual(app.buttons["discover.condition-summary"].value as? String, original)
+        XCTAssertEqual(app.buttons["discover.search-entry"].value as? String, original)
         openDetail(app)
         _ = select("language:chinese", in: app); _ = select("artist:preview studio", in: app)
         app.buttons["detail.tags.search-menu"].tap(); app.buttons["detail.tags.add-to-search"].tap()
         app.buttons["compose.apply"].tap()
-        let result = app.buttons["discover.condition-summary"]
+        let result = app.buttons["discover.search-entry"]
         XCTAssertTrue(result.waitForExistence(timeout: 6))
         let search = app.buttons["discover.search-entry"]
         XCTAssertTrue((search.value as? String)?.contains("coast field notes") == true)
@@ -215,9 +215,9 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         _ = select("artist:preview studio", in: app)
         menu.tap(); app.buttons["detail.tags.add-to-search"].tap()
         app.buttons["compose.apply"].tap()
-        XCTAssertTrue(app.buttons["discover.condition-summary"].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 6))
         XCTAssertTrue(app.buttons["main.tab.discover"].isSelected)
-        XCTAssertTrue((app.buttons["discover.condition-summary"].value as? String)?.contains("artist:preview studio") == true)
+        XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("artist:preview studio") == true)
         app.buttons["main.tab.library"].tap()
         XCTAssertTrue(app.staticTexts["已选 2 个"].waitForExistence(timeout: 6))
         app.buttons["detail.tags.cancel"].tap()
@@ -251,11 +251,11 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         _ = select("language:chinese", in: app, mainTabs: false)
         app.buttons["detail.tags.search-menu"].tap(); app.buttons["detail.tags.add-to-search"].tap()
         app.buttons["compose.apply"].tap()
-        XCTAssertTrue(app.buttons["discover.condition-summary"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 8))
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["reader.page"])
         waitForExpectations(timeout: 6)
         XCTAssertTrue(app.buttons["main.tab.discover"].isHittable)
-        XCTAssertTrue((app.buttons["discover.condition-summary"].value as? String)?.contains("language:chinese") == true)
+        XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("language:chinese") == true)
     }
 
     func testNewSearchReturnsToTheSameFavoriteGroupAndScrolledCard() {
@@ -295,4 +295,28 @@ final class DetailTagInteractionV51UITests: XCTestCase {
         XCTAssertTrue(app.batchSelection("已选 1 项").waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["detail.tags.search-menu"].exists)
     }
+    func testNestedSearchHistoryLatestAndCloseRemainInTheSameFlow() {
+        let app = launch(); openDetail(app)
+        _ = select("language:chinese", in: app)
+        visible(app.buttons.matching(identifier: "detail.tags.search-menu")).tap()
+        app.buttons["detail.tags.new-search"].tap()
+        XCTAssertTrue(app.buttons["compose.apply"].waitForExistence(timeout: 5))
+        app.buttons["compose.apply"].tap()
+        let entry = app.buttons["discover.search-entry"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        for index in 0...2 { XCTAssertFalse(app.buttons["discover.lane.\(index)"].isSelected) }
+        app.buttons["discover.lane.2"].tap()
+        let history = app.textFields["reading-history.search-field"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["search.results.close"].isHittable)
+        app.buttons["discover.lane.0"].tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["discover.lane.0"].isSelected)
+        app.buttons["discover.lane.2"].tap()
+        XCTAssertTrue(history.waitForExistence(timeout: 5))
+        app.buttons["search.results.close"].tap()
+        XCTAssertTrue(app.buttons["detail.read"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["search.results.close"].exists)
+    }
+
 }

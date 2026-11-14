@@ -14,6 +14,7 @@ private struct AccountExternalLinkRow: View {
                     .accessibilityHidden(true)
             }
             .foregroundStyle(Color.accentColor)
+            .font(.footnote)
             .frame(minHeight: FeedChrome.compactFormRowHeight, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -62,15 +63,9 @@ struct QuotaDetailsView: View {
                                 .frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight, alignment: .leading)
                         }
                     }
-                } else if failure == nil {
+                } else {
                     Text("额度暂不可读")
                         .foregroundStyle(.secondary)
-                }
-                if let failure {
-                    Text(failure)
-                        .font(.subheadline)
-                        .foregroundStyle(.red)
-                        .padding(.bottom, usesIPRows ? FeedChrome.contentSpacing : 0)
                 }
             }
             .accountPageCard(compactRows: usesIPRows && (session.quota.used == nil || session.quota.limit == nil))
@@ -79,6 +74,7 @@ struct QuotaDetailsView: View {
             .accessibilityIdentifier("account.quota.settings")
             .accountPageCard(compactRows: true)
         }
+        .appToast(message: $failure, identifier: "account.quota.error")
         .accountSubpageHeader("看图额度", identifier: "account.quota-page") {
             Button { refreshRequest = UUID() } label: {
                 if loading { ProgressView() } else { Image(systemName: "arrow.clockwise") }
@@ -117,46 +113,45 @@ struct SponsorshipView: View {
     private let donationURL = URL(string: "https://e-hentai.org/bitcoin.php")!
     private let perksURL = URL(string: "https://e-hentai.org/hathperks.php")!
 
+    private var showsQAPreview: Bool {
+        AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-sponsorship-preview")
+    }
+
+    private var quotaTrackingMode: String? { showsQAPreview ? "测试数据" : reading.quotaTrackingMode }
+    private var donationStatus: [String] { showsQAPreview ? ["测试赞助状态"] : reading.donationStatus }
+    private var paymentInformation: [String] { showsQAPreview ? ["测试付款信息项目 A", "测试付款信息项目 B"] : reading.paymentInformation }
+    private var perksInformation: [String] { showsQAPreview ? ["测试权益项目", "测试权益说明: 用于检查长内容换行与卡片留白，不代表实际账号权益。"] : reading.perksInformation }
+
+    private func informationRow(_ title: String, content: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: FeedChrome.contentSpacing) {
+            Text(title).foregroundStyle(.primary)
+                .frame(width: 84, alignment: .leading)
+            Text(content).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .font(FeedChrome.labelFont)
+        .padding(.vertical, FeedChrome.panelSpacing)
+        .frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight, alignment: .leading)
+    }
+
     var body: some View {
         List {
-            VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
-                LabeledContent("额度计算方式", value: reading.quotaTrackingMode ?? "未从站点页面识别")
-                if reading.donationStatus.isEmpty {
-                    Text("未读取到可确认的捐赠或服务器赞助状态。") .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(reading.donationStatus.enumerated()), id: \.offset) { _, line in Text(line).font(.subheadline) }
-                }
-            }
-            .accountPageCard()
-            VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
-                Text("站点提供的付款信息").font(.footnote.weight(.semibold)).accessibilityAddTraits(.isHeader)
-                if reading.paymentInformation.isEmpty {
-                    Text("未从站点页面识别付款方式信息。") .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(reading.paymentInformation.enumerated()), id: \.offset) { _, line in Text(line).font(.subheadline).textSelection(.enabled) }
-                }
-                AccountExternalLinkRow(title: "打开官方赞助页面", destination: donationURL)
-            }
-            .accountPageCard()
-            VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
-                Text("Hath Perks").font(.footnote.weight(.semibold)).accessibilityAddTraits(.isHeader)
-                if reading.perksInformation.isEmpty {
-                    Text("未从站点页面识别权益或价格信息。") .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(reading.perksInformation.enumerated()), id: \.offset) { _, line in Text(line).font(.subheadline) }
-                }
-                AccountExternalLinkRow(title: "打开官方 Hath Perks 页面", destination: perksURL)
-            }
-            .accountPageCard()
-            if !failures.isEmpty {
-                VStack(alignment: .leading, spacing: FeedChrome.contentSpacing) {
-                    ForEach(Array(failures.enumerated()), id: \.offset) { _, error in
-                        Text(error).font(.caption).foregroundStyle(.red)
-                    }
-                }
-                .accountPageCard()
-            }
+            informationRow("额度计算", content: quotaTrackingMode ?? "未读取")
+                .accountPageCard(compactRows: true)
+            informationRow("赞助状态", content: donationStatus.isEmpty ? "未读取" : donationStatus.joined(separator: "\n"))
+                .accountPageCard(compactRows: true)
+            informationRow("付款信息", content: paymentInformation.isEmpty ? "未读取" : paymentInformation.joined(separator: "\n"))
+                .accountPageCard(compactRows: true)
+            informationRow("权益信息", content: perksInformation.isEmpty ? "未读取" : perksInformation.joined(separator: "\n"))
+                .accountPageCard(compactRows: true)
+            AccountExternalLinkRow(title: "官方赞助页面", destination: donationURL)
+                .accountPageCard(compactRows: true)
+            AccountExternalLinkRow(title: "Hath Perks", destination: perksURL)
+                .accountPageCard(compactRows: true)
         }
+        .appToast(message: failures.first, identifier: "account.sponsorship.error")
         .accountSubpageHeader("赞助与权益", identifier: "account.sponsorship-page") {
             Button { Task { await load() } } label: {
                 if loading { ProgressView() } else { Image(systemName: "arrow.clockwise") }
@@ -170,7 +165,7 @@ struct SponsorshipView: View {
     }
 
     @MainActor private func load() async {
-        guard !AppMode.qa else { failures = ["测试模式未访问账号数据。"]; return }
+        guard !AppMode.qa else { failures = ["测试模式未访问账号数据"]; return }
         loading = true; failures = []; reading = AccountPageReading()
         let revision = session.generation
         let owner = session.owner
@@ -182,7 +177,7 @@ struct SponsorshipView: View {
             reading = reading.merging(try AccountPages.readHome(html))
         } catch {
             guard isCurrent(revision, owner) else { return }
-            failures.append("额度与账号状态读取失败：\(error.localizedDescription)")
+            failures.append(ErrorMessages.message(error, fallback: "账号状态读取失败 请重试"))
         }
         do {
             let html = try await session.html(donationURL)
@@ -190,7 +185,7 @@ struct SponsorshipView: View {
             reading = reading.merging(try AccountPages.readDonation(html))
         } catch {
             guard isCurrent(revision, owner) else { return }
-            failures.append("赞助页面读取失败：\(error.localizedDescription)")
+            failures.append(ErrorMessages.message(error, fallback: "赞助页面读取失败 请重试"))
         }
         do {
             let html = try await session.html(perksURL)
@@ -198,7 +193,7 @@ struct SponsorshipView: View {
             reading = reading.merging(try AccountPages.readPerks(html))
         } catch {
             guard isCurrent(revision, owner) else { return }
-            failures.append("Hath Perks 页面读取失败：\(error.localizedDescription)")
+            failures.append(ErrorMessages.message(error, fallback: "Hath Perks 读取失败 请重试"))
         }
     }
 

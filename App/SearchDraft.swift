@@ -51,7 +51,7 @@ struct SearchDraft: Equatable {
         func page(_ text: String) throws -> Int? {
             let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if value.isEmpty { return nil }
-            guard let number = Int(value), number >= 0 else { throw ViewerError.invalidQuery("页数须为非负整数。") }
+            guard let number = Int(value), number >= 0 else { throw ViewerError.invalidQuery("页数须为非负整数") }
             return number
         }
         var proposed = query

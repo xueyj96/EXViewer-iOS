@@ -1,0 +1,44 @@
+{
+  "version": "1.1.0",
+  "build": 168,
+  "verification": {
+    "core": {
+      "passed": 85,
+      "failed": 0,
+      "scope": "Full Core Swift package suite"
+    },
+    "app_units": {
+      "passed": 431,
+      "failed": 0,
+      "skipped": 0,
+      "scope": "Full ExViewerTests target on iOS Simulator"
+    },
+    "recent_ui": {
+      "distinct_passed": 7,
+      "scope": "Split runs: nested detail/new search return, extension edit cancel/apply, library source in landscape, reader source return/page continuity, button/both-edge detail return, tag long-press management, fixed shell resize",
+      "all_app_scenarios": false
+    },
+    "phone": {
+      "version_read_back": "1.1.0 (168)",
+      "overlay_installed": true,
+      "records_identical": true,
+      "offline_files_preserved": 3186,
+      "image_cache_files_preserved": 5967,
+      "feed_cache_files_preserved": 13,
+      "physical_user_acceptance": "Installation and data continuity verified; new interaction acceptance remains separate"
+    }
+  },
+  "public_package": {
+    "configuration": "Release",
+    "personal_signing_included": false,
+    "requires_user_signing": true,
+    "identity": "See Release build-manifest.json and SHA256SUMS"
+  },
+  "limits": [
+    "Public unsigned Release build and original-team phone Debug build are separate artifacts",
+    "Controlled network and lifecycle tests are not real-site throughput or indefinite background execution proof",
+    "Scoped reader-details UI return does not establish that every hidden accessibility tree has no duplicate identifiers",
+    "iOS decides background execution duration and final system task notification wording",
+    "Launch snapshot cover preparation is bounded and keeps the older snapshot when not ready"
+  ]
+}

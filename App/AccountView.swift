@@ -1,12 +1,19 @@
 import SwiftUI
 import ExViewerCore
 
+private enum AccountRowMetrics {
+    static let iconWidth: CGFloat = 20
+    static let horizontalInset: CGFloat = 12
+    static let iconSpacing = FeedChrome.controlSpacing
+    static let separatorLeading = horizontalInset + iconWidth + iconSpacing
+}
+
 private struct AccountRowLabel<Title: View>: View {
     let systemImage: String
     let title: Title
-    @ScaledMetric(relativeTo: .subheadline) private var iconWidth: CGFloat = 20
+    @ScaledMetric(relativeTo: .subheadline) private var iconWidth: CGFloat = AccountRowMetrics.iconWidth
     private let compact: Bool
-    private var spacing: CGFloat { compact ? FeedChrome.panelSpacing : 10 }
+    private var spacing: CGFloat { compact ? FeedChrome.panelSpacing : AccountRowMetrics.iconSpacing }
 
     init(systemImage: String, compact: Bool = false, @ViewBuilder title: () -> Title) {
         self.systemImage = systemImage
@@ -66,7 +73,7 @@ struct AccountView: View {
                     .accountSettingsRow()
                     accountDivider
                     accountLink("登录管理", symbol: "person.badge.key", identifier: "account.login-management") {
-                        AccountLoginManagement(onOpenWeb: { web = $0 }) { loggingOut = true }
+                        AccountLoginManagement { loggingOut = true }
                     }
                     accountDivider
                     ViewThatFits(in: .horizontal) {
@@ -138,31 +145,22 @@ struct AccountView: View {
                     .environment(\.feedHeaderRow, .single)
             }
         }
-        .sheet(item: $web) { OfficialWebView(destination: $0) }
-        .confirmationDialog("退出本机登录？离线资料会保留在原账号下。", isPresented: $loggingOut, titleVisibility: .visible) {
+        .officialWebPage(item: $web)
+        .confirmationDialog("退出本机登录 离线资料保留", isPresented: $loggingOut, titleVisibility: .visible) {
             Button("退出", role: .destructive) {
                 Task {
                     do { try await session.logout() }
-                    catch { message = "退出未完成，请重试。" }
+                    catch { message = "退出未完成 请重试" }
                 }
             }
         }
-        .alert("本机状态", isPresented: Binding(get: { message != nil || session.error != nil }, set: { if !$0 { message = nil; session.error = nil } })) {
-            Button("好") { message = nil; session.error = nil }
-        } message: { Text(message ?? session.error ?? "") }
+        .appToast(message: $message, identifier: "account.feedback")
+        .appToast(message: session.error, identifier: "account.session-error")
     }
 
     private var loginButton: some View {
-        Button { web = .login } label: {
-            Text("登录")
-                .font(FeedChrome.labelFont)
-                .foregroundStyle(Color.accentColor)
-                .padding(.horizontal, FeedChrome.controlSpacing)
-                .frame(minWidth: FeedChrome.rowHeight, minHeight: FeedChrome.rowHeight)
-                .contentShape(Rectangle())
-                .appControlSurface(selected: true, verticalInset: AppShape.panelInset + AppShape.segmentInset)
-        }
-        .buttonStyle(.plain)
+        Button { web = .login } label: { Text("登录") }
+            .buttonStyle(AppActionButtonStyle(tone: .accent, labelFont: FeedChrome.labelFont))
     }
 
     private var sitePicker: some View {
@@ -197,8 +195,7 @@ struct AccountView: View {
             Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 .accessibilityAddTraits(.isHeader).padding(.horizontal, 12)
             VStack(spacing: 0, content: content)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: AppShape.card)
-                .overlay { AppShape.card.strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5).allowsHitTesting(false) }
+                .formRowSurface()
         }
     }
 
@@ -220,27 +217,31 @@ struct AccountView: View {
     }
 
     private var accountDivider: some View {
-        Divider().padding(.leading, 42).padding(.trailing, 12).accessibilityHidden(true)
+        Divider().padding(.leading, AccountRowMetrics.separatorLeading).padding(.trailing, AccountRowMetrics.horizontalInset).accessibilityHidden(true)
     }
 }
 
 private extension View {
     func accountSettingsRow() -> some View {
-        frame(maxWidth: .infinity, minHeight: FeedChrome.rowHeight, alignment: .leading)
-            .padding(.horizontal, 12)
-            .contentShape(Rectangle())
+        formRowLayout(.standard, horizontalInset: AccountRowMetrics.horizontalInset)
     }
 
 }
 
 private struct AccountLoginManagement: View {
-    var onOpenWeb: (WebDestination) -> Void
     var onLogout: () -> Void
+    @State private var web: WebDestination?
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
 
     private func siteStatusRow(_ title: String, icon: String, status: String) -> some View {
-        accountValueRow(title, systemImage: icon, value: status)
+        let states: Set<String> = ["未验证", "待验证", "连接中…", "需要登录", "连接失败", "EX 画廊可访问", "站点收藏可读取", "访客可访问"]
+        let detail = states.contains(status) ? nil : status
+        let value = status == ViewerError.challenge.localizedDescription ? "需要验证" :
+                    status == ViewerError.authentication.localizedDescription ? "需要登录" :
+                    detail == nil ? status : "验证未完成"
+        return accountValueRow(title, systemImage: icon, value: value)
+            .appToast(message: detail, identifier: "account.site-feedback.\(title)")
     }
 
     var body: some View {
@@ -253,7 +254,7 @@ private struct AccountLoginManagement: View {
             .accountPageCard(compactRows: true)
 
             if session.exStatus == ViewerError.challenge.localizedDescription {
-                Button { onOpenWeb(.init(title: "EX 网页验证", url: GallerySite.ex.baseURL, login: true)) } label: {
+                Button { web = .init(title: "EX 网页验证", url: GallerySite.ex.baseURL, login: true) } label: {
                     AccountRowLabel("处理 EX 网页验证", systemImage: "checkmark.shield")
                 }
                 .accessibilityIdentifier("account.ex-web")
@@ -266,11 +267,11 @@ private struct AccountLoginManagement: View {
                 .tint(.red)
                 .accountPageCard()
             }
-            if let error = session.error { Text(error).foregroundStyle(.red).accountPageCard() }
-            if let error = library.error { Text(error).foregroundStyle(.red).accountPageCard() }
         }
+        .officialWebPage(item: $web)
+        .appToast(message: session.error ?? library.error, identifier: "account.login.error")
         .accountSubpageHeader("登录管理", identifier: "account.login-page") {
-            Button { onOpenWeb(.login) } label: { Image(systemName: "person.badge.key") }
+            Button { web = .login } label: { Image(systemName: "person.badge.key") }
                 .buttonStyle(FeedHeaderButtonStyle())
                 .accessibilityLabel("重新登录")
                 .accessibilityIdentifier("account.login-page.action")
@@ -352,7 +353,7 @@ private struct LocalDataManagementView: View {
             .accountPageCard(compactRows: true)
 
             Button(role: .destructive) {
-                Task { do { try await MediaRepository.shared.clear(owner: library.owner); message = "浏览缓存已清理" } catch { message = "缓存清理未完成，请重试。" } }
+                Task { do { try await MediaRepository.shared.clear(owner: library.owner); message = "浏览缓存已清理" } catch { message = "缓存清理未完成 请重试" } }
             } label: {
                 AccountRowLabel("清理浏览缓存", systemImage: "trash")
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -387,7 +388,7 @@ private struct LocalDataManagementView: View {
             }
             .disabled(Int(prefetchEntry).map { !(0...ReaderLoadPolicy.maxPrefetchCount).contains($0) } ?? true)
         } message: {
-            Text("0 表示关闭预加载。")
+            Text("0 表示关闭预加载")
         }
     }
 

@@ -65,20 +65,21 @@ final class ReaderV11UITests: XCTestCase {
         capture(app, "reader11.slow-target.after-release")
         let visible = visibleColorFraction(app)
         print("READER11_SLOW_AFTER_RELEASE \(Date().timeIntervalSince1970) colorFraction=\(visible)")
-        XCTAssertGreaterThan(visible, 0.7, "Slow adjacent requests keep a real canvas visible")
+        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 12")
         if prefetch == 0 {
-            XCTAssertEqual(app.buttons["reader.page"].label, "1 / 12")
-            XCTAssertTrue(app.staticTexts["正在加载第 2 页…"].exists)
+            XCTAssertLessThan(visible, 0.15, "An uncached target shows its own black loading page")
+            XCTAssertTrue(app.descendants(matching: .any)["reader.page.loading.2"].firstMatch.exists)
         }
+        XCTAssertFalse(app.staticTexts["正在加载第 2 页…"].exists, "No waiting banner over the old picture")
         waitForPage("2 / 12", app)
         waitForCachedPages([1, 2], app)
         XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
         capture(app, "reader11.slow-target.complete")
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
     }
-    func testSlowTargetKeepsARealImageVisibleUntilItCanFinish() { checkSlowTarget(prefetch: 0) }
-    func testSlowTargetWithTwoPrefetchKeepsARealImageVisible() { checkSlowTarget(prefetch: 2) }
-    func testSlowTargetWithSixPrefetchKeepsARealImageVisible() { checkSlowTarget(prefetch: 6) }
+    func testSlowTargetShowsBlackLoadingPageWithMatchingPageNumber() { checkSlowTarget(prefetch: 0) }
+    func testSlowTargetWithTwoPrefetchUsesTargetPage() { checkSlowTarget(prefetch: 2) }
+    func testSlowTargetWithSixPrefetchUsesTargetPage() { checkSlowTarget(prefetch: 6) }
 
     private func presentation(_ page: Int, _ app: XCUIApplication) -> String? {
         let value = app.descendants(matching: .any)["reader.cache.qa"].firstMatch.value as? String ?? ""
@@ -101,6 +102,36 @@ final class ReaderV11UITests: XCTestCase {
     }
     func testZeroPrefetchCachedRoundTripKeepsTheSameDecodedCanvas() { checkCachedHandoff(prefetch: 0) }
     func testSixPrefetchCachedRoundTripKeepsTheSameDecodedCanvas() { checkCachedHandoff(prefetch: 6) }
+
+    func testCurrentLoadingCanvasCanBecomeImageWhileFingerIsStillDragging() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--qa", "--qa-reset-reader-preferences", "--qa-reader-many", "--qa-reader-transition", "--qa-prefetch=0", "--qa-reader-large-window", "--qa-transfer-ms=2600"]
+        app.launch()
+        XCTAssertTrue(app.buttons["gallery.open.1"].waitForExistence(timeout: 12))
+        app.buttons["gallery.open.1"].tap(); app.buttons["detail.read"].tap()
+        XCTAssertTrue(app.buttons["reader.page"].waitForExistence(timeout: 12))
+        let a = app.coordinate(withNormalizedOffset: .init(dx: 0.7, dy: 0.48))
+        let b = app.coordinate(withNormalizedOffset: .init(dx: 0.3, dy: 0.48))
+        a.press(forDuration: 0.03, thenDragTo: b, withVelocity: .slow, thenHoldForDuration: 3)
+        expectation(for: NSPredicate(format: "value BEGINSWITH %@", "page 2;"), evaluatedWith: app.descendants(matching: .any)["reader.single.canvas"].firstMatch)
+        waitForExpectations(timeout: 5)
+        waitForCachedPages([2], app)
+        let canvas = app.descendants(matching: .any)["reader.single.canvas"].firstMatch
+        XCTAssertTrue((canvas.value as? String ?? "").contains("release=commit=true,target=2"))
+    }
+
+    func testNeighborFinishingDuringFingerHoldDoesNotCancelTheDrag() {
+        let app = launch(prefetch: 0, delay: 600)
+        let a = app.coordinate(withNormalizedOffset: .init(dx: 0.7, dy: 0.48))
+        let b = app.coordinate(withNormalizedOffset: .init(dx: 0.3, dy: 0.48))
+        a.press(forDuration: 0.03, thenDragTo: b, withVelocity: .slow, thenHoldForDuration: 1.2)
+        waitForPage("2 / 12", app)
+        let canvas = app.descendants(matching: .any)["reader.single.canvas"].firstMatch
+        XCTAssertTrue((canvas.value as? String ?? "").contains("release=commit=true,target=2"))
+        XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
+        drag(app, from: .init(dx: 0.3, dy: 0.48), to: .init(dx: 0.7, dy: 0.48))
+        waitForPage("1 / 12", app)
+    }
 
     func testFourDirectionsShortReboundFastReverseAndRepeatedDragsHaveNoBlank() {
         let app = launch(prefetch: 2)
@@ -129,37 +160,52 @@ final class ReaderV11UITests: XCTestCase {
             drag(app, from: end, to: start); waitForPage("2 / 12", app)
         }
     }
-    func testSlowPendingTurnCanBeCancelledByZoomThenProgressJumpWithoutLatePageChange() {
+    func testSlowLoadingPageCanReverseThenJumpWithoutLatePageChange() {
         let app = launch(prefetch: 0, delay: 9000)
         drag(app)
-        let canvas = app.descendants(matching: .any)["reader.single.canvas"].firstMatch
-        expectation(for: NSPredicate { _, _ in (canvas.value as? String)?.contains("; waiting;") == true }, evaluatedWith: canvas)
-        waitForExpectations(timeout: 3)
-        XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
+        waitForPage("2 / 12", app)
+        XCTAssertLessThan(visibleColorFraction(app), 0.15)
+        XCTAssertTrue(app.descendants(matching: .any)["reader.page.loading.2"].firstMatch.exists)
+        drag(app, from: .init(dx: 0.28, dy: 0.5), to: .init(dx: 0.72, dy: 0.5))
         waitForPage("1 / 12", app)
+        XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
         let image = app.otherElements["media.static"].firstMatch
-        XCTAssertTrue(image.exists)
         app.coordinate(withNormalizedOffset: .init(dx: 0.22, dy: 0.48)).doubleTap()
         expectation(for: NSPredicate { _, _ in (image.value as? String)?.contains("zoomed") == true }, evaluatedWith: image)
         waitForExpectations(timeout: 5)
-        XCTAssertFalse(app.staticTexts["正在加载第 2 页…"].exists)
         drag(app); waitForPage("1 / 12", app)
         app.sliders["reader.progress"].adjust(toNormalizedSliderPosition: 1)
         waitForPage("12 / 12", app)
         waitForCachedPages([12], app)
         XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
         XCTAssertTrue((app.otherElements["media.static"].firstMatch.value as? String)?.contains("reader-v11-page-12.png") == true)
-        capture(app, "reader11.zoom-jump")
+        capture(app, "reader127.reverse-jump")
     }
-    func testMissingNextMetadataStopsAfterOneAttemptAndKeepsCurrentPixels() {
+
+    func testTapIntoUncachedPageShowsBlackThenReturnsToCachedPage() {
+        let app = launch(prefetch: 0, delay: 6000)
+        app.coordinate(withNormalizedOffset: .init(dx: 0.88, dy: 0.5)).tap()
+        waitForPage("2 / 12", app)
+        XCTAssertLessThan(visibleColorFraction(app), 0.15)
+        XCTAssertTrue(app.descendants(matching: .any)["reader.page.loading.2"].firstMatch.exists)
+        capture(app, "reader127.tap-target-loading")
+        app.coordinate(withNormalizedOffset: .init(dx: 0.12, dy: 0.5)).tap()
+        waitForPage("1 / 12", app)
+        XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
+    }
+
+    func testMissingNextMetadataStopsAtTargetLoadingPageAndCanReturn() {
         let app = launch(prefetch: 0, arguments: ["--qa-reader-paging", "--qa-reader-metadata-stall"])
         drag(app); waitForPage("2 / 12", app)
         drag(app)
-        XCTAssertTrue(app.staticTexts["第 3 页加载失败，当前页已保留"].waitForExistence(timeout: 5))
+        waitForPage("3 / 12", app)
+        XCTAssertTrue(app.staticTexts["第 3 页信息载入失败 请重试"].waitForExistence(timeout: 5))
         waitForCache("metadataCalls=1;metadataTask=false;", app)
+        XCTAssertLessThan(visibleColorFraction(app), 0.15)
+        capture(app, "reader127.metadata-no-progress")
+        drag(app, from: .init(dx: 0.28, dy: 0.5), to: .init(dx: 0.72, dy: 0.5))
         waitForPage("2 / 12", app)
         XCTAssertGreaterThan(visibleColorFraction(app), 0.7)
-        capture(app, "reader11.metadata-no-progress")
         waitForCache("metadataCalls=1;metadataTask=false;", app)
     }
 }

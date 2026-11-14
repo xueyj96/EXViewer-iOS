@@ -51,13 +51,10 @@ struct LibraryFilterMenu<Option: Hashable & RawRepresentable>: View where Option
     private var expands: Bool { !typeSize.isAccessibilitySize }
 
     var body: some View {
-        Menu {
+        AppMenu {
             ForEach(options, id: \.self) { option in
-                Button {
+                AppMenuItem(title: title(option), isSelected: option == selection) {
                     selection = option
-                } label: {
-                    if option == selection { Label(title(option), systemImage: "checkmark") }
-                    else { Text(title(option)) }
                 }
                 .accessibilityIdentifier("\(identifier).\(option.rawValue)")
             }
@@ -121,12 +118,10 @@ struct LibraryScopePicker: View {
         }
     }
     private var scopeMenu: some View {
-            Menu {
+            AppMenu {
                 ForEach(titles.indices, id: \.self) { index in
-                    Button { selection = index } label: {
-                        if selection == index { Label(titles[index], systemImage: "checkmark") }
-                        else { Text(titles[index]) }
-                    }.accessibilityIdentifier("library.scope.\(index)")
+                    AppMenuItem(title: titles[index], isSelected: selection == index) { selection = index }
+                        .accessibilityIdentifier("library.scope.\(index)")
                 }
             } label: {
                 HStack { Label(titles[selection], systemImage: symbols[selection]); Spacer(); Image(systemName: "chevron.down") }

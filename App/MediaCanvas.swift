@@ -10,12 +10,13 @@ struct ImageCanvasPresentation: Equatable {
 
 struct CanvasInteractions {
     var singleTap: ((CGPoint) -> Void)? = nil
-    /// Return true when the reader consumes the double tap; otherwise zoom.
-    var doubleTap: ((CGPoint) -> Bool)? = nil
+    /// Readers use immediate single taps; standalone image previews may double-tap to zoom.
+    var allowsDoubleTapZoom = true
     var longPress: (() -> Void)? = nil
 }
 
 struct MediaCanvas: UIViewRepresentable {
+    @EnvironmentObject private var toast: AppToastCenter
     var file: URL
     var animated = true
     var onZoomChanged: ((Bool) -> Void)? = nil
@@ -53,6 +54,10 @@ struct MediaCanvas: UIViewRepresentable {
     private func connectDecodeFailure(_ view: ImageCanvasView, coordinator: Coordinator) {
         coordinator.onDecodeFailure = onDecodeFailure
         view.onDecodeFailure = { [weak coordinator] file in coordinator?.reportDecodeFailure(file) }
+        let owner = coordinator.feedbackOwner
+        view.onFeedback = { [weak toast] in
+            toast?.show("图片暂时无法显示 请重试", owner: owner, identifier: "reader.decode.error", onDismiss: nil)
+        }
     }
     static func dismantleUIView(_ view: ImageCanvasView, coordinator: Coordinator) {
         coordinator.invalidatePendingReports()
@@ -61,6 +66,7 @@ struct MediaCanvas: UIViewRepresentable {
     }
 
     final class Coordinator {
+        let feedbackOwner = UUID()
         var onZoomChanged: ((Bool) -> Void)?
         var onImageSizeChanged: ((CGSize) -> Void)?
         var interactions: CanvasInteractions
@@ -70,7 +76,7 @@ struct MediaCanvas: UIViewRepresentable {
         init(onZoomChanged: ((Bool) -> Void)?, onImageSizeChanged: ((CGSize) -> Void)?, interactions: CanvasInteractions, onPresentation: ((ImageCanvasPresentation) -> Void)?) { self.onZoomChanged = onZoomChanged; self.onImageSizeChanged = onImageSizeChanged; self.interactions = interactions; self.onPresentation = onPresentation }
         var canvasInteractions: CanvasInteractions {
             .init(singleTap: interactions.singleTap == nil ? nil : { [weak self] in self?.reportTap($0) },
-                  doubleTap: { [weak self] in self?.interactions.doubleTap?($0) ?? false },
+                  allowsDoubleTapZoom: interactions.allowsDoubleTapZoom,
                   longPress: interactions.longPress == nil ? nil : { [weak self] in self?.reportLongPress() })
         }
         func invalidatePendingReports() { revision = UUID() }
@@ -123,6 +129,7 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
     private let scroll = UIScrollView()
     private let imageView = UIImageView()
     private let singleTap = UITapGestureRecognizer()
+    private let doubleTap = UITapGestureRecognizer()
     private let longPress = UILongPressGestureRecognizer()
     private var asset: ReaderImageAsset?
     private var loadTask: Task<Void, Never>?
@@ -149,12 +156,14 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
     var onImageSizeChanged: ((CGSize) -> Void)?
     var readerInteractions = CanvasInteractions() {
         didSet {
+            doubleTap.isEnabled = readerInteractions.allowsDoubleTapZoom
             singleTap.isEnabled = readerInteractions.singleTap != nil
             longPress.isEnabled = readerInteractions.longPress != nil
         }
     }
     var onPresentation: ((ImageCanvasPresentation) -> Void)?
     var onDecodeFailure: ((URL) -> Void)?
+    var onFeedback: (() -> Void)?
     private(set) var file: URL?
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -164,21 +173,29 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
         scroll.showsVerticalScrollIndicator = false; scroll.showsHorizontalScrollIndicator = false
         imageView.contentMode = .scaleAspectFit
         addSubview(scroll); scroll.addSubview(imageView)
-        let tap = UITapGestureRecognizer(target: self, action: #selector(zoom(_:))); tap.numberOfTapsRequired = 2; scroll.addGestureRecognizer(tap)
+        doubleTap.addTarget(self, action: #selector(zoom(_:))); doubleTap.numberOfTapsRequired = 2
+        scroll.addGestureRecognizer(doubleTap)
         singleTap.addTarget(self, action: #selector(tapped(_:)))
-        singleTap.require(toFail: tap); singleTap.isEnabled = false
+        singleTap.require(toFail: doubleTap); singleTap.isEnabled = false
         longPress.addTarget(self, action: #selector(held(_:)))
         longPress.minimumPressDuration = 0.5; longPress.allowableMovement = 10
         longPress.isEnabled = false; scroll.addGestureRecognizer(longPress)
-        singleTap.require(toFail: longPress); tap.require(toFail: longPress)
+        singleTap.require(toFail: longPress); doubleTap.require(toFail: longPress)
         singleTap.cancelsTouchesInView = false; scroll.addGestureRecognizer(singleTap)
         loadingIndicator.hidesWhenStopped = true
         loadingIndicator.color = .white
-        statusLabel.font = .preferredFont(forTextStyle: .footnote)
+        statusLabel.font = ReaderStatusAppearance.uiFont
         statusLabel.textColor = .white.withAlphaComponent(0.65)
         statusLabel.textAlignment = .center; statusLabel.numberOfLines = 2
         statusLabel.accessibilityIdentifier = "reader.decode.status"
-        retryButton.setTitle("重试显示", for: .normal)
+        retryButton.setTitle("重试", for: .normal)
+        retryButton.titleLabel?.font = ReaderStatusAppearance.uiFont
+        retryButton.setTitleColor(.white, for: .normal)
+        retryButton.backgroundColor = ReaderStatusAppearance.actionBackground
+        retryButton.layer.cornerRadius = AppShape.control.cornerSize.width
+        retryButton.layer.cornerCurve = .continuous
+        retryButton.layer.borderWidth = 0.5
+        retryButton.layer.borderColor = ReaderStatusAppearance.actionBorder.cgColor
         retryButton.addTarget(self, action: #selector(retryImage), for: .touchUpInside)
         retryButton.accessibilityIdentifier = "reader.decode.retry"
         retryButton.isHidden = true; statusLabel.isHidden = true
@@ -311,7 +328,8 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
 
     private func showDecodeError() {
         loadingIndicator.stopAnimating()
-        statusLabel.text = "这张图暂时无法显示。"; statusLabel.isHidden = false
+        statusLabel.isHidden = true
+        if animate { onFeedback?() }
         retryButton.isHidden = false; isAccessibilityElement = false
     }
 
@@ -372,8 +390,6 @@ final class ImageCanvasView: UIView, UIScrollViewDelegate {
         set { super.accessibilityValue = newValue }
     }
     @objc private func zoom(_ tap: UITapGestureRecognizer) {
-        let point = convert(tap.location(in: self), to: window)
-        if readerInteractions.doubleTap?(point) == true { return }
         scroll.setZoomScale(scroll.zoomScale > 1 ? 1 : 2.5, animated: true)
     }
     @objc private func held(_ gesture: UILongPressGestureRecognizer) {

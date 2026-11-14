@@ -13,7 +13,7 @@ enum GalleryCoverLayout {
 }
 
 /// A feed keeps existing cards in their columns as covers resolve and pages
-/// append. A new ordering starts a new placement; deletions only close gaps.
+/// append. A new ordering or deletion starts a compact placement.
 struct GalleryGridPlacement {
     private(set) var order: [String] = []
     private(set) var columns: [[String]] = [[], []]
@@ -24,9 +24,11 @@ struct GalleryGridPlacement {
         guard incoming != order else { return }
         let incomingSet = Set(incoming)
         let retained = order.filter { incomingSet.contains($0) }
+        let survivingColumns = columns.map { $0.filter { incomingSet.contains($0) } }
         // Preserve only an existing prefix followed by new items. A prepend,
         // insertion or explicit sort must display the new source order.
-        if Array(incoming.prefix(retained.count)) != retained {
+        let removed = retained.count < order.count
+        if removed || Array(incoming.prefix(retained.count)) != retained {
             columns = [[], []]
         } else {
             columns = columns.map { $0.filter { incomingSet.contains($0) } }
@@ -45,6 +47,16 @@ struct GalleryGridPlacement {
             let column = heights[0] <= heights[1] ? 0 : 1
             columns[column].append(id)
             heights[column] += height(id)
+        }
+        if removed, incoming == retained, !survivingColumns.contains(where: \.isEmpty),
+           Set(survivingColumns.flatMap { $0 }) == incomingSet {
+            func gap(_ candidate: [[String]]) -> Double {
+                let totals = candidate.map { $0.reduce(0) { $0 + height($1) } }
+                return abs(totals[0] - totals[1])
+            }
+            // Repack after deletion, but do not replace a better existing balance
+            // with a worse greedy estimate for a very tall final cover.
+            if gap(survivingColumns) < gap(columns) { columns = survivingColumns }
         }
         order = incoming
     }

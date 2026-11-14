@@ -7,6 +7,23 @@ import ExViewerCore
     private func form(_ group: Int?) throws -> GalleryFavoriteForm {
         try GalleryFavoriteForm.read(NativeFavoritesQA.html(reference: ref, group: group, note: ""), reference: ref)
     }
+    func testPendingDisplayDistinguishesAddMoveAndRemove() async throws {
+        let cache = SiteFavoriteCache(), scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
+        cache.activate(owner: scope.owner, generation: scope.generation)
+        let client = GalleryFavoriteClient(isCurrent: { true }, read: { throw ViewerError.network }, submit: { _ in })
+        try cache.enqueue(scope: scope, client: client, form: form(nil), action: .move(1), note: "", title: "Fixture")
+        XCTAssertEqual(cache.changes.first?.action, "加入收藏")
+        XCTAssertEqual(cache.changes.first?.groupName, NativeFavoritesQA.groups[1])
+        try cache.enqueue(scope: scope, client: client, form: form(nil), action: .remove, note: "", title: "Fixture")
+        XCTAssertEqual(cache.changes.first?.action, "取消收藏")
+        XCTAssertNil(cache.changes.first?.groupName)
+        let moving = SiteFavoriteCache()
+        moving.activate(owner: scope.owner, generation: scope.generation)
+        try moving.enqueue(scope: scope, client: client, form: form(2), action: .move(1), note: "", title: "Fixture")
+        XCTAssertEqual(moving.changes.first?.action, "调整分组")
+        for _ in 0..<50 where cache.entry(scope)?.phase != .failed { try await Task.sleep(nanoseconds: 2_000_000) }
+    }
+
     func testReaderAndDetailShareConfirmedEditAndDoNotReadAgainOnRevision() async throws {
         let cache = SiteFavoriteCache(), scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
         let detail = GalleryFavoriteObservation(), reader = GalleryFavoriteObservation()

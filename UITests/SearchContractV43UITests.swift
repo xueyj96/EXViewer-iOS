@@ -18,6 +18,35 @@ final class SearchContractV43UITests: XCTestCase {
         field.typeText(text)
         XCTAssertEqual(field.value as? String, text)
     }
+    func testSavedEditorNameInputAndActionsShareCompactLayout() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--qa", "--qa-search-sort", "--qa-tags-offline", "--qa-saved-search-management"]
+        app.launch()
+        let searchLane = app.buttons["discover.lane.3"]
+        XCTAssertTrue(searchLane.waitForExistence(timeout: 12)); searchLane.tap()
+        openFavorites(app)
+        favoriteRows(app).firstMatch.press(forDuration: 0.8)
+        let name = app.textFields["saved-editor.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        let clear = app.buttons["compose.clear"]
+        let delete = app.buttons["saved-editor.delete"]
+        XCTAssertTrue(delete.exists)
+        XCTAssertEqual(clear.frame.midY, delete.frame.midY, accuracy: 1)
+        XCTAssertEqual(clear.frame.width, delete.frame.width, accuracy: 1)
+        XCTAssertEqual(clear.frame.height, delete.frame.height, accuracy: 1)
+        XCTAssertGreaterThan(name.frame.width, app.frame.width * 0.5)
+        XCTAssertGreaterThan(name.frame.minX, app.textFields["saved-editor.text"].frame.minX)
+        replace(name, with: "Updated collection")
+        app.buttons["saved-editor.save"].tap()
+        XCTAssertTrue(favoriteRows(app).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(favoriteRows(app).firstMatch.label.contains("Updated collection"))
+        favoriteRows(app).firstMatch.press(forDuration: 0.8)
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertEqual(name.value as? String, "Updated collection")
+        app.buttons["saved-editor.cancel"].tap()
+    }
+
     func testFavoritesTapLoadsWhileLongPressEditsOriginalAndKeepsFilters() {
         let app = launch(["--qa-saved-search-management"])
         let filterShortcut = app.buttons["discover.filters"]
@@ -38,7 +67,7 @@ final class SearchContractV43UITests: XCTestCase {
         XCTAssertEqual(app.textFields["compose.text"].value as? String, "coast")
         XCTAssertTrue((filters.value as? String)?.hasPrefix("已展开") == true)
         let favoriteAction = app.buttons["compose.save-favorite"]
-        let firstFilter = app.staticTexts["搜索范围"]
+        let firstFilter = app.buttons["compose.add-tag"]
         XCTAssertTrue(firstFilter.exists)
         XCTAssertLessThan(favoriteAction.frame.maxY, filters.frame.midY)
         XCTAssertLessThan(filters.frame.maxY, firstFilter.frame.midY)
@@ -133,7 +162,7 @@ final class SearchContractV43UITests: XCTestCase {
         let discoverTop = discoverHeader.frame.minY
         startDraft(app)
         app.buttons["compose.apply"].tap()
-        XCTAssertTrue(app.buttons["discover.condition-summary"].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 6))
 
         app.buttons["discover.search-entry"].tap()
         app.buttons["compose.clear"].tap()
@@ -185,7 +214,7 @@ final class SearchContractV43UITests: XCTestCase {
         let app = launch(); startDraft(app)
         chooseMinimumRating(app, "3 星")
         app.buttons["compose.apply"].tap()
-        let summary = app.buttons["discover.condition-summary"]
+        let summary = app.buttons["discover.search-entry"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5))
         XCTAssertTrue((summary.value as? String)?.contains("≥3星") == true)
         XCTAssertFalse(app.buttons["discover.sort-order"].exists)
@@ -264,7 +293,7 @@ final class SearchContractV43UITests: XCTestCase {
 
         app.buttons["discover.search-entry"].tap()
         XCTAssertTrue(bookmark.waitForExistence(timeout: 5))
-        XCTAssertEqual(bookmark.label, "存为常用")
+        XCTAssertEqual(bookmark.label, "加入常用搜索组合")
         XCTAssertTrue(bookmark.isEnabled)
         app.buttons["compose.records"].tap()
         let history = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "search-history.load.")).firstMatch
@@ -278,15 +307,9 @@ final class SearchContractV43UITests: XCTestCase {
         chooseMinimumRating(app, "3 星")
         XCTAssertTrue((app.buttons["compose.filters"].value as? String)?.contains("≥3星") == true)
         XCTAssertFalse(app.buttons["compose.sort-order"].exists)
-        let site = app.buttons["compose.site"]
-        for _ in 0..<6 { if site.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(site.isHittable)
-        site.tap()
-        let publicSite = app.buttons["E-Hentai"].firstMatch
-        XCTAssertTrue(publicSite.waitForExistence(timeout: 5))
-        publicSite.tap()
+        XCTAssertFalse(app.buttons["compose.site"].exists, "Search inherits the browsing site instead of offering a second site selector")
         let filters = app.buttons["compose.filters"]
-        XCTAssertTrue((filters.value as? String)?.contains("EH") == true)
+        XCTAssertTrue((filters.value as? String)?.contains("EX") == true)
         XCTAssertTrue((filters.value as? String)?.contains("≥3星") == true)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "search43.filters.dark-large"; shot.lifetime = .keepAlways; add(shot)
     }

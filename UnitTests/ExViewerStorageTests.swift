@@ -3,6 +3,19 @@ import ExViewerCore
 @testable import ExViewer
 
 final class ExViewerStorageTests: XCTestCase {
+    @MainActor func testBatchTagRemovalPersistsAndKeepsOtherListIndependent() throws {
+        let root = historyRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = LibraryStore(qa: true, storageRoot: root)
+        let tags = ["english", "chinese", "japanese"].map { GalleryTag(namespace: "language", name: $0) }
+        XCTAssertTrue(store.pin(tags)); XCTAssertTrue(store.block(tags))
+        XCTAssertTrue(store.unpin([tags[0], tags[2]]))
+        XCTAssertTrue(store.unblock([tags[1]]))
+        let reopened = LibraryStore(qa: true, storageRoot: root)
+        XCTAssertEqual(reopened.snapshot.favoriteTags.map(\.id), [tags[1].id])
+        XCTAssertEqual(Set(reopened.snapshot.blockedTags.map(\.id)), Set([tags[0].id, tags[2].id]))
+        XCTAssertNil(reopened.error)
+    }
+
     private func historyRoot() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("SearchHistoryTest-" + UUID().uuidString)
     }

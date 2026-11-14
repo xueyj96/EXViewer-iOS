@@ -288,4 +288,36 @@ final class MediaRepositoryV14Tests: XCTestCase {
         let ownerDirectory = await repository.directory(owner: owner)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ownerDirectory.path), "A late response must not recreate the cleared cache")
     }
+    func testCoverPromotionKeepsOneTransferAndDistantCancellationFreesVisibleSlot() async throws {
+        ControlledURLProtocol.reset()
+        let (repository, root) = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: root); ControlledURLProtocol.releaseAll() }
+        let url = fixtureURL("cover-promoted")
+        let demand = MediaRequestDemand(priority: .thumbnailPrefetch)
+        let first = Task { try await repository.file(for: url, owner: "covers", request: demand) }
+        defer { first.cancel() }
+        let started = await waitUntil { ControlledURLProtocol.startedCount(for: url) == 1 }
+        XCTAssertTrue(started)
+        demand.setPriority(.thumbnail)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(ControlledURLProtocol.startedCount(for: url), 1)
+        XCTAssertEqual(ControlledURLProtocol.stoppedCount(for: url), 0)
+        // Leaving the bounded viewport window withdraws this view's consumer.
+        first.cancel()
+        _ = try? await first.value
+        let stopped = await waitUntil { ControlledURLProtocol.stoppedCount(for: url) == 1 }
+        XCTAssertTrue(stopped)
+        let other = fixtureURL("cover-visible-after-reversal")
+        let next = Task { try await repository.file(for: other, owner: "covers", priority: .thumbnail) }
+        defer { next.cancel() }
+        let nextStarted = await waitUntil { ControlledURLProtocol.startedCount(for: other) == 1 }
+        XCTAssertTrue(nextStarted)
+        ControlledURLProtocol.releaseOne(for: other)
+        let file = try await next.value
+        assertDecodableImage(at: file)
+        let warm = try await repository.file(for: other, owner: "covers", priority: .thumbnail)
+        XCTAssertEqual(warm, file)
+        XCTAssertEqual(ControlledURLProtocol.startedCount(for: other), 1)
+    }
+
 }

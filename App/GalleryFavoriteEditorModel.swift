@@ -77,7 +77,7 @@ import ExViewerCore
         do {
             try submit(form, action, remove ? "" : GalleryFavoriteForm.normalizedNote(note), title)
             lastReadSucceeded = false; return true
-        } catch { self.error = ErrorMessages.message(error, fallback: "本机未能保存这次更改，请重试。"); return false }
+        } catch { self.error = ErrorMessages.message(error, fallback: "本机保存失败 请重试"); return false }
     }
 
     /// Returns true only when a pending edit has been observed on the server.
@@ -98,8 +98,8 @@ import ExViewerCore
             return result
         } catch is CancellationError { return false }
         catch {
-            guard epoch == token, client.isCurrent() else { return false }
-            self.error = ErrorMessages.message(error, fallback: "未能读取站点收藏，请重新读取。")
+            guard epoch == token, client.isCurrent(), (error as? ViewerError) != .stale else { return false }
+            self.error = ErrorMessages.message(error, fallback: "站点收藏读取失败 请重试")
             return false
         }
     }
@@ -133,13 +133,13 @@ import ExViewerCore
             guard epoch == token, client.isCurrent() else { return false }
             let confirmed = accept(value, preserveDraft: true)
             if !confirmed, let submissionError {
-                error = ErrorMessages.message(submissionError, fallback: "站点尚未显示这次修改，请检查后再保存。")
+                error = ErrorMessages.message(submissionError, fallback: "收藏结果待确认 请检查结果")
             }
             return confirmed
         } catch {
             guard epoch == token, client.isCurrent() else { return false }
             needsVerification = true
-            self.error = "暂时无法确认是否已生效，请检查结果。"
+            self.error = "收藏结果待确认 请检查结果"
             return false
         }
     }
@@ -151,7 +151,7 @@ import ExViewerCore
         guard let pending else { error = nil; return false }
         self.pending = nil
         if value.confirms(pending.0, note: pending.1) { error = nil; return true }
-        error = "站点尚未显示这次修改，已保留你的选择；请检查后再保存。"
+        error = "收藏结果待确认 已保留你的选择"
         return false
     }
 }

@@ -21,7 +21,7 @@ final class ServerPaginationV43UITests: XCTestCase {
         for _ in 0..<8 { if rating.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(rating.isHittable); rating.tap(); app.buttons["3 星"].firstMatch.tap()
         app.buttons["compose.apply"].tap()
-        XCTAssertTrue(app.buttons["discover.condition-summary"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["discover.search-entry"].waitForExistence(timeout: 5))
         for _ in 0..<28 {
             if (state.value as? String)?.contains("items=72") == true { break }
             app.swipeUp()
@@ -55,7 +55,7 @@ final class ServerPaginationV43UITests: XCTestCase {
         XCTAssertTrue(fullyVisible(first))
         XCTAssertLessThan(first.frame.minY, app.buttons["gallery.open.900003"].frame.minY)
         XCTAssertTrue((app.buttons["discover.search-entry"].value as? String)?.contains("coast") == true)
-        let summary = app.buttons["discover.condition-summary"].value as? String ?? ""
+        let summary = app.buttons["discover.search-entry"].value as? String ?? ""
         for term in ["language:chinese", "排除 other:watercolor", "≥3星"] { XCTAssertTrue(summary.contains(term), summary) }
         XCTAssertFalse(app.buttons["discover.sort-order"].exists)
         let top = XCTAttachment(screenshot: app.screenshot()); top.name = "search43.first-batch-order-retained"; top.lifetime = .keepAlways; add(top)

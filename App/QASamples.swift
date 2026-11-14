@@ -81,6 +81,11 @@ enum QASamples {
                 gallery.pages = 6
                 gallery.rating = 2.8
             }
+            if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-consolidation-tags") {
+                gallery.tags = [.init(namespace: "artist", name: "a"), .init(namespace: "character", name: "a long neutral character description that deliberately wraps to multiple lines"),
+                                .init(namespace: "other", name: "a"), .init(namespace: "other", name: "b"), .init(namespace: "other", name: "画")]
+                gallery.tags += (1...16).map { .init(namespace: "other", name: "neutral label \($0)") }
+            }
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-reader-many") { gallery.pages = 12 }
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-stored-bookmark-covers") { gallery.cover = cover(seed: index + 1) }
             if AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-rating-filter") { gallery.rating = [2.8, 2.9, 3.0, 4.75][index] }

@@ -176,9 +176,9 @@ enum TagSuggestionFailure: Error, LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .site: return "站点 API 返回错误。"
-        case .malformed: return "站点返回的标签建议格式无法识别。"
-        case .dictionaryUnavailable: return "本地中文词库不可用。"
+        case .site: return "站点接口请求失败"
+        case .malformed: return "标签建议格式无法识别"
+        case .dictionaryUnavailable: return "本地中文词库不可用"
         }
     }
 }
@@ -214,9 +214,9 @@ enum TagVerification: Equatable {
         var message: String? {
             switch self {
             case .idle: return nil
-            case .loading: return "正在查找真实标签建议…"
+            case .loading: return "正在查找标签"
             case .ready: return nil
-            case .unavailable: return "本地中文词库不可用；可请求站点英文前缀建议，或明确使用未验证输入。"
+            case .unavailable: return "中文词库不可用 可用英文原名搜索"
             case .failed(let value): return value
             }
         }
@@ -232,7 +232,9 @@ enum TagVerification: Equatable {
     let catalog: TagTranslationCatalog?
     private var task: Task<Void, Never>?
     private var generation = UUID()
+    private var completedGeneration: UUID?
     private var currentPrefix = ""
+    private var currentNamespace = "all"
     private var cache: [String: Cached] = [:]
     private var lru: [String] = []
     private let cacheLimit = 128
@@ -242,6 +244,13 @@ enum TagVerification: Equatable {
 
     init(catalog: TagTranslationCatalog? = .bundled) { self.catalog = catalog }
 
+    /// A ready result from the preceding keystroke cannot authorize raw-name entry.
+    func hasNoResults(prefix: String, namespace: String) -> Bool {
+        state == .ready && completedGeneration == generation && items.isEmpty && !currentPrefix.isEmpty &&
+            currentPrefix == TagSuggestionRequest.normalized(prefix) &&
+            currentNamespace == TagSuggestionRequest.normalized(namespace)
+    }
+
     func update(prefix raw: String, namespace: String, session: SiteSession, qa: Bool, arguments: [String] = ProcessInfo.processInfo.arguments) {
         task?.cancel()
         generation = UUID()
@@ -249,6 +258,7 @@ enum TagVerification: Equatable {
         let prefix = TagSuggestionRequest.normalized(raw)
         let namespace = TagSuggestionRequest.normalized(namespace)
         currentPrefix = prefix
+        currentNamespace = namespace
         items = []
         state = prefix.isEmpty ? .idle : .loading
         guard !prefix.isEmpty else { return }
@@ -282,7 +292,10 @@ enum TagVerification: Equatable {
                 return
             }
 
-            guard prefix.unicodeScalars.allSatisfy({ $0.isASCII }), Self.safePrefix(prefix) else { return }
+            guard prefix.unicodeScalars.allSatisfy({ $0.isASCII }), Self.safePrefix(prefix) else {
+                if catalog != nil { completedGeneration = current }
+                return
+            }
             let key = TagSuggestionRequest.text(prefix: prefix, namespace: namespace)
             if let cached = cache[key], Date().timeIntervalSince(cached.date) < cacheTTL {
                 touch(key)
@@ -360,28 +373,28 @@ enum TagVerification: Equatable {
         let detail: String
         if let value = error as? ViewerError {
             switch value {
-            case .authentication: detail = "站点拒绝了访问或要求登录。"
-            case .challenge: detail = "站点要求网页验证。"
-            case .restricted: detail = "站点限制了标签建议请求。"
-            case .imageLimit: detail = "站点返回了额度限制。"
-            case .stale: detail = "账号会话已变化，请重新查找。"
-            case .network: detail = "网络连接失败。"
-            case .tooLarge: detail = "站点返回内容超过大小限制。"
-            default: detail = "站点标签建议暂时不可用。"
+            case .authentication: detail = "站点拒绝访问 请检查登录"
+            case .challenge: detail = "请完成站点网页验证"
+            case .restricted: detail = "标签建议请求受限 请稍后重试"
+            case .imageLimit: detail = "已达到站点额度"
+            case .stale: detail = "查询未完成 请重试"
+            case .network: detail = "网络连接失败 请重试"
+            case .tooLarge: detail = "站点内容超过大小限制"
+            default: detail = "标签建议暂不可用"
             }
         } else if let failure = error as? RequestFailure {
             switch failure {
-            case .http(_, let status): detail = "站点返回 HTTP \(status)。"
-            case .transport: detail = "网络连接失败。"
-            default: detail = "站点标签建议暂时不可用。"
+            case .http(_, let status): detail = "站点返回 HTTP \(status)"
+            case .transport: detail = "网络连接失败 请重试"
+            default: detail = "标签建议暂不可用"
             }
         } else if error as? TagSuggestionFailure == .site {
-            detail = "站点 API 返回错误。"
+            detail = "站点接口请求失败"
         } else if error as? TagSuggestionFailure == .malformed {
-            detail = "站点返回的建议数据格式无法识别。"
-        } else { detail = "站点标签建议暂时不可用。" }
-        if usedExpiredCache { return "\(detail) 显示过期站点缓存，候选未实时验证。" }
-        return catalogAvailable ? "\(detail) 可查看本地词库匹配或明确使用未验证输入。" : "\(detail) 本地中文词库也不可用。"
+            detail = "标签建议格式无法识别"
+        } else { detail = "标签建议暂不可用" }
+        if usedExpiredCache { return "\(detail) 当前显示旧缓存" }
+        return catalogAvailable ? "\(detail) 可用本地词库" : "\(detail) 中文词库也不可用"
     }
 
     static func qaFixtures(matching prefix: String, namespace: String) -> [TagSuggestion] {
@@ -402,6 +415,7 @@ enum TagVerification: Equatable {
         siteIDs.formUnion(fresh.compactMap { $0.matchedAlias?.id })
         let local = items.filter { !siteIDs.contains($0.id) }
         items = TagSuggestionRequest.ranked(fresh + local, prefix: currentPrefix, limit: suggestionLimit)
+        completedGeneration = expected
         state = .ready
     }
 

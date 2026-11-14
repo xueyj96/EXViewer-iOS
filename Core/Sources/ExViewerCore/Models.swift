@@ -116,25 +116,26 @@ public enum KeychainOperation: String, Equatable, Sendable {
 
 public enum ViewerError: Error, LocalizedError, Equatable, Sendable {
     case invalidQuery(String), authentication, challenge, imageLimit, restricted, layoutChanged, network, tooLarge, unsupported, storage, stale
-    case keychain(KeychainOperation, Int32), sessionRecord, ratingUnavailable
+    case keychain(KeychainOperation, Int32), sessionRecord, ratingUnavailable, tagsUnavailable
     public var errorDescription: String? {
         switch self {
         case .invalidQuery(let reason): return reason
-        case .authentication: return "会话需要重新验证，请在官方网页完成登录。"
-        case .challenge: return "站点要求网页验证，请打开官方网页完成验证后重试。"
-        case .imageLimit: return "已达到站点看图额度。下载已暂停，可在账号页面查看额度。"
-        case .restricted: return "站点暂时拒绝了访问，请检查账号权限或稍后重试。"
-        case .layoutChanged: return "站点返回格式暂时无法识别，已有内容保留。可以打开原网页检查。"
-        case .network: return "网络请求失败，已有内容保留，请重试。"
-        case .ratingUnavailable: return "部分画廊的平均评分未能确认，已保留符合条件的结果，请重试。"
-        case .tooLarge: return "文件超过本机单项大小或可用空间限制。"
-        case .unsupported: return "当前文件无法解码，请检查站点原图。"
-        case .storage: return "本机文件保存失败，请检查可用空间后重试。"
+        case .authentication: return "请在官方网页重新登录"
+        case .challenge: return "请完成站点网页验证后重试"
+        case .imageLimit: return "看图额度已用完 下载已暂停"
+        case .restricted: return "站点拒绝访问 请检查账号权限"
+        case .layoutChanged: return "站点内容无法识别 请查看原网页"
+        case .network: return "网络请求失败 请重试"
+        case .tagsUnavailable: return "标签资料暂不可用 请重试"
+        case .ratingUnavailable: return "部分评分未能载入 请重试"
+        case .tooLarge: return "文件过大或可用空间不足"
+        case .unsupported: return "图片无法显示 请检查原图"
+        case .storage: return "保存失败 请检查可用空间"
         case .keychain(let operation, let status):
-            if status == -34018 { return "登录会话\(operation.name)失败：App 缺少 Keychain 签名权限（\(status)），请安装修正版后重试。" }
-            return "本机登录会话\(operation.name)未完成（Keychain \(status)），请重试或检查设备解锁状态。"
-        case .sessionRecord: return "本机登录记录格式异常，原记录已保留。请重新登录。"
-        case .stale: return "账号或筛选条件已变化，请重新加载。"
+            if status == -34018 { return "登录权限异常 Keychain \(status)" }
+            return "登录会话\(operation.name)失败 Keychain \(status)"
+        case .sessionRecord: return "登录记录异常 请重新登录"
+        case .stale: return "操作未完成 请重试"
         }
     }
 }

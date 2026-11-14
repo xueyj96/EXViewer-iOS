@@ -169,7 +169,7 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
             return
         }
         do { cookies = try SessionVault.read(); updateOwner() }
-        catch { self.error = (error as? ViewerError)?.localizedDescription ?? "本机登录记录暂时无法读取，请重试。" }
+        catch { self.error = (error as? ViewerError)?.localizedDescription ?? "登录记录暂不可读 请重试" }
     }
     private func updateOwner() {
         let member = cookies.first { $0.name == "ipb_member_id" && ($0.domain == ".e-hentai.org" || $0.domain == "e-hentai.org") }?.value
@@ -324,16 +324,30 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
         let body = try GalleryMetadata.request(galleries)
         let key = MetadataKey(refs: galleries.map(\.ref), scope: pageReadScope)
         let metadata = try await metadataBatches.read(key, request: MediaRequestDemand(priority: priority)) { shared in
-            let data = try await self.request(Self.metadataURL, method: "POST", body: body,
-                                   contentType: "application/json", accept: "application/json",
-                                   pacing: .metadata, recoverConnection: false, demand: shared) { data in
-                let json = data.starts(with: [0xef, 0xbb, 0xbf]) ? data.dropFirst(3) : data
-                let first = json.first { ![0x20, 0x09, 0x0a, 0x0d].contains($0) }
-                guard first == 0x7b || first == 0x5b else {
-                    _ = try Self.checkedHTML(data)
-                    throw ViewerError.layoutChanged
+            let data: Data
+            do {
+                data = try await self.request(Self.metadataURL, method: "POST", body: body,
+                                              contentType: "application/json", accept: "application/json",
+                                              pacing: .metadata, recoverConnection: false, demand: shared) { data in
+                    let json = data.starts(with: [0xef, 0xbb, 0xbf]) ? data.dropFirst(3) : data
+                    let first = json.first { ![0x20, 0x09, 0x0a, 0x0d].contains($0) }
+                    guard first == 0x7b || first == 0x5b else {
+                        _ = try Self.checkedHTML(data)
+                        throw ViewerError.layoutChanged
+                    }
+                    return data
                 }
-                return data
+            } catch RequestFailure.transport(.page, URLError.networkConnectionLost.rawValue) {
+                // gdata is a read-only POST. Recover once on a fresh connection;
+                // never enable generic POST retries for mutations.
+                try Task.checkCancellation()
+                data = try await self.request(Self.metadataURL, method: "POST", body: body,
+                                              contentType: "application/json", accept: "application/json",
+                                              pacing: .metadata, recoverConnection: false, freshConnection: true,
+                                              demand: shared) { data in
+                    _ = try GalleryMetadata(data)
+                    return data
+                }
             }
             let parse = Task.detached(priority: .userInitiated) { try GalleryMetadata(data) }
             return try await withTaskCancellationHandler(operation: { try await parse.value }, onCancel: { parse.cancel() })
@@ -485,10 +499,10 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
         guard hasCredentials else { throw ViewerError.authentication }
         guard !references.isEmpty, references.count <= FavoritesBatchRequest.maxItemCount,
               references.allSatisfy({ $0.site == site }) else {
-            throw ViewerError.invalidQuery("每批请选择 1 至 25 个有效收藏。")
+            throw ViewerError.invalidQuery("每批请选择 1 至 25 个收藏")
         }
         let revision = generation, account = owner
-        guard !favoriteStateCache.hasPending(references) else { throw ViewerError.invalidQuery("所选作品仍有收藏更改待处理，请先检查同步结果。") }
+        guard !favoriteStateCache.hasPending(references) else { throw ViewerError.invalidQuery("所选作品正在同步 请先检查结果") }
         favoriteStateCache.invalidate(references, scopeOwner: account, generation: revision)
         let endpoint = site.baseURL.appendingPathComponent("favorites.php")
         let request = try FavoritesBatchRequest(url: endpoint, site: site, gids: references.map(\.gid), action: action)
@@ -631,7 +645,6 @@ struct FavoriteMutationFailure: Error, LocalizedError {
     let requestMayHaveBeenSent: Bool
     let underlying: Error
     var errorDescription: String? {
-        let status = requestMayHaveBeenSent ? "本次收藏操作可能已提交，结果未确认。" : "本次收藏操作尚未提交。"
-        return status + ErrorMessages.message(underlying, fallback: "请刷新收藏检查后再操作。")
+        requestMayHaveBeenSent ? "收藏结果待确认 请检查同步结果" : "收藏尚未提交 请重试"
     }
 }

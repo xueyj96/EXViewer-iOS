@@ -169,6 +169,7 @@ struct StaticCover: View {
     var alignment: Alignment = .center
     var fitsExtremeAspects = false
     var onDecodeFailure: (() -> Void)? = nil
+    var onDecoded: (() -> Void)? = nil
 
     @Environment(\.displayScale) private var displayScale
     @StateObject private var model = StaticCoverModel()
@@ -196,6 +197,10 @@ struct StaticCover: View {
                 await model.load(file: request.file, contextIdentity: request.context,
                                  requestIdentity: request.request, maxPixelSize: request.maxPixelSize,
                                  onDecodeFailure: onDecodeFailure)
+                if !Task.isCancelled, model.contextIdentityMatches(request.context),
+                   model.displayedFile == request.file, model.image != nil {
+                    onDecoded?()
+                }
             }
         }
         .onChange(of: contextIdentity) { _, newIdentity in model.updateContext(newIdentity) }
