@@ -24,7 +24,7 @@ enum ReaderTapPolicy {
 
 enum ReaderSnapPolicy {
     static func offset(proposed: CGFloat, viewport: CGFloat, content: CGFloat,
-                       ranges: [CGRect], horizontal: Bool, zoomed: Bool) -> CGFloat? {
+                       ranges: [CGRect], horizontal: Bool, zoomed: Bool, paginationAtStart: Bool? = nil) -> CGFloat? {
         guard !zoomed, viewport > 0, content > viewport else { return nil }
         let bounds = max(0, content - viewport)
         let position = min(bounds, max(0, proposed))
@@ -34,7 +34,7 @@ enum ReaderSnapPolicy {
             let end = horizontal ? rect.maxX : rect.maxY
             return end - start > viewport * 1.05 && position > start + 2 && position + viewport < end - 2
         }) { return nil }
-        let candidates = ranges.flatMap { rect -> [CGFloat] in
+        var candidates = ranges.flatMap { rect -> [CGFloat] in
             let start = horizontal ? rect.minX : rect.minY
             let end = horizontal ? rect.maxX : rect.maxY
             // Match ReaderView.scrollPosition: horizontal pages use center,
@@ -45,6 +45,7 @@ enum ReaderSnapPolicy {
             let offsets = end - start > viewport * 1.05 ? [start, end - viewport] : [shortPageOffset]
             return offsets.map { min(bounds, max(0, $0)) }
         }
+        if let paginationAtStart { candidates.append(paginationAtStart ? 0 : bounds) }
         guard let closest = candidates.min(by: { abs($0 - position) < abs($1 - position) }),
               abs(closest - position) <= viewport * 0.65 else { return nil }
         return closest
@@ -55,13 +56,15 @@ struct ReaderSnappingBehavior: ScrollTargetBehavior {
     var ranges: [CGRect]
     var direction: ReaderDirection
     var zoomed: Bool
+    var hasPaginationControl = false
     func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
         let horizontal = direction.horizontal
         let viewport = horizontal ? context.containerSize.width : context.containerSize.height
         let content = horizontal ? context.contentSize.width : context.contentSize.height
         let proposed = horizontal ? target.rect.minX : target.rect.minY
         guard let offset = ReaderSnapPolicy.offset(proposed: proposed, viewport: viewport, content: content,
-                                                   ranges: ranges, horizontal: horizontal, zoomed: zoomed) else { return }
+                                                   ranges: ranges, horizontal: horizontal, zoomed: zoomed,
+                                                   paginationAtStart: hasPaginationControl ? direction.reverseOrder : nil) else { return }
         if horizontal { target.rect.origin.x = offset } else { target.rect.origin.y = offset }
     }
 }

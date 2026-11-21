@@ -91,6 +91,9 @@ final class ReaderNonblockingV16UITests: XCTestCase {
         dragForward(app)
         let retry = app.buttons["reader.page.retry.3"]
         XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertEqual(retry.frame.midX, app.frame.midX, accuracy: 3)
+        XCTAssertEqual(retry.frame.midY, app.frame.midY, accuracy: 70)
+        XCTAssertFalse(app.buttons["reader.metadata.retry"].exists)
         XCTAssertTrue(cacheValue(app).contains("metadataCalls=1;"))
         XCTAssertEqual(app.buttons["reader.page"].label, "3 / 12")
         retry.tap()

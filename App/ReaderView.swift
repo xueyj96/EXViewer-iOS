@@ -115,6 +115,7 @@ struct ReaderView: View {
     @State private var returnRequested: UUID?
     @State private var presentations: [Int: ImageCanvasPresentation] = [:]
     @State private var decodedFiles: [Int: URL] = [:]
+    @State private var positioningOnOpen = true
     @State private var singleMetadataTask: Task<Void, Never>?
     @State private var singleMetadataRevision = UUID()
     @State private var singleMetadataAttemptedTarget: Int?
@@ -145,15 +146,19 @@ struct ReaderView: View {
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-            VStack(spacing: 0) {
-                if let error = model.error, model.pages.isEmpty || mode == ReaderMode.continuous.rawValue { ReaderFailureMessage(message: error, retry: { Task { guard let context = readingContext, isCurrent(context) else { return }; await model.load(gallery: gallery, offline: offline, session: session, library: library) } }).padding(FeedChrome.contentSpacing) }
-                if model.loading && model.pages.isEmpty { Spacer(); ProgressView(); Spacer() }
                 GeometryReader { geometry in
                     ZStack {
                         if mode == ReaderMode.continuous.rawValue {
-                            continuousPages
-                            if model.pages.isEmpty && immersive {
-                                Color.clear.contentShape(Rectangle()).onTapGesture { immersive = false }
+                            if model.pages.isEmpty {
+                                ReaderLoadingPage(index: current, metadata: true,
+                                                  failure: model.loading ? nil : model.error,
+                                                  retry: offline ? nil : retryOpeningMetadata,
+                                                  retryIdentifier: "reader.metadata.retry",
+                                                  interactions: CanvasInteractions(singleTap: { _ in
+                                    if immersive { immersive = false }
+                                }))
+                            } else {
+                                continuousPages
                             }
                         } else {
                             singlePage.simultaneousGesture(singleDragGesture(size: geometry.size), including: pageZoomed ? .subviews : .all)
@@ -166,7 +171,6 @@ struct ReaderView: View {
                     .accessibilityAction(named: Text("上一页")) { changePage(by: -1) }
                     .accessibilityAction(named: Text(immersive ? "显示阅读控件" : "隐藏阅读控件")) { toggleImmersive() }
                 }
-            }
                 .ignoresSafeArea(.container)
                 .background(Color.black)
                 .toolbar(.hidden, for: .navigationBar)
@@ -188,14 +192,33 @@ struct ReaderView: View {
                         if let value = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-prefetch=") })?.split(separator: "=").last.flatMap({ Int($0) }), (0...ReaderLoadPolicy.maxPrefetchCount).contains(value) { prefetchCount = value }
                         if let value = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--qa-concurrency=") })?.split(separator: "=").last.flatMap({ Int($0) }), (2...ReaderLoadPolicy.maxConcurrency).contains(value) { downloadConcurrency = value }
                     }
-                    await model.load(gallery: gallery, offline: offline, session: session, library: library, openingDetail: openingDetail)
+                    let historyPage = library.snapshot.history.first(where: { $0.id == gallery.id })?.page
+                    positioningOnOpen = true
+                    await model.load(gallery: gallery, offline: offline, session: session, library: library,
+                                     openingDetail: openingDetail, resumeAt: historyPage)
                     guard !Task.isCancelled, isCurrent(context) else { return }
-                    let desired = library.snapshot.history.first(where: { $0.id == gallery.id })?.page ?? 1
-                    await seek(desired)
+                    if let restored = model.restoredPage {
+                        let page = restored.page.index
+                        var transaction = Transaction(); transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            current = page
+                            progressTarget = Double(page)
+                            scrollPosition = page
+                        }
+                        positioningOnOpen = false
+                        updateMedia()
+                    } else {
+                        positioningOnOpen = false
+                        await seek(historyPage ?? 1)
+                        updateMedia()
+                    }
                 }
                 .onDisappear(perform: closeReading)
                 .onChange(of: scenePhase) { _, phase in
-                    if phase != .active { historyCheckpoint?.flush() }
+                    if phase != .active {
+                        historyCheckpoint?.flush()
+                        library.flushReadingHistoryForLifecycle()
+                    }
                     if phase == .background { media.setForeground(false) }
                     if phase == .active { media.setForeground(true); updateMedia() }
                 }
@@ -205,6 +228,9 @@ struct ReaderView: View {
                     presentations = presentations.filter { abs($0.key - value) <= 1 }
                     decodedFiles = decodedFiles.filter { abs($0.key - value) <= 1 }
                     updateMedia()
+                    if let file = presentations[value]?.file, media.files[value] == file {
+                        model.saveResume(index: value, file: file, gallery: gallery.ref)
+                    }
                 }
                 .onChange(of: model.pages) { _, _ in updateMedia() }
                 .onChange(of: model.loading) { _, loading in if !loading { updateMedia() } }
@@ -365,7 +391,7 @@ struct ReaderView: View {
             .scrollTargetBehavior(ReaderSnappingBehavior(ranges: visiblePageFrames.compactMap { index, rect in
                 guard pageSizes[index] != nil else { return nil }
                 return rect.offsetBy(dx: -contentOrigin.x, dy: -contentOrigin.y)
-            }, direction: direction, zoomed: pageZoomed))
+            }, direction: direction, zoomed: pageZoomed, hasPaginationControl: model.next != nil))
             .coordinateSpace(name: "reader.canvas")
             .scrollPosition(id: $scrollPosition, anchor: readingAnchor)
             .simultaneousGesture(DragGesture(minimumDistance: 5)
@@ -413,7 +439,7 @@ struct ReaderView: View {
         let expectedGeneration = session.generation
         let expectedOwner = library.owner
         let expectedContext = readingContext
-        if direction.reverseOrder && model.next != nil { loadMorePagesButton }
+        if direction.reverseOrder { paginationControl }
         ForEach(ordered) { page in
             let extent = ReaderPageSizing.extent(imageSize: pageSizes[page.index], crossAxisExtent: direction.horizontal ? geometry.size.height : geometry.size.width, direction: direction)
             ReaderPage(page: page, active: abs(page.index - current) <= 1,
@@ -433,8 +459,9 @@ struct ReaderView: View {
                                  isCurrent(expectedContext) else { return }
                            pageSizes[page.index] = size
                        }, onPresentation: { value in
-                           guard let expectedContext, isCurrent(expectedContext), media.files[page.index] == value.file else { return }
-                           recordDecoded(page.index, file: value.file)
+                           if let expectedContext { pagePresented(page, value: value, context: expectedContext) }
+                       }, onDecodeFailure: { file in
+                           if let expectedContext { recoverResumeImage(page, file: file, context: expectedContext) }
                        })
                 .id("\(page.index):\(storedDirection)")
                 .frame(width: direction.horizontal ? extent : geometry.size.width,
@@ -444,17 +471,37 @@ struct ReaderView: View {
                 .accessibilityValue(AppMode.qa ? "page \(page.index)" : "第 \(page.index) 页")
                 .id(page.index)
         }
-        if !direction.reverseOrder && model.next != nil { loadMorePagesButton }
+        if !direction.reverseOrder { paginationControl }
         if model.loading { ProgressView().tint(.white).padding() }
     }
 
-    private var loadMorePagesButton: some View {
-        Button("继续加载后续页面") {
-            Task { await loadNextPagesKeepingPosition() }
+    @ViewBuilder private var paginationControl: some View {
+        let edge: Edge.Set = direction.horizontal ? (direction.reverseOrder ? .leading : .trailing)
+            : (direction.reverseOrder ? .top : .bottom)
+        if !model.loading, let error = model.error {
+            ReaderFailureMessage(message: error, retry: model.next == nil ? nil : retryPagination,
+                                 retryIdentifier: "reader.pagination.retry")
+                .padding(24)
+                .padding(edge, direction.horizontal || model.next == nil ? 0 : FeedChrome.rowHeight + FeedChrome.contentInset)
+        } else if model.next != nil {
+            Button("继续加载后续页面", action: retryPagination)
+                .disabled(model.loading)
+                .padding(24).foregroundStyle(.white)
+                .padding(edge, direction.horizontal ? 0 : FeedChrome.rowHeight + FeedChrome.contentInset)
+                .accessibilityIdentifier("reader.load-more")
         }
-        .disabled(model.loading)
-        .padding(24).foregroundStyle(.white)
-        .accessibilityIdentifier("reader.load-more")
+    }
+
+    private func retryPagination() {
+        Task { await loadNextPagesKeepingPosition() }
+    }
+
+    private func retryOpeningMetadata() {
+        guard let context = readingContext else { return }
+        Task {
+            guard isCurrent(context), model.pages.isEmpty, !model.loading else { return }
+            await model.load(gallery: gallery, offline: offline, session: session, library: library)
+        }
     }
 
     private var singlePage: some View {
@@ -491,9 +538,14 @@ struct ReaderView: View {
         if let page = model.pages.first(where: { $0.index == index }) {
             pageCanvas(page)
         } else {
+            let opening = model.pages.isEmpty
+            let failure = index != current || model.loading ? nil :
+                (opening ? model.error : offline ? "离线副本中没有这一页" : singleMetadataError)
+            let retry: (() -> Void)? = offline ? nil :
+                (opening ? retryOpeningMetadata : model.next == nil ? nil : retrySinglePageMetadata)
             ReaderLoadingPage(index: index, metadata: true,
-                              failure: offline ? "离线副本中没有这一页" : (index == current ? singleMetadataError : nil),
-                              retry: offline || model.next == nil ? nil : retrySinglePageMetadata,
+                              failure: failure, retry: retry,
+                              retryIdentifier: opening ? "reader.metadata.retry" : nil,
                               interactions: canvasInteractions)
         }
     }
@@ -509,14 +561,36 @@ struct ReaderView: View {
             guard let expected, isCurrent(expected), abs(page.index - current) <= 1 else { return }
             pageSizes[page.index] = size
         }, onPresentation: { value in
-            guard let expected, isCurrent(expected), abs(page.index - current) <= 1,
-                  media.files[page.index] == value.file else { return }
-            presentations[page.index] = value
-            recordDecoded(page.index, file: value.file)
+            if let expected { pagePresented(page, value: value, context: expected) }
+        }, onDecodeFailure: { file in
+            if let expected { recoverResumeImage(page, file: file, context: expected) }
         })
         .id("\(page.index):\(storedDirection)")
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(media.files[page.index] == nil ? "reader.page.loading.\(page.index)" : "reader.page.frame")
+    }
+
+    private func pagePresented(_ page: GalleryPage, value: ImageCanvasPresentation, context: ReadingContext) {
+        guard isCurrent(context), abs(page.index - current) <= 1, media.files[page.index] == value.file else { return }
+        let firstPresentation = presentations[page.index]?.file != value.file
+        presentations[page.index] = value
+        recordDecoded(page.index, file: value.file)
+        if page.index == current, firstPresentation {
+            model.saveResume(index: current, file: value.file, gallery: gallery.ref)
+            if model.restoredPage?.page == page { updateMedia() }
+        }
+    }
+
+    private func recoverResumeImage(_ page: GalleryPage, file: URL, context: ReadingContext) {
+        guard isCurrent(context), media.files[page.index] == file,
+              model.discardRestoredPage(page, file: file) else { return }
+        MediaRepository.shared.releasePinnedFiles(context: context.id)
+        Task {
+            await MediaRepository.shared.discardUndecodableBrowseFile(file, owner: context.owner)
+            guard isCurrent(context) else { return }
+            media.retryInvalidFile(page: page.index, file: file)
+            updateMedia()
+        }
     }
 
     private func recordDecoded(_ page: Int, file: URL) {
@@ -577,6 +651,7 @@ struct ReaderView: View {
 
     private func closeReading() {
         historyCheckpoint?.flush()
+        library.flushReadingHistoryForLifecycle()
         historyCheckpoint = nil
         let context = readingContext
         readingContext = nil
@@ -601,19 +676,22 @@ struct ReaderView: View {
     }
 
     private func updateMedia() {
-        guard let context = readingContext, isCurrent(context) else { return }
+        guard !positioningOnOpen, let context = readingContext, isCurrent(context) else { return }
+        let presentingResume = model.restoredPage?.page.index == current && presentations[current] == nil
         let scope = ReaderMediaScope(galleryID: gallery.id, owner: context.owner,
                                      generation: context.generation, context: context.id)
         media.update(scope: scope, pages: model.pages, current: current,
-                     prefetchCount: prefetchCount, downloadConcurrency: downloadConcurrency,
+                     prefetchCount: presentingResume ? 0 : prefetchCount, downloadConcurrency: downloadConcurrency,
                      preview: singleTurn.requestedNeighbor,
                      validateCachedFile: { FileManager.default.fileExists(atPath: $0.path) },
                      demandLoader: { page, demand in
             try await loadMedia(page, demand: demand, context: context)
         }, isCurrent: { isCurrent(context) })
         updatePinnedFiles(context)
-        requestSingleMetadataIfNeeded(context)
-        requestNextMetadataIfNeeded(context)
+        if !presentingResume {
+            requestSingleMetadataIfNeeded(context)
+            requestNextMetadataIfNeeded(context)
+        }
     }
 
     private func loadMedia(_ page: GalleryPage, demand: MediaRequestDemand, context: ReadingContext) async throws -> URL {
@@ -638,6 +716,12 @@ struct ReaderView: View {
             return page.url
         }
         if page.url.isFileURL { return page.url }
+        if let restored = model.restoredPage, restored.page == page,
+           FileManager.default.fileExists(atPath: restored.file.path) {
+            demand.reportProgress(MediaLoadProgress(phase: .ready))
+            ReaderNetworkMetrics.record(demand.id, phase: "history-cache-hit", page: page.index)
+            return restored.file
+        }
         return try await ReaderNetworkMetrics.measure(demand.id, phase: "pipeline", page: page.index) {
             try await PageMediaLoader.readerFile(page, session: session, owner: context.owner, request: demand,
                                                  isCurrent: { isCurrent(context) })
@@ -811,10 +895,17 @@ struct ReaderView: View {
                                    readLater: library.containsReadLater(gallery),
                                    onBack: { settings = false },
                                    onFavorite: {
-                                       do {
-                                           try session.toggleSiteFavorite(gallery)
-                                           favoriteObservation.syncFromCache()
-                                       } catch { favoriteFailure = ErrorMessages.message(error) }
+                                       let requestScope = GalleryFavoriteScope(gallery, session)
+                                       Task {
+                                           do {
+                                               try await session.toggleSiteFavorite(gallery)
+                                               guard requestScope == GalleryFavoriteScope(gallery, session) else { return }
+                                               favoriteObservation.syncFromCache()
+                                           } catch {
+                                               guard requestScope == GalleryFavoriteScope(gallery, session) else { return }
+                                               favoriteFailure = ErrorMessages.message(error)
+                                           }
+                                       }
                                    },
                                    onReadLater: { library.toggleReadLater(gallery) })
     }

@@ -91,11 +91,18 @@ private enum BrowserPreferenceDefaults {
     }
     var body: some Scene {
         WindowGroup {
-            RootView().environmentObject(session).environmentObject(library).environmentObject(downloads).tint(Palette.accent)
+            Group {
+                if SearchDeviceProbe.enabled {
+                    SearchDeviceProbe(session: session, library: library)
+                } else {
+                    RootView()
+                }
+            }.environmentObject(session).environmentObject(library).environmentObject(downloads).tint(Palette.accent)
                 .appToastHost()
                 .modifier(AppVisualEnvironment())
                 .overlay { SelectionPerformanceProbeInstaller() }
                 .task {
+                    guard !SearchDeviceProbe.enabled else { return }
                     if scenePhase == .active { downloads.resumeQueuedDownloads() }
                     if !AppMode.qa && session.hasCredentials { await session.verify() }
                 }
@@ -103,6 +110,7 @@ private enum BrowserPreferenceDefaults {
                     Self.applySessionChange(session: session, library: library, downloads: downloads)
                 }
                 .onChange(of: scenePhase) { _, phase in
+                    guard !SearchDeviceProbe.enabled else { return }
                     if phase == .active { downloads.resumeQueuedDownloads() }
                     else if phase == .background { downloads.suspendForBackground() }
                 }
@@ -224,7 +232,10 @@ struct RootView: View {
             // Explicit main-tab navigation abandons the temporary search, not its source route.
             if detailSearch != nil, tab != 0 { detailSearch = nil; detailSearchSourceTab = nil }
         }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { session.favoriteStateCache.refreshActive() } }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { session.favoriteStateCache.refreshActive() }
+            else { session.favoriteStateCache.flushForLifecycle() }
+        }
         .sheet(isPresented: .constant(AppMode.screen == "reader" || AppMode.screen == "web-compat")) {
             if AppMode.screen == "web-compat" { WebCompatibilityQAView() }
             else { ReaderView(gallery: QASamples.galleries[0]) }

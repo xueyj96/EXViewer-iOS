@@ -620,6 +620,168 @@ import ExViewerCore
         let cached = await cache.read(owner: session.owner, url: root)
         XCTAssertNil(cached, "A partial response must not become a complete cached search")
     }
+    func testIncompleteSearchPageRetainsDistinctNextCursorAndKeepsBlockingPolicy() async throws {
+        var query = SearchQuery()
+        query.text = "neutral"
+        let root = try query.url(site: .ex)
+        let cursor = try XCTUnwrap(URL(string: "https://exhentai.org/?f_search=neutral&next=3"))
+        let session = SiteSession(qa: true)
+        var requested: [URL] = []
+        var metadataCalls = 0
+        let pager = GalleryPager { url, isList, body in
+            if isList {
+                requested.append(url)
+                return url == root
+                    ? self.list(count: 2) + "<a id='dnext' href='/?f_search=neutral&amp;next=3'>Next</a>"
+                    : self.list(count: 2, start: 3)
+            }
+            metadataCalls += 1
+            if metadataCalls == 1 { throw URLError(.timedOut) }
+            return try self.metadata(XCTUnwrap(body))
+        }
+
+        pager.reset(url: root, session: session)
+        await pager.waitForLoad()
+        XCTAssertNotNil(pager.failure)
+        XCTAssertEqual(pager.next, cursor)
+        XCTAssertTrue(pager.canContinueAfterFailure)
+        let blocked = Set(["other:blocked"])
+        XCTAssertEqual(LibrarySelectionPolicy.filtered(pager.items, blocked: blocked).unknown, 2)
+
+        pager.more(session: session)
+        await pager.waitForLoad()
+        XCTAssertEqual(requested, [root, cursor])
+        XCTAssertNil(pager.failure)
+        XCTAssertFalse(pager.canContinueAfterFailure)
+        let filtered = LibrarySelectionPolicy.filtered(pager.items, blocked: blocked)
+        XCTAssertEqual(filtered.visible.map(\.ref.gid), [3, 4])
+        XCTAssertEqual(filtered.unknown, 2)
+    }
+
+    func testRecentSearchOpensFromDiskAndUsesItsCursorBeforeExplicitRefresh() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FeedSnapshotCache(root: directory), session = SiteSession(qa: true)
+        var query = SearchQuery(); query.text = "neutral"
+        let root = try query.url(site: .ex)
+        let next = try XCTUnwrap(URL(string: "/?f_search=neutral&next=2", relativeTo: root)?.absoluteURL)
+        var first = Gallery(ref: .init(site: .ex, gid: 1, token: "abcdef"), title: "Cached")
+        first.tagsComplete = true
+        let snapshot = FeedSnapshot(owner: session.owner, root: root, items: [first], next: next, categories: [:])
+        await cache.save(snapshot, expectedEpoch: 0)
+        XCTAssertTrue(SearchFeedFreshness.canReuse(snapshot))
+        XCTAssertFalse(SearchFeedFreshness.canReuse(snapshot, now: snapshot.savedAt.addingTimeInterval(31)))
+        XCTAssertFalse(SearchFeedFreshness.canReuse(snapshot, now: snapshot.savedAt.addingTimeInterval(-1)))
+
+        var requests: [URL] = []
+        let pager = GalleryPager(loadHTML: { url, search, body in
+            if search {
+                requests.append(url)
+                return self.list(count: 1, start: url == root ? 3 : 2)
+            }
+            return try self.metadata(XCTUnwrap(body))
+        }, cache: FeedSnapshotCache(root: directory))
+        await pager.prepareCached(url: root, session: session, qa: false)
+        XCTAssertEqual(pager.items.map(\.ref.gid), [1])
+        pager.reset(url: root, session: session, rootLoad: .openSearch)
+        await pager.waitForLoad()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(pager.next, next)
+        XCTAssertEqual(pager.items.map(\.ref.gid), [1])
+        pager.more(session: session)
+        await pager.waitForLoad()
+        XCTAssertEqual(requests, [next])
+        XCTAssertEqual(pager.items.map(\.ref.gid), [1, 2])
+
+        let reopened = GalleryPager(loadHTML: { url, search, body in
+            if search { requests.append(url); return self.list(count: 1, start: 3) }
+            return try self.metadata(XCTUnwrap(body))
+        }, cache: cache)
+        reopened.reset(url: root, session: session, rootLoad: .openSearch)
+        reopened.reset(url: root, session: session)
+        await reopened.waitForLoad()
+        XCTAssertEqual(requests, [next, root])
+        XCTAssertEqual(reopened.items.map(\.ref.gid), [3])
+    }
+
+    func testSearchPrefetchStartsEarlyAndRequiresProgressBeforeAnotherRequest() {
+        let viewport: CGFloat = 600
+        XCTAssertFalse(SearchPrefetchPosition(offset: 0, remaining: 550, viewport: viewport).shouldPrefetch(after: nil))
+        XCTAssertFalse(SearchPrefetchPosition(offset: 600, remaining: 1_201, viewport: viewport).shouldPrefetch(after: nil))
+        let approaching = SearchPrefetchPosition(offset: 600, remaining: 1_100, viewport: viewport)
+        XCTAssertTrue(approaching.shouldPrefetch(after: nil))
+        XCTAssertFalse(approaching.shouldPrefetch(after: approaching.step))
+        XCTAssertFalse(SearchPrefetchPosition(offset: 750, remaining: 500, viewport: viewport).shouldPrefetch(after: approaching.step))
+        XCTAssertTrue(SearchPrefetchPosition(offset: 900, remaining: 500, viewport: viewport).shouldPrefetch(after: approaching.step))
+    }
+
+    func testSearchColdWarmTimingWithIdenticalQueryAndTwoPages() async throws {
+        var query = SearchQuery()
+        query.text = "neutral"
+        let root = try query.url(site: .ex)
+        let file = QASamples.cover(seed: 918273)
+        let session = SiteSession(qa: true)
+        for sample in 1...3 {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let decoder = StaticCoverImageCache()
+            for warm in [false, true] {
+                var htmlAt: [Double] = []
+                var metadataAt: [Double] = []
+                var listCalls = 0
+                let start = ProcessInfo.processInfo.systemUptime
+                let elapsed = { (ProcessInfo.processInfo.systemUptime - start) * 1_000 }
+                let pager = GalleryPager(loadHTML: { url, isList, body in
+                    if isList {
+                        listCalls += 1
+                        try await Task.sleep(for: .milliseconds(160))
+                        htmlAt.append(elapsed())
+                        if url == root {
+                            return self.list(count: 24) + "<a id='dnext' href='/?f_search=neutral&amp;next=25'>Next</a>"
+                        }
+                        return self.list(count: 24, start: 25)
+                    }
+                    try await Task.sleep(for: .milliseconds(320))
+                    metadataAt.append(elapsed())
+                    return try self.metadata(XCTUnwrap(body))
+                }, cache: FeedSnapshotCache(root: directory))
+
+                pager.reset(url: root, session: session)
+                try await waitUntil { !pager.items.isEmpty }
+                let first = elapsed()
+                let firstVerified = pager.items.first?.tagsComplete == true
+                XCTAssertEqual(firstVerified, warm)
+                let blocking = LibrarySelectionPolicy.filtered(pager.items, blocked: ["other:blocked"])
+                XCTAssertEqual(blocking.visible.count, warm ? 24 : 0)
+                let cover = Task {
+                    // A fixed transfer allowance isolates overlap from network variance.
+                    if !warm { try await Task.sleep(for: .milliseconds(180)) }
+                    let image = await decoder.thumbnail(for: file, maxPixelSize: 480)
+                    XCTAssertNotNil(image)
+                    return elapsed()
+                }
+                await pager.waitForLoad()
+                XCTAssertEqual(pager.items.map(\.ref.gid), (1...24).map(Int64.init))
+                XCTAssertTrue(pager.items.allSatisfy(\.tagsComplete))
+                let nextStart = elapsed()
+                pager.more(session: session)
+                try await waitUntil { pager.items.count > 24 }
+                let nextFirst = elapsed() - nextStart
+                let nextVerified = pager.items.dropFirst(24).first?.tagsComplete == true
+                XCTAssertFalse(nextVerified)
+                await pager.waitForLoad()
+                let nextComplete = elapsed() - nextStart
+                XCTAssertEqual(pager.items.map(\.ref.gid), (1...48).map(Int64.init))
+                XCTAssertTrue(pager.items.allSatisfy(\.tagsComplete))
+                XCTAssertNil(pager.next)
+                XCTAssertNil(pager.failure)
+                XCTAssertEqual(listCalls, 2)
+                let firstCover = try await cover.value
+                print("SEARCH_TIMING sample=\(sample) warm=\(warm) html=\(htmlAt) metadata=\(metadataAt) first=\(first) firstVerified=\(firstVerified) cover=\(firstCover) readyToContinue=\(nextStart) nextFirst=\(nextFirst) nextVerified=\(nextVerified) nextComplete=\(nextComplete)")
+            }
+        }
+    }
+
     func testColdFavoriteHTMLIsSavedAndVisibleBeforeMetadataAndSurvivesCancellation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

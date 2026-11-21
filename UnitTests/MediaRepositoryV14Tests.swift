@@ -5,6 +5,78 @@ import ExViewerCore
 @testable import ExViewer
 
 final class MediaRepositoryV14Tests: XCTestCase {
+    @MainActor func testHistoryResumeOpensLatePageFromDiskAfterNewRepositoryAndSession() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = MediaRepository(root: root)
+        let session = SiteSession(qa: true)
+        let library = LibraryStore(qa: true)
+        let reference = GalleryRef(site: .ex, gid: 42, token: "fixture")
+        let gallery = Gallery(ref: reference, title: "Fixture", pages: 390)
+        let pages = (1...128).map {
+            GalleryPage(index: $0, url: URL(string: "https://exhentai.org/s/fixture/42-\($0)")!)
+        }
+        let next = try XCTUnwrap(URL(string: reference.url.absoluteString + "?p=4"))
+        let directory = await writer.directory(owner: session.owner)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent(String(repeating: "a", count: 64))
+        try ControlledURLProtocol.png.write(to: file)
+        let tag = GalleryTag(namespace: "other", name: "fixture")
+        let date = Date()
+        await writer.saveReaderResume(reference: reference, owner: session.owner, index: 124, pages: pages,
+                                      total: 390, next: next, tags: [tag], file: file, at: date)
+        // A slower write from an older on-screen page cannot undo the latest one.
+        await writer.saveReaderResume(reference: reference, owner: session.owner, index: 123, pages: pages,
+                                      total: 390, next: next, tags: [tag], file: file, at: date.addingTimeInterval(-1))
+
+        let reopened = MediaRepository(root: root)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RejectReaderNetwork.self]
+        let newSession = SiteSession(qa: true, configuration: configuration, searchInterval: 0)
+        RejectReaderNetwork.started = false
+        XCTAssertNotEqual(session.generation, newSession.generation)
+        let model = ReaderModel(qa: false)
+        let start = ProcessInfo.processInfo.systemUptime
+        await model.load(gallery: gallery, offline: false, session: newSession, library: library,
+                         resumeAt: 124, repository: reopened)
+        print("history disk resume page 124: \((ProcessInfo.processInfo.systemUptime - start) * 1_000) ms")
+        XCTAssertEqual(model.restoredPage?.page.index, 124)
+        XCTAssertEqual(model.restoredPage?.file, file)
+        XCTAssertEqual(model.total, 390)
+        XCTAssertEqual(model.next, next)
+        XCTAssertEqual(model.pages.first?.index, 1)
+        XCTAssertEqual(model.pages.last?.index, 128)
+        XCTAssertFalse(RejectReaderNetwork.started)
+
+        let otherOwner = await reopened.readerResume(reference: reference, owner: "different", index: 124, blocked: [])
+        let blocked = await reopened.readerResume(reference: reference, owner: session.owner, index: 124, blocked: [tag.id])
+        let otherPage = await reopened.readerResume(reference: reference, owner: session.owner, index: 123, blocked: [])
+        XCTAssertNil(otherOwner)
+        XCTAssertNil(blocked)
+        XCTAssertNil(otherPage)
+        try FileManager.default.removeItem(at: file)
+        let missing = await reopened.readerResume(reference: reference, owner: session.owner, index: 124, blocked: [])
+        XCTAssertNil(missing)
+        try await reopened.clear(owner: session.owner)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    private final class RejectReaderNetwork: URLProtocol, @unchecked Sendable {
+        private static let lock = NSLock()
+        private static var hasStarted = false
+        static var started: Bool {
+            get { lock.withLock { hasStarted } }
+            set { lock.withLock { hasStarted = newValue } }
+        }
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            Self.started = true
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+        }
+        override func stopLoading() {}
+    }
+
     private final class ControlledURLProtocol: URLProtocol, @unchecked Sendable {
         private static let lock = NSLock()
         private static var sequence = 0

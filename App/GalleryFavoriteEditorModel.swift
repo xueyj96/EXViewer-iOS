@@ -69,13 +69,14 @@ import ExViewerCore
         if !keepSelection { selection = value.selectedGroup }
         if !keepNote { note = value.note }
     }
-    func enqueue(_ submit: (GalleryFavoriteForm, FavoriteAction, String, String) throws -> Void,
-                 title: String, remove: Bool = false) -> Bool {
+    func enqueue(_ submit: (GalleryFavoriteForm, FavoriteAction, String, String) async throws -> Void,
+                 title: String, remove: Bool = false) async -> Bool {
         guard client.isCurrent(), remove ? canRemove : canSave, let form else { return false }
         let action: FavoriteAction
         if remove { action = .remove } else { guard let selection else { return false }; action = .move(selection) }
+        saving = true; defer { saving = false }
         do {
-            try submit(form, action, remove ? "" : GalleryFavoriteForm.normalizedNote(note), title)
+            try await submit(form, action, remove ? "" : GalleryFavoriteForm.normalizedNote(note), title)
             lastReadSucceeded = false; return true
         } catch { self.error = ErrorMessages.message(error, fallback: "本机保存失败 请重试"); return false }
     }

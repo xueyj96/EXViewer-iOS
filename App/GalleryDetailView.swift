@@ -30,6 +30,8 @@ struct GalleryDetailView: View {
     @State private var tagFeedback: String?
     @State private var tagFailure: String?
     @State private var favoriteFailure: String?
+    @State private var pendingFavoriteFailure: String?
+    @State private var detailIsVisible = false
     @State private var pendingOfflineUpdate: GalleryOfflineUpdate?
     @StateObject private var favoriteObservation = GalleryFavoriteObservation()
     @StateObject private var downloadVersions = GalleryDownloadVersions()
@@ -45,6 +47,10 @@ struct GalleryDetailView: View {
     private var activeSearchTarget: DetailSearchTarget? {
         let target = originatingSearch ?? (searchTarget?.origin == .discoverSearch ? searchTarget : nil)
         return target?.isCurrent == true ? target : nil
+    }
+
+    private var favoriteFeedbackHidden: Bool {
+        !detailIsVisible || covered || externallyCovered || web != nil || downloadOptions
     }
 
     private var openingDetail: ReaderOpeningDetail? {
@@ -116,10 +122,27 @@ struct GalleryDetailView: View {
             .safeAreaInset(edge: .top, spacing: 0) { detailHeader }
             .task(id: session.pageReadScope) { await load() }
             .task(id: downloadQuery) { await downloadVersions.refresh(current, query: downloadQuery, session: session) }
-            .onDisappear { favoriteObservation.cancel() }
-            .onAppear(perform: bindFavoriteState)
-            .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in bindFavoriteState() }
+            .onDisappear {
+                detailIsVisible = false; favoriteFailure = nil
+                favoriteObservation.cancel()
+            }
+            .onAppear { detailIsVisible = true; bindFavoriteState() }
+            .onChange(of: GalleryFavoriteScope(gallery, session)) { _, _ in
+                favoriteFailure = nil; pendingFavoriteFailure = nil
+                bindFavoriteState()
+            }
             .onReceive(session.favoriteStateCache.$revision) { _ in favoriteObservation.syncFromCache() }
+            .onReceive(favoriteObservation.failures) { message in
+                if favoriteFeedbackHidden { pendingFavoriteFailure = message }
+                else { pendingFavoriteFailure = nil; favoriteFailure = message }
+            }
+            .onChange(of: favoriteFeedbackHidden) { _, hidden in
+                if hidden { favoriteFailure = nil }
+                else if let message = pendingFavoriteFailure {
+                    pendingFavoriteFailure = nil
+                    if favoriteObservation.failureMessage == message { favoriteFailure = message }
+                }
+            }
             .onChange(of: gallery.id) { _, _ in clearTagSelection() }
             .onChange(of: current.tags) { _, tags in selectedTagIDs.formIntersection(Set(tags.map(\.id))) }
             .officialWebPage(item: $web, onDismiss: { Task { await load(refresh: true) } })
@@ -302,10 +325,20 @@ struct GalleryDetailView: View {
     }
 
     private func favoriteTapped() {
-        do {
-            try session.toggleSiteFavorite(current)
-            favoriteObservation.syncFromCache()
-        } catch { favoriteFailure = ErrorMessages.message(error) }
+        let target = current
+        let requestScope = GalleryFavoriteScope(target, session)
+        Task {
+            do {
+                try await session.toggleSiteFavorite(target)
+                guard requestScope == GalleryFavoriteScope(current, session) else { return }
+                favoriteObservation.syncFromCache()
+            } catch {
+                guard requestScope == GalleryFavoriteScope(current, session) else { return }
+                let message = ErrorMessages.message(error)
+                if favoriteFeedbackHidden { pendingFavoriteFailure = message }
+                else { favoriteFailure = message }
+            }
+        }
     }
 
     private var detailActions: some View {

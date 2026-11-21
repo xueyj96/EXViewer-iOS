@@ -20,6 +20,8 @@ struct ReaderOpeningDetail {
     @Published private(set) var next: URL?
     @Published private(set) var loading = false
     @Published private(set) var error: String?
+    private(set) var restoredPage: (page: GalleryPage, file: URL)?
+    private var verifiedTags: [GalleryTag]?
     private var seen = Set<URL>()
     private var context = UUID()
     private var generation: UUID?
@@ -32,9 +34,11 @@ struct ReaderOpeningDetail {
     func promotePendingMetadata() { metadataDemand?.setPriority(.foreground) }
     var hasForegroundMetadataDemand: Bool { metadataDemand?.priority == .foreground }
     func load(gallery: Gallery, offline: Bool, session: SiteSession, library: LibraryStore,
-              openingDetail: ReaderOpeningDetail? = nil) async {
+              openingDetail: ReaderOpeningDetail? = nil, resumeAt: Int? = nil,
+              repository: MediaRepository = .shared) async {
         cancel(); generation = session.generation; owner = library.owner
         pages = []; seen = []; total = gallery.pages; next = nil; error = nil
+        restoredPage = nil; verifiedTags = nil
         if let record = library.readableDownload(for: gallery) {
             pages = library.downloadedPages(record)
             total = record.total ?? gallery.pages
@@ -65,11 +69,46 @@ struct ReaderOpeningDetail {
         let detail = openingDetail.flatMap { opening in
             opening.isReusable(for: gallery.ref, generation: session.generation, owner: library.owner) ? opening.detail : nil
         }
+        if pages.isEmpty, let resumeAt {
+            let expected = context, scope = session.pageReadScope
+            let latest = detail?.gallery ?? gallery
+            let blocked = library.blockedIDs
+            let permitsReuse = !latest.tagsComplete ||
+                TagFilter.decision(tags: latest.tags, blocked: blocked, complete: true) == .visible
+            let restored = permitsReuse ? await repository.readerResume(reference: gallery.ref, owner: scope.owner,
+                                                                        index: resumeAt, blocked: blocked) : nil
+            guard !Task.isCancelled, expected == context,
+                  scope == session.pageReadScope, scope.owner == library.owner else { return }
+            if let (snapshot, file) = restored,
+               TagFilter.decision(tags: snapshot.tags, blocked: library.blockedIDs, complete: true) == .visible,
+               let page = snapshot.pages.first(where: { $0.index == resumeAt }),
+               latest.pages.map({ $0 >= resumeAt }) ?? true {
+                verifiedTags = snapshot.tags
+                restoredPage = (page, file)
+                total = snapshot.total ?? total
+                next = snapshot.next
+                pages = snapshot.pages
+                return
+            }
+        }
         if pages.isEmpty || detail != nil {
             await fetch(url: gallery.ref.url, gallery: gallery, session: session, library: library, openingDetail: detail)
         } else {
             next = gallery.ref.url
         }
+    }
+    func saveResume(index: Int, file: URL, gallery: GalleryRef, repository: MediaRepository = .shared) {
+        guard let owner, let tags = verifiedTags, pages.contains(where: { $0.index == index }) else { return }
+        let pages = pages, total = total, next = next, date = Date()
+        Task {
+            await repository.saveReaderResume(reference: gallery, owner: owner, index: index, pages: pages,
+                                              total: total, next: next, tags: tags, file: file, at: date)
+        }
+    }
+    func discardRestoredPage(_ page: GalleryPage, file: URL) -> Bool {
+        guard restoredPage?.page == page, restoredPage?.file == file else { return false }
+        restoredPage = nil
+        return true
     }
     func more(gallery: Gallery, session: SiteSession, library: LibraryStore,
               priority: MediaRequestPriority = .foreground, beforeAppending: (() -> Void)? = nil) async {
@@ -79,6 +118,10 @@ struct ReaderOpeningDetail {
             let expected = context
             loading = true
             defer { if expected == context { loading = false } }
+            if qaMetadataCalls == 1, ProcessInfo.processInfo.arguments.contains("--qa-reader-metadata-failure-once") {
+                error = "后续页加载失败"
+                return
+            }
             if ProcessInfo.processInfo.arguments.contains("--qa-reader-metadata-stall") {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 return
@@ -89,7 +132,7 @@ struct ReaderOpeningDetail {
             }
             guard !Task.isCancelled, expected == context, generation == session.generation, owner == library.owner else { return }
             beforeAppending?()
-            pages = QASamples.pages; next = nil; return
+            pages = QASamples.pages; next = nil; error = nil; return
         }
         if let next { await fetch(url: next, gallery: gallery, session: session, library: library, priority: priority, beforeAppending: beforeAppending) }
     }
@@ -109,6 +152,7 @@ struct ReaderOpeningDetail {
             else { detail = try await session.galleryDetail(for: gallery.ref, pageURL: url, request: demand).detail }
             guard current == context, revision == session.generation, owner == library.owner else { return }
             guard TagFilter.decision(tags: detail.gallery.tags, blocked: library.blockedIDs, complete: true) == .visible else { throw ViewerError.invalidQuery("画廊命中屏蔽标签 可在设置调整") }
+            verifiedTags = detail.gallery.tags
             beforeAppending?()
             seen.insert(url); var indexes = Set(pages.map(\.index)); pages += detail.pages.filter { indexes.insert($0.index).inserted }
             pages.sort { $0.index < $1.index }

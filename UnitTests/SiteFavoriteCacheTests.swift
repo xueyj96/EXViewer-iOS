@@ -11,15 +11,15 @@ import ExViewerCore
         let cache = SiteFavoriteCache(), scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
         cache.activate(owner: scope.owner, generation: scope.generation)
         let client = GalleryFavoriteClient(isCurrent: { true }, read: { throw ViewerError.network }, submit: { _ in })
-        try cache.enqueue(scope: scope, client: client, form: form(nil), action: .move(1), note: "", title: "Fixture")
+        try await cache.enqueue(scope: scope, client: client, form: form(nil), action: .move(1), note: "", title: "Fixture")
         XCTAssertEqual(cache.changes.first?.action, "加入收藏")
         XCTAssertEqual(cache.changes.first?.groupName, NativeFavoritesQA.groups[1])
-        try cache.enqueue(scope: scope, client: client, form: form(nil), action: .remove, note: "", title: "Fixture")
+        try await cache.enqueue(scope: scope, client: client, form: form(nil), action: .remove, note: "", title: "Fixture")
         XCTAssertEqual(cache.changes.first?.action, "取消收藏")
         XCTAssertNil(cache.changes.first?.groupName)
         let moving = SiteFavoriteCache()
         moving.activate(owner: scope.owner, generation: scope.generation)
-        try moving.enqueue(scope: scope, client: client, form: form(2), action: .move(1), note: "", title: "Fixture")
+        try await moving.enqueue(scope: scope, client: client, form: form(2), action: .move(1), note: "", title: "Fixture")
         XCTAssertEqual(moving.changes.first?.action, "调整分组")
         for _ in 0..<50 where cache.entry(scope)?.phase != .failed { try await Task.sleep(nanoseconds: 2_000_000) }
     }
@@ -45,29 +45,30 @@ import ExViewerCore
         let none = try form(nil); reader.accept(.notFavorited, form: none); detail.syncFromCache()
         XCTAssertEqual(detail.state, .notFavorited); XCTAssertNotNil(removal.form)
     }
-    func testRenamingRefreshesCachedLabelAndInvalidatesOldForms() throws {
+    func testRenamingRefreshesCachedLabelAndInvalidatesOldForms() async throws {
         let cache = SiteFavoriteCache(), scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
         cache.put(.favorited(NativeFavoritesQA.groups[2]), form: try form(2), scope: scope)
         var names = NativeFavoritesQA.groups; names[2] = "Renamed"
-        try cache.updateGroupNames(site: .ex, before: NativeFavoritesQA.groups, after: names)
+        try await cache.updateGroupNames(site: .ex, before: NativeFavoritesQA.groups, after: names)
         XCTAssertEqual(cache.entry(scope)?.state, .favorited("Renamed"))
         XCTAssertNil(cache.entry(scope)?.form)
     }
-    func testDuplicateGroupNamesRemainIdentifiableAfterRestart() throws {
+    func testDuplicateGroupNamesRemainIdentifiableAfterRestart() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = SiteFavoriteCache(storageRoot: root), scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
         var names = NativeFavoritesQA.groups; names[2] = "Same"; names[3] = "Same"
         let value = try form(2).replacingGroupNames(names)
         cache.put(value.state, form: value, scope: scope)
+        try await cache.flushPersistence()
         let restored = SiteFavoriteCache(storageRoot: root)
         restored.activate(owner: scope.owner, generation: scope.generation)
         var renamed = names; renamed[2] = "Reading"
-        try restored.updateGroupNames(site: .ex, before: names, after: renamed)
+        try await restored.updateGroupNames(site: .ex, before: names, after: renamed)
         XCTAssertEqual(restored.entry(scope)?.state, .favorited("Reading"))
         let legacy = SiteFavoriteCache()
         legacy.put(.favorited("Same"), scope: scope)
-        try legacy.updateGroupNames(site: .ex, before: names, after: renamed)
+        try await legacy.updateGroupNames(site: .ex, before: names, after: renamed)
         XCTAssertEqual(legacy.entry(scope)?.state, .favorited("站点收藏"), "Legacy duplicate names must not guess a category")
     }
     func testOldEditorReadWithoutExistingRecordCannotReintroduceNames() async throws {
@@ -83,7 +84,7 @@ import ExViewerCore
         for _ in 0..<100 where held == nil { try await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertNotNil(held)
         var names = NativeFavoritesQA.groups; names[2] = "Reading"
-        try cache.updateGroupNames(site: .ex, before: NativeFavoritesQA.groups, after: names)
+        try await cache.updateGroupNames(site: .ex, before: NativeFavoritesQA.groups, after: names)
         held?.resume()
         do { _ = try await reading.value; XCTFail("Old read must be rejected") }
         catch { XCTAssertEqual(error as? ViewerError, .stale) }
@@ -97,11 +98,11 @@ import ExViewerCore
         let client = GalleryFavoriteClient(isCurrent: { true }, read: {
             await withCheckedContinuation { held = $0 }; return old
         }, submit: { _ in posts += 1 })
-        _ = try cache.enqueueAdditions([.init(scope: scope, client: client, title: "Fixture", groupName: "Default", group: 0)], group: 0)
+        _ = try await cache.enqueueAdditions([.init(scope: scope, client: client, title: "Fixture", groupName: "Default", group: 0)], group: 0)
         for _ in 0..<100 where held == nil { try await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertNotNil(held)
         var names = NativeFavoritesQA.groups; names[2] = "Reading"
-        try cache.updateGroupNames(site: .ex, before: NativeFavoritesQA.groups, after: names)
+        try await cache.updateGroupNames(site: .ex, before: NativeFavoritesQA.groups, after: names)
         held?.resume()
         for _ in 0..<100 where cache.entry(scope)?.phase != nil { try await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertEqual(posts, 0)

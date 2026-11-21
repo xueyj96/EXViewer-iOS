@@ -73,7 +73,9 @@ enum FeedCacheQA {
         let pageCount = arguments.contains("--qa-feed-sort-regression") ? 3 : 2
         let firstGID: Int64 = favorites ? 910_001 : 900_001
         let start = firstGID + Int64((page - 1) * 24)
-        let rows = (0..<24).map { offset -> String in
+        let shortPage = arguments.contains("--qa-feed-partial-first-page") || arguments.contains("--qa-feed-short-page")
+        let rowsPerPage = shortPage ? 1 : 24
+        let rows = (0..<rowsPerPage).map { offset -> String in
             let gid = start + Int64(offset)
             let title = "QA Feed \(lane) \(String(format: "%02d", (page - 1) * 24 + offset + 1))"
             return """
@@ -103,6 +105,9 @@ enum FeedCacheQA {
             let lane = gid >= 910_000 ? "Favorites" : "Discover"
             let firstGID: Int64 = lane == "Favorites" ? 910_001 : 900_001
             let index = Int(gid - firstGID + 1)
+            if arguments.contains("--qa-feed-partial-first-page"), index == 1 {
+                return ["gid": gid, "title": "QA Feed Discover 01"]
+            }
             let sorting = arguments.contains("--qa-feed-sort-regression")
             let page = (index - 1) / 24
             return ["gid": gid, "title": "\(sorting ? ["Z", "M", "A"][min(page, 2)] : "QA") Feed \(lane) \(String(format: "%02d", index))",

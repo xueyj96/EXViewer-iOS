@@ -1,7 +1,7 @@
 import Foundation
 import ExViewerCore
 
-struct ReadingRecord: Codable, Identifiable, Equatable {
+struct ReadingRecord: Codable, Identifiable, Equatable, Sendable {
     var gallery: Gallery
     var page: Int
     var date: Date
@@ -20,6 +20,9 @@ struct DownloadRecord: Codable, Identifiable {
 }
 struct LibrarySnapshot: Codable {
     var version = 1
+    // Additive v1 field: legacy files decode nil. Every critical commit changes
+    // the durable basis even when its logical result equals an older snapshot.
+    var historyCheckpointBasis: UUID?
     var saved: [SavedSearch] = []
     var favoriteTags: [GalleryTag] = []
     var blockedTags: [GalleryTag] = []
@@ -58,25 +61,56 @@ private struct RecentSearchFile: Codable {
     let historyBrowsing = HistoryBrowseStore()
     struct ReadLaterNotice: Identifiable { let id = UUID(); let text: String }
     @Published private(set) var readLaterNotice: ReadLaterNotice?
-    @Published private(set) var snapshot = LibrarySnapshot()
+    @Published private var durableSnapshot = LibrarySnapshot()
+    private var liveHistory: [ReadingRecord]?
+    // Read-after-remember stays immediate, without broadcasting a whole
+    // LibraryStore update for each continuous-reading page boundary.
+    private(set) var snapshot: LibrarySnapshot {
+        get {
+            var value = durableSnapshot
+            if let liveHistory { value.history = liveHistory }
+            return value
+        }
+        set { liveHistory = nil; durableSnapshot = newValue }
+    }
     @Published private(set) var recentSearches: [RecentSearchRecord] = []
     @Published private(set) var searchHistoryError: String?
     @Published var error: String?
     @Published private(set) var owner = "guest"
     private let root: URL
     private let ephemeral: Bool
+    private let historyWriter: LibraryHistoryWriter
+    private let historyCheckpointDelay: UInt64
+    private var libraryBasis = LibraryHistoryJournal.basis(for: nil)
+    private var historyScope = UUID()
+    private var nextHistoryRevision: UInt64 = 0
+    private var pendingHistory: [String: LibraryHistoryWrite] = [:]
+    private var historyWrites: [UInt64: Task<Bool, Never>] = [:]
+    private var historyFailures = Set<String>()
+    private var historyDebounce: Task<Void, Never>?
+    private var lifecycleHistoryFlush: Task<Void, Never>?
+    private let historyBackgroundWork = BackgroundWork()
+    private static let historyFailure = "阅读进度保存失败 请重试"
     private var offlineReaders: [UUID: (owner: String, gallery: GalleryRef)] = [:]
     var directory: URL { root.appendingPathComponent(owner, isDirectory: true) }
     var blockedIDs: Set<String> { Set(snapshot.blockedTags.map(\.id)) }
     static let searchHistoryLimit = 100
     private var searchHistoryFile: URL { directory.appendingPathComponent("recent-searches.json") }
-    init(qa: Bool = false, storageRoot: URL? = nil) {
+    init(qa: Bool = false, storageRoot: URL? = nil,
+         historyWriter: LibraryHistoryWriter = LibraryHistoryWriter(),
+         historyCheckpointDelay: UInt64 = 300_000_000) {
+        self.historyWriter = historyWriter
+        self.historyCheckpointDelay = historyCheckpointDelay
         ephemeral = qa
         root = storageRoot ?? (qa ? FileManager.default.temporaryDirectory.appendingPathComponent("ExViewer-QA-" + UUID().uuidString) : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ExViewer", isDirectory: true))
         load(owner: "guest")
     }
     func load(owner: String) {
         guard owner == "guest" || owner.allSatisfy({ $0.isHexDigit }) else { return }
+        historyDebounce?.cancel(); historyDebounce = nil
+        if let previous = pendingHistory[self.owner] { _ = startHistoryWrite(previous) }
+        historyScope = UUID()
+        libraryBasis = LibraryHistoryJournal.basis(for: nil)
         self.owner = owner; snapshot = LibrarySnapshot(); error = nil; readLaterNotice = nil
         recentSearches = []; searchHistoryError = nil
         do {
@@ -86,11 +120,25 @@ private struct RecentSearchFile: Codable {
             if FileManager.default.fileExists(atPath: file.path) {
                 let data = try Data(contentsOf: file)
                 guard data.count < 12_000_000 else { throw ViewerError.storage }
+                libraryBasis = LibraryHistoryJournal.basis(for: data)
                 let value = try JSONDecoder().decode(LibrarySnapshot.self, from: data)
                 guard value.version == 1 else { throw ViewerError.storage }
                 snapshot = value
                 for i in snapshot.downloads.indices where snapshot.downloads[i].status == .downloading {
                     snapshot.downloads[i].status = .waiting
+                }
+            }
+            if let history = try LibraryHistoryJournal.restore(from: historyFile, libraryBasis: libraryBasis) {
+                var restored = snapshot; restored.history = history; snapshot = restored
+            }
+            if let pending = pendingHistory[owner] {
+                if pending.libraryBasis == libraryBasis {
+                    liveHistory = pending.history
+                    stageHistoryWrite()
+                    if historyFailures.contains(owner) { error = Self.historyFailure }
+                } else {
+                    pendingHistory.removeValue(forKey: owner)
+                    historyFailures.remove(owner)
                 }
             }
             let offline = directory.appendingPathComponent("Offline", isDirectory: true)
@@ -168,15 +216,20 @@ private struct RecentSearchFile: Codable {
     @discardableResult private func commit(_ mutate: (inout LibrarySnapshot) -> Void) -> Bool {
         guard error == nil else { return false }
         var copy = snapshot; mutate(&copy)
+        copy.historyCheckpointBasis = UUID()
         do {
             let data = try JSONEncoder().encode(copy)
             guard data.count < 12_000_000 else { throw ViewerError.storage }
             try data.write(to: directory.appendingPathComponent("library.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            if copy.history != snapshot.history || copy.blockedTags != snapshot.blockedTags {
+            if copy.history != durableSnapshot.history || copy.blockedTags != durableSnapshot.blockedTags {
                 // Freeze the saved viewport before publishing a reordered layout;
                 // callbacks from the old rows must not replace its anchor.
-                historyBrowsing.historyWillChange(owner: owner, before: snapshot, after: copy)
+                historyBrowsing.historyWillChange(owner: owner, before: durableSnapshot, after: copy)
             }
+            libraryBasis = LibraryHistoryJournal.basis(for: data)
+            pendingHistory.removeValue(forKey: owner)
+            historyFailures.remove(owner)
+            historyDebounce?.cancel(); historyDebounce = nil
             snapshot = copy
             return true
         } catch { self.error = "保存失败 请检查可用空间"; return false }
@@ -260,8 +313,88 @@ private struct RecentSearchFile: Codable {
     // Compatibility for older callers and saved QA fixtures; one collection.
     func bookmark(_ gallery: Gallery) { toggleReadLater(gallery) }
     func remember(_ gallery: Gallery, page: Int) {
-        guard page > 0 else { return }
-        commit { value in value.history.removeAll { $0.id == gallery.id }; value.history.insert(.init(gallery: gallery.stored, page: page, date: Date()), at: 0); value.history = Array(value.history.prefix(500)) }
+        guard page > 0, error == nil || error == Self.historyFailure else { return }
+        var history = liveHistory ?? durableSnapshot.history
+        history.removeAll { $0.id == gallery.id }
+        history.insert(.init(gallery: gallery.stored, page: page, date: Date()), at: 0)
+        liveHistory = Array(history.prefix(500))
+        stageHistoryWrite()
+    }
+
+    private var historyFile: URL { directory.appendingPathComponent("history-progress.json") }
+
+    private func stageHistoryWrite() {
+        guard let liveHistory else { return }
+        nextHistoryRevision += 1
+        let job = LibraryHistoryWrite(owner: owner, scope: historyScope, revision: nextHistoryRevision,
+                                      libraryBasis: libraryBasis, file: historyFile, history: liveHistory)
+        pendingHistory[owner] = job
+        historyDebounce?.cancel()
+        let delay = historyCheckpointDelay
+        historyDebounce = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: delay) } catch { return }
+            guard let self, self.owner == job.owner, self.historyScope == job.scope,
+                  let latest = self.pendingHistory[job.owner], latest.revision == job.revision else { return }
+            _ = await self.startHistoryWrite(latest).value
+        }
+    }
+
+    private func startHistoryWrite(_ job: LibraryHistoryWrite) -> Task<Bool, Never> {
+        if let running = historyWrites[job.revision] { return running }
+        let writer = historyWriter
+        let task = Task { [weak self] in
+            let saved: Bool
+            do { try await writer.write(job); saved = true } catch { saved = false }
+            guard let self else { return saved }
+            self.historyWrites.removeValue(forKey: job.revision)
+            guard self.pendingHistory[job.owner]?.revision == job.revision else { return saved }
+            if saved {
+                self.pendingHistory.removeValue(forKey: job.owner)
+                self.historyFailures.remove(job.owner)
+            } else { self.historyFailures.insert(job.owner) }
+            guard self.owner == job.owner, self.historyScope == job.scope,
+                  self.libraryBasis == job.libraryBasis else { return saved }
+            if saved {
+                let copy = self.snapshot
+                self.historyBrowsing.historyWillChange(owner: self.owner, before: self.durableSnapshot, after: copy)
+                self.snapshot = copy
+                if self.error == Self.historyFailure { self.error = nil }
+            } else if self.error == nil || self.error == Self.historyFailure { self.error = Self.historyFailure }
+            return saved
+        }
+        historyWrites[job.revision] = task
+        return task
+    }
+
+    /// Await durable completion for the checkpoints present at entry, including
+    /// a newer page staged while an earlier write is in flight. Failures retain
+    /// the checkpoint in memory and leave the last atomic file untouched.
+    @discardableResult func flushReadingHistory() async -> Bool {
+        historyDebounce?.cancel(); historyDebounce = nil
+        let owners = Array(pendingHistory.keys)
+        var success = true
+        for account in owners {
+            while let job = pendingHistory[account] {
+                guard await startHistoryWrite(job).value else { success = false; break }
+            }
+        }
+        return success
+    }
+
+    /// The reader may disappear before this async flush finishes. A short iOS
+    /// background grant and this store-owned task keep that write alive; no
+    /// thread is blocked and no fire-and-forget success is reported.
+    func flushReadingHistoryForLifecycle() {
+        guard !pendingHistory.isEmpty, lifecycleHistoryFlush == nil else { return }
+        historyBackgroundWork.beginShort("保存阅读进度") { [weak self] in
+            guard let self, self.pendingHistory[self.owner] != nil else { return }
+            if self.error == nil { self.error = Self.historyFailure }
+        }
+        lifecycleHistoryFlush = Task { [self] in
+            let saved = await flushReadingHistory()
+            historyBackgroundWork.finish(saved ? .completed : .failed)
+            lifecycleHistoryFlush = nil
+        }
     }
     func updateDownload(_ incoming: DownloadRecord, checkpoint: Bool = true) {
         var record = incoming

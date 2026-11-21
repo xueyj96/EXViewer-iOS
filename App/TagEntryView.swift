@@ -102,6 +102,8 @@ struct SearchTagRuleRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
+            .contentShape(Rectangle())
+            .tagLibraryActions(tag)
 
             Button(role: .destructive, action: onRemove) {
                 Image(systemName: "xmark")
@@ -119,7 +121,6 @@ struct SearchTagRuleRow: View {
         .padding(.leading, FeedChrome.contentSpacing)
         .frame(minHeight: FeedChrome.compactFormRowHeight)
         .appControlSurface(selected: true)
-        .tagLibraryActions(tag)
     }
 }
 

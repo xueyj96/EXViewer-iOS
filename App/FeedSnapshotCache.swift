@@ -16,7 +16,16 @@ struct FeedSnapshot: Codable, Sendable {
     }
 }
 
-/// Private, bounded first-page snapshots, always revalidated on use.
+enum SearchFeedFreshness {
+    static let reuseInterval: TimeInterval = 30
+
+    static func canReuse(_ snapshot: FeedSnapshot, now: Date = Date()) -> Bool {
+        (0...reuseInterval).contains(now.timeIntervalSince(snapshot.savedAt)) &&
+            !snapshot.items.isEmpty && snapshot.items.allSatisfy(\.tagsComplete)
+    }
+}
+
+/// Private, bounded first-page snapshots. Callers own revalidation policy.
 /// Invalidation rejects obsolete writes while preserving a last-known view.
 actor FeedSnapshotCache {
     static let shared = FeedSnapshotCache()

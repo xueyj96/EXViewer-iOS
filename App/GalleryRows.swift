@@ -29,9 +29,26 @@ private final class GalleryCoverFrames {
     var values: [String: CGRect] = [:]
 }
 
+/// Retain masonry column assignments with the browsing session. Resolved cover
+/// ratios must not repack an existing feed merely because its pane remounts.
+@MainActor final class GalleryGridMemory {
+    private(set) var source: String?
+    private(set) var placement = GalleryGridPlacement()
+
+    func placement(for source: String) -> GalleryGridPlacement {
+        self.source == source ? placement : GalleryGridPlacement()
+    }
+
+    func update(_ placement: GalleryGridPlacement, source: String) {
+        self.source = source
+        self.placement = placement
+    }
+}
+
 struct GalleryRows: View {
     var galleries: [Gallery]
     var sourceIdentity: String? = nil
+    var placementMemory: GalleryGridMemory? = nil
     var selectionStore: LibrarySelectionStore
     var isSelecting = false
     var isLoading = false
@@ -40,6 +57,7 @@ struct GalleryRows: View {
     var selectionIdentifier = "favorites.select"
     var onLongPressSelect: (Gallery) -> Void
     var onNearEnd: (() -> Void)? = nil
+    var nearEndReady = true
     var viewport: GalleryFeedViewport? = nil
     var onVisibleAnchor: ((String) -> Void)? = nil
     @EnvironmentObject private var library: LibraryStore
@@ -103,6 +121,9 @@ struct GalleryRows: View {
         }
         .onChange(of: viewport?.height) { _, _ in observedFrames(measuredCoverFrames.values) }
         .onChange(of: viewport?.topOcclusion) { _, _ in observedFrames(measuredCoverFrames.values) }
+        .onChange(of: nearEndReady) { _, ready in
+            if ready { observedFrames(measuredCoverFrames.values) }
+        }
     }
 
     @ViewBuilder private func measure(_ gallery: Gallery) -> some View {
@@ -136,7 +157,7 @@ struct GalleryRows: View {
         }
         // SwiftUI can create lazy cells before they enter the viewport. Only
         // an actual tail cell near the visible bottom may request another page.
-        if let anchor, lastAutomaticAnchor != anchor, visible.suffix(2).contains(where: { gallery in
+        if nearEndReady, onNearEnd != nil, let anchor, lastAutomaticAnchor != anchor, visible.suffix(2).contains(where: { gallery in
             guard let frame = frames[gallery.id] else { return false }
             return frame.maxY > visibleTop && frame.minY <= viewport.height + max(1, viewport.height - visibleTop)
         }) {
@@ -216,7 +237,7 @@ struct GalleryRows: View {
     private func prepareLayout() {
         let source = "\(library.owner)|\(sourceIdentity ?? "")"
         if placementSource != source {
-            placement = GalleryGridPlacement()
+            placement = placementMemory?.placement(for: source) ?? GalleryGridPlacement()
             placementSource = source
             coverEdges = []
             coverWindow = GalleryFeedViewport.CoverWindow()
@@ -231,12 +252,14 @@ struct GalleryRows: View {
     private func prepareColumns(for items: [Gallery]) {
         let aspects = Dictionary(items.map { ($0.id, Double(aspectCache.aspect(for: $0))) }, uniquingKeysWith: { first, _ in first })
         placement.update(ids: items.map(\.id), aspects: aspects)
+        if let placementSource { placementMemory?.update(placement, source: placementSource) }
         let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         preparedColumns = placement.columns.map { $0.compactMap { byID[$0] } }
     }
 
     private func makeGridColumns(for visible: [Gallery]) -> [[Gallery]] {
-        var initial = GalleryGridPlacement()
+        let source = "\(library.owner)|\(sourceIdentity ?? "")"
+        var initial = placementMemory?.placement(for: source) ?? GalleryGridPlacement()
         let byID = Dictionary(visible.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         initial.update(ids: visible.map(\.id), aspects: byID.mapValues { Double(aspectCache.aspect(for: $0)) })
         return initial.columns.map { $0.compactMap { byID[$0] } }

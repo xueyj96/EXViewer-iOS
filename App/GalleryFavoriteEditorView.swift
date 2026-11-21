@@ -160,7 +160,11 @@ struct GalleryFavoriteEditorView: View {
             model.note = syncCache.entry(scope)?.pendingNote ?? form.note
         }
         if let enqueue = preparation?.enqueue {
-            if model.enqueue(enqueue, title: gallery.title, remove: remove) { dismiss() }
+            mutation = Task {
+                let accepted = await model.enqueue(enqueue, title: gallery.title, remove: remove)
+                guard !Task.isCancelled else { return }
+                if accepted { dismiss() }
+            }
             return
         }
         mutation = Task {

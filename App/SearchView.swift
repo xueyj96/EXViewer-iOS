@@ -393,7 +393,7 @@ struct DiscoveryComposerView: View {
     @State private var favorite: FavoriteSearchDraft?
     @State private var loadedSource: LoadedSearchSource?
     @State private var detailTagSource: DetailTagSearchDraft?
-    @State private var clearedDraft = false
+    @State private var clearFeedback: String?
     @State private var filtersExpanded: Bool
     @State private var startsWithFavorites: Bool
     @State private var showsSearchHistory = false
@@ -430,7 +430,8 @@ struct DiscoveryComposerView: View {
         else { _savedName = State(initialValue: "") }
         _draft = State(initialValue: SearchDraft(query: query, site: site))
         _tagsExpanded = State(initialValue: !query.rules.isEmpty)
-        _filtersExpanded = State(initialValue: startAt != .main)
+        _filtersExpanded = State(initialValue: startAt != .main ||
+                                 (updatesResults && SearchPresentation.conditionCount(query) > 0))
         _startsWithFavorites = State(initialValue: startAt == .favorites)
         _loadedSource = State(initialValue: loadedPreset.map { LoadedSearchSource($0) })
         _detailTagSource = State(initialValue: detailTagSource)
@@ -492,10 +493,12 @@ struct DiscoveryComposerView: View {
             }
             .feedPageContent(topGap: typeSize.isAccessibilitySize ? FeedChrome.contentTopGap : 0)
             .padding(.bottom, FeedChrome.sectionSpacing)
+            .avoidingPinnedBottomBar()
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .scrollDismissesKeyboard(.interactively)
         .appToast(message: $failure, identifier: "compose.error")
+        .appToast(message: $clearFeedback, identifier: "compose.clear-feedback")
         .detailEdgeBack(commitAllowed: isSavedEditor || !draft.hasConditions || (try? draft.validatedQuery()) != nil, committing: {
             if isSavedEditor || !draft.hasConditions { cancel(); return true }
             return apply()
@@ -523,7 +526,7 @@ struct DiscoveryComposerView: View {
             }
         }
         keywordCard
-        if clearedDraft || !tagSearchExclusions.isEmpty || composerStatusSource != nil {
+        if !tagSearchExclusions.isEmpty || composerStatusSource != nil {
             composerStatus.searchComposerCardSurface(allowsMultiline: true)
         }
         filterCard
@@ -557,6 +560,19 @@ struct DiscoveryComposerView: View {
                 .frame(minHeight: FeedChrome.rowHeight)
                 .accessibilityIdentifier(isSavedEditor ? "saved-editor.text" : "compose.text")
                 .accessibilityHint("也支持 title:、namespace:tag、~任一、-排除和 uploader: 条件。")
+            Button {
+                draft.inputText = ""
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: FeedChrome.rowHeight, height: FeedChrome.rowHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .opacity(draft.inputText.isEmpty ? 0.38 : 1)
+            .disabled(draft.inputText.isEmpty)
+            .accessibilityLabel("清空关键词")
+            .accessibilityIdentifier("compose.clear-keyword")
             if !isSavedEditor {
                 Button {
                     inputFocused = false
@@ -582,12 +598,7 @@ struct DiscoveryComposerView: View {
 
     @ViewBuilder
     private var composerStatus: some View {
-        if clearedDraft {
-            Label(isSavedEditor ? "条件已清空 保存后生效" : "条件已清空 点击\(visibleConfirmationTitle)后生效",
-                  systemImage: "checkmark.circle")
-                .foregroundStyle(Color.accentColor)
-                .accessibilityIdentifier("compose.cleared-state")
-        } else if !tagSearchExclusions.isEmpty {
+        if !tagSearchExclusions.isEmpty {
             Text("已排除 \(tagSearchExclusions.map(\.label).joined(separator: " "))")
                 .font(FeedChrome.labelFont).foregroundStyle(.secondary)
                 .lineLimit(2).accessibilityIdentifier("compose.tag-exclusions")
@@ -603,7 +614,7 @@ struct DiscoveryComposerView: View {
 
     private var filterCard: some View {
         VStack(spacing: 0) {
-            AppDisclosureHeader(title: "筛选", expanded: filtersExpanded,
+            AppDisclosureHeader(title: "高级筛选", expanded: filtersExpanded,
                                    identifier: "compose.filters", action: openFilters)
                 .padding(FeedChrome.panelSpacing)
             AnimatedDisclosureContent(isExpanded: filtersExpanded, identifier: "compose.disclosure.advanced") {
@@ -719,7 +730,7 @@ struct DiscoveryComposerView: View {
         tagSections
         filterGroup {
             VStack(spacing: 0) {
-                AppDisclosureHeader(title: "作品", expanded: workConditionsExpanded, identifier: "compose.work.disclosure") {
+                AppDisclosureHeader(title: "作品条件", expanded: workConditionsExpanded, identifier: "compose.work.disclosure") {
                     workConditionsExpanded.toggle()
                 }
                 AnimatedDisclosureContent(isExpanded: workConditionsExpanded, identifier: "compose.disclosure.work") {
@@ -754,7 +765,7 @@ struct DiscoveryComposerView: View {
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        FormValueMenuRow(title: "最低分", value: draft.query.minRating.map { "\($0) 星" } ?? "不限",
+                        FormValueMenuRow(title: "最低评分", value: draft.query.minRating.map { "\($0) 星" } ?? "不限",
                                          identifier: "compose.min-rating") {
                             ForEach([0] + Array(2...5), id: \.self) { rating in
                                 AppMenuItem(title: rating == 0 ? "不限" : "\(rating) 星", isSelected: (draft.query.minRating ?? 0) == rating) {
@@ -777,16 +788,16 @@ struct DiscoveryComposerView: View {
 
         filterGroup {
             VStack(spacing: 0) {
-                AppDisclosureHeader(title: "匹配", expanded: matchingExpanded, identifier: "compose.matching.disclosure") {
+                AppDisclosureHeader(title: "匹配选项", expanded: matchingExpanded, identifier: "compose.matching.disclosure") {
                     matchingExpanded.toggle()
                 }
                 AnimatedDisclosureContent(isExpanded: matchingExpanded, identifier: "compose.disclosure.matching") {
                     VStack(spacing: FeedChrome.panelSpacing) {
-                        Toggle("仅标题", isOn: $draft.query.titleOnly).accessibilityLabel("仅搜索标题")
+                        Toggle("仅搜标题", isOn: $draft.query.titleOnly).accessibilityLabel("仅搜索标题")
                             .controlSize(.small).searchFilterRow()
-                        Toggle("整句搜", isOn: $draft.query.matchPhrase).accessibilityLabel("匹配完整短语")
+                        Toggle("匹配完整短语", isOn: $draft.query.matchPhrase).accessibilityLabel("匹配完整短语")
                             .controlSize(.small).searchFilterRow()
-                        Toggle("有种子", isOn: $draft.query.requireTorrent).accessibilityLabel("必须有 BT 种子")
+                        Toggle("必须有 torrent", isOn: $draft.query.requireTorrent).accessibilityLabel("必须有 BT 种子")
                             .searchFilterRow()
                     }
                     .padding(.top, FeedChrome.panelSpacing)
@@ -802,12 +813,12 @@ struct DiscoveryComposerView: View {
                                          title: { $0.title }, accessibilityLabel: "标签来源",
                                          identifier: "compose.tag-source")
                     .transition(.opacity)
-                AppDisclosureButton(title: "标签", expanded: tagsExpanded, identifier: "compose.tags.disclosure") {
+                AppDisclosureButton(title: "标签筛选", expanded: tagsExpanded, identifier: "compose.tags.disclosure") {
                     inputFocused = false
                     tagsExpanded.toggle()
                 }
             } else {
-                AppDisclosureHeader(title: "标签", expanded: tagsExpanded, identifier: "compose.tags.disclosure") {
+                AppDisclosureHeader(title: "标签筛选", expanded: tagsExpanded, identifier: "compose.tags.disclosure") {
                     inputFocused = false
                     tagsExpanded.toggle()
                 }
@@ -882,7 +893,7 @@ struct DiscoveryComposerView: View {
             VStack(spacing: 0) {
                 HStack(spacing: FeedChrome.panelSpacing) {
                     Button { categoriesExpanded.toggle() } label: {
-                        AppDisclosureTitle(title: "分类", identifier: "compose.categories.disclosure.title")
+                        AppDisclosureTitle(title: "画廊分类", identifier: "compose.categories.disclosure.title")
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -892,7 +903,7 @@ struct DiscoveryComposerView: View {
                     if categoriesExpanded {
                         categoryActions.transition(.opacity)
                     }
-                    AppDisclosureButton(title: "分类", expanded: categoriesExpanded, identifier: "compose.categories.disclosure") {
+                    AppDisclosureButton(title: "画廊分类", expanded: categoriesExpanded, identifier: "compose.categories.disclosure") {
                         categoriesExpanded.toggle()
                     }
                 }
@@ -979,7 +990,7 @@ struct DiscoveryComposerView: View {
         draft = SearchDraft(query: source.query, site: source.site)
         loadedSource = source
         detailTagSource = nil
-        failure = nil; clearedDraft = false
+        failure = nil; clearFeedback = nil
         UISelectionFeedbackGenerator().selectionChanged()
     }
 
@@ -1051,7 +1062,7 @@ struct DiscoveryComposerView: View {
 
     private func draftChanged() {
         failure = nil
-        if draft.hasConditions { clearedDraft = false }
+        if draft.hasConditions { clearFeedback = nil }
     }
 
     private func clearDraft() {
@@ -1059,7 +1070,8 @@ struct DiscoveryComposerView: View {
         draft.clear()
         tagLookup = TagLookupDraft()
         detailTagSource = nil
-        failure = nil; clearedDraft = true
+        failure = nil
+        clearFeedback = "条件已清空"
         UISelectionFeedbackGenerator().selectionChanged()
     }
 
@@ -1077,7 +1089,7 @@ struct DiscoveryComposerView: View {
 
 private enum SearchTagSource: String, CaseIterable {
     case add, common
-    var title: String { self == .add ? "添加" : "常用" }
+    var title: String { self == .add ? "添加标签" : "常用标签" }
 }
 
 /// The label column and input surfaces share dimensions across all search inputs.

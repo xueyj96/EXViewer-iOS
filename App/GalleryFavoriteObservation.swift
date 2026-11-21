@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import ExViewerCore
 
 struct GalleryFavoriteScope: Hashable {
@@ -18,6 +19,8 @@ struct GalleryFavoriteScope: Hashable {
 @MainActor final class GalleryFavoriteObservation: ObservableObject {
     @Published private(set) var state: GalleryFavoriteState = .unknown
     @Published private(set) var phase: FavoriteSyncPhase?
+    @Published private(set) var failureMessage: String?
+    let failures = PassthroughSubject<String, Never>()
     var needsManagement: Bool {
         if phase != nil { return true }
         if case .favorited = state { return true }
@@ -37,13 +40,15 @@ struct GalleryFavoriteScope: Hashable {
               now: Date = Date()) {
         cancel(); self.reference = reference
         self.cache = cache; self.scope = scope
-        self.client = client; state = .unknown; phase = nil
+        self.client = client; state = .unknown; phase = nil; failureMessage = nil
         guard client.isCurrent() else { return }
         if let cache, let scope { cache.register(observerID, scope: scope, client: client) }
         if let cache, let scope, let recent = cache.recent(scope, now: now) {
-            state = recent.state; phase = recent.phase; form = recent.form; observedAt = recent.date; cacheVersion = recent.version; return
+            state = recent.state; phase = recent.phase; updateFailure(recent.message)
+            form = recent.form; observedAt = recent.date; cacheVersion = recent.version; return
         }
         if let cache, let scope { state = cache.entry(scope)?.state ?? .unknown; phase = cache.entry(scope)?.phase }
+        updateFailure(scope.flatMap { cache?.entry($0)?.message })
         cacheVersion = scope.flatMap { cache?.entry($0)?.version }
     }
     func accept(_ value: GalleryFavoriteState, form verifiedForm: GalleryFavoriteForm? = nil) {
@@ -71,7 +76,13 @@ struct GalleryFavoriteScope: Hashable {
         cacheVersion = value.version
         if state != value.state { state = value.state }
         if phase != value.phase { phase = value.phase }
+        updateFailure(value.message)
         form = value.form; observedAt = value.date
+    }
+    private func updateFailure(_ message: String?) {
+        guard failureMessage != message else { return }
+        failureMessage = message
+        if let message { failures.send(message) }
     }
 
     /// A recent same-account form can be reused by an explicit editor. There
@@ -95,9 +106,9 @@ struct GalleryFavoriteScope: Hashable {
         }, submit: upstream.submit, willSubmit: { [weak self] in
             self?.beginChange(); await upstream.willSubmit()
         }, didSubmit: upstream.didSubmit)
-        let enqueue: ((GalleryFavoriteForm, FavoriteAction, String, String) throws -> Void)?
+        let enqueue: ((GalleryFavoriteForm, FavoriteAction, String, String) async throws -> Void)?
         if valid, let cache, let scope {
-            enqueue = { form, action, note, title in try cache.enqueue(scope: scope, client: upstream, form: form, action: action, note: note, title: title) }
+            enqueue = { form, action, note, title in try await cache.enqueue(scope: scope, client: upstream, form: form, action: action, note: note, title: title) }
         } else { enqueue = nil }
         return .init(client: wrapped, initialForm: initial, initialState: cached?.state ?? state,
                      requiresRefresh: initial != nil && !fresh, pending: cached?.phase != nil,
@@ -113,7 +124,7 @@ struct GalleryFavoritePreparation {
     var pending = false
     var pendingGroup: Int?
     var pendingNote: String?
-    var enqueue: ((GalleryFavoriteForm, FavoriteAction, String, String) throws -> Void)? = nil
+    var enqueue: ((GalleryFavoriteForm, FavoriteAction, String, String) async throws -> Void)? = nil
 }
 
 @MainActor func favoriteClient(for gallery: Gallery, session: SiteSession) -> GalleryFavoriteClient {

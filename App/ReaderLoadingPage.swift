@@ -42,6 +42,7 @@ struct ReaderLoadingPage: View {
     var metadata = false
     var failure: String? = nil
     var retry: (() -> Void)? = nil
+    var retryIdentifier: String? = nil
     var interactions = CanvasInteractions()
 
     private var contentGestures: some Gesture {
@@ -81,7 +82,7 @@ struct ReaderLoadingPage: View {
                 Text("第 \(index) 页").monospacedDigit()
                 if let failure {
                     ReaderFailureMessage(message: failure, retry: retry,
-                                         retryIdentifier: "reader.page.retry.\(index)")
+                                         retryIdentifier: retryIdentifier ?? "reader.page.retry.\(index)")
                 } else {
                     if let fraction = progress?.fraction {
                         ProgressView(value: fraction).frame(width: 112).tint(.white)

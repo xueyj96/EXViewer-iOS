@@ -227,7 +227,7 @@ import ExViewerCore
         let galleryPages = pages(3)
         let update: (Int, Int?) -> Void = { current, preview in
             store.update(scope: identity, pages: galleryPages, current: current, prefetchCount: 0,
-                         preview: preview, loader: loader.load, isCurrent: { true })
+                         preview: preview, loader: { try await loader.load($0, $1) }, isCurrent: { true })
         }
         update(1, nil)
         let currentStarted = await waitForLoaderCalls(loader, count: 1)
@@ -254,6 +254,79 @@ import ExViewerCore
         XCTAssertEqual(store.files[2], previewFile, "The cached preview should transfer directly into the current-page role")
         XCTAssertEqual(loader.calls.filter { $0.page == 2 }.count, 1, "Current handoff must not reload a completed preview URL")
         store.reset()
+    }
+
+    func testInFlightReversePreviewSurvivesReleaseAndPromotesWithoutPrefetch() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()
+        defer { store.reset() }
+        let galleryPages = pages(5)
+        let update: (Int, Int?) -> Void = { current, preview in
+            store.update(scope: identity, pages: galleryPages, current: current, prefetchCount: 0,
+                         preview: preview, loader: loader.load, isCurrent: { true })
+        }
+
+        update(3, nil)
+        let currentStarted = await waitForLoaderCalls(loader, count: 1)
+        XCTAssertTrue(currentStarted)
+        loader.resolve(try XCTUnwrap(loader.last(3)), as: "current")
+        await settle()
+        XCTAssertEqual(loader.calls.map(\.page), [3])
+
+        update(3, 2)
+        let previewStarted = await waitForLoaderCalls(loader, count: 2)
+        XCTAssertTrue(previewStarted)
+        let preview = try XCTUnwrap(loader.last(2))
+        XCTAssertEqual(store.inflight[2], .foreground)
+
+        update(3, nil)
+        update(3, nil)
+        await settle()
+        XCTAssertEqual(store.inflight[2], .prefetch)
+        XCTAssertFalse(loader.wasCancelled(preview))
+
+        update(2, nil)
+        await settle()
+        XCTAssertEqual(store.inflight[2], .foreground)
+        XCTAssertEqual(loader.calls.map(\.page), [3, 2])
+        XCTAssertFalse(loader.wasCancelled(preview))
+        loader.resolve(preview, as: "same-request")
+        await settle()
+        XCTAssertEqual(store.files[2]?.lastPathComponent, "same-request-2.media")
+    }
+
+    func testBlockedReversePreviewKeepsSpeculativeSlotUntilItCanStart() async throws {
+        let store = ReaderMediaStore(), loader = ControlledLoader(), identity = scope()
+        defer { store.reset() }
+        let galleryPages = pages(5)
+        let update: (Int?) -> Void = { preview in
+            store.update(scope: identity, pages: galleryPages, current: 3, prefetchCount: 1,
+                         preview: preview, loader: { try await loader.load($0, $1) }, isCurrent: { true })
+        }
+
+        update(nil)
+        let initialStarted = await waitForLoaderCalls(loader, count: 2)
+        XCTAssertTrue(initialStarted)
+        let current = try XCTUnwrap(loader.last(3))
+        let ahead = try XCTUnwrap(loader.last(4))
+        update(2)
+        update(2)
+        await settle()
+        XCTAssertEqual(loader.calls.map(\.page), [3, 4])
+        XCTAssertEqual(store.inflight[4], .prefetch)
+        XCTAssertFalse(loader.wasCancelled(ahead))
+
+        loader.resolve(current, as: "current")
+        let reverseStarted = await waitForLoaderCalls(loader, count: 3)
+        XCTAssertTrue(reverseStarted)
+        XCTAssertEqual(loader.calls.map(\.page), [3, 4, 2])
+        XCTAssertEqual(store.inflight[2], .foreground)
+        XCTAssertFalse(loader.wasCancelled(ahead))
+
+        update(nil)
+        await settle()
+        XCTAssertNil(store.inflight[2], "The released reverse request has no spare background slot")
+        XCTAssertTrue(loader.wasCancelled(try XCTUnwrap(loader.last(2))))
+        XCTAssertFalse(loader.wasCancelled(ahead))
     }
 
     func testReverseReadingReusesCachedPreviousPageWithoutRestart() async throws {

@@ -28,6 +28,8 @@ struct PageReadScope: Hashable, Sendable {
     let preferences: UUID
 }
 
+enum SiteRequestTimingPhase { case queue, request }
+
 enum SessionVault {
     static let service = "com.xueyj.exviewer.session.v1"
     static func read(service: String = SessionVault.service) throws -> [SessionCookie] {
@@ -362,34 +364,42 @@ final class SafeRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
               searchPriority: SearchRequestPriority = .foreground,
               recoverConnection: Bool = true,
               request demand: MediaRequestDemand? = nil,
-              freshConnection: Bool = false) async throws -> String {
+              freshConnection: Bool = false,
+              onTiming: ((SiteRequestTimingPhase, Double) -> Void)? = nil) async throws -> String {
         try await request(url, method: method, body: body, contentType: contentType,
                           accept: "text/html,application/xhtml+xml", pacing: search ? .search : nil,
                           recoverConnection: recoverConnection, freshConnection: freshConnection,
                           demand: demand ?? MediaRequestDemand(priority: searchPriority == .prefetch ? .prefetch : .foreground),
+                          onTiming: onTiming,
                           decode: Self.checkedHTML)
     }
 
     private func request<Response>(_ url: URL, method: String, body: Data?, contentType: String,
                                    accept: String, pacing: SiteRequestScheduler.Pacing?, recoverConnection: Bool,
                                    freshConnection: Bool = false, demand: MediaRequestDemand,
+                                   onTiming: ((SiteRequestTimingPhase, Double) -> Void)? = nil,
                                    decode: (Data) throws -> Response) async throws -> Response {
         guard URLPolicy.account(url) else { throw ViewerError.restricted }
         let revision = generation
         for attempt in 0..<2 {
             try Task.checkCancellation()
             guard revision == generation else { throw ViewerError.stale }
+            let queueStart = ProcessInfo.processInfo.systemUptime
             let lease = try await pageScheduler.acquire(request: demand, pacing: pacing, limit: pageConcurrencyLimit())
+            let requestStart = ProcessInfo.processInfo.systemUptime
+            onTiming?(.queue, (requestStart - queueStart) * 1_000)
             let temporary = freshConnection || attempt > 0
             let client = temporary ? makeTransport() : transport
             do {
                 let value = try await receive(url, method: method, body: body, contentType: contentType,
                                               accept: accept, client: client, revision: revision, decode: decode)
                 pageScheduler.release(lease)
+                onTiming?(.request, (ProcessInfo.processInfo.systemUptime - requestStart) * 1_000)
                 if temporary { client.finishTasksAndInvalidate() }
                 return value
             } catch {
                 pageScheduler.release(lease)
+                onTiming?(.request, (ProcessInfo.processInfo.systemUptime - requestStart) * 1_000)
                 if temporary { client.finishTasksAndInvalidate() }
                 // Read-only GETs have one recovery attempt on a fresh connection.
                 // PageMediaLoader disables this inner retry to keep its total budget at two.

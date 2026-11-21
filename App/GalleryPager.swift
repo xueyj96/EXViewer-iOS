@@ -9,6 +9,10 @@ import ExViewerCore
     @Published private(set) var categories: [String: String] = [:]
     @Published private(set) var interrupted = false
     @Published private(set) var cachedAt: Date?
+    var canContinueAfterFailure: Bool {
+        guard failure != nil, root?.path != "/favorites.php", let next else { return false }
+        return next != retryURL
+    }
     enum LoadingPresentation: Equatable { case hidden, initial, more }
     var loadingPresentation: LoadingPresentation {
         guard loading else { return .hidden }
@@ -29,15 +33,31 @@ import ExViewerCore
     // Belongs to this root presentation, so cancel/resume cannot turn an
     // automatic validation into a visible refresh. Explicit reset promotes it.
     private var preservesCachedPresentation = false
+    private var rootLoad: RootLoad = .refresh
     private var removedFavoriteIDs = Set<String>()
     private var minimumRating: Int? { root.flatMap(GalleryRatingFilter.minimum(in:)) }
+    private var canPresentSearchHTML: Bool {
+        guard let root, root.path == "/", minimumRating == nil,
+              let parameters = URLComponents(url: root, resolvingAgainstBaseURL: false)?.queryItems else { return false }
+        return parameters.contains { item in
+            switch item.name {
+            case "f_search": return !(item.value ?? "").isEmpty
+            case "f_cats", "f_sp", "f_sto": return true
+            default: return false
+            }
+        }
+    }
     private var cacheEpoch = 0
     private let cache: FeedSnapshotCache?
     private let loadHTML: ((URL, Bool, Data?) async throws -> String)?
+    enum TimingPhase: String { case listResponse, listQueue, listRequest, metadataBatch }
+    private let onTiming: ((TimingPhase, Double) -> Void)?
     typealias SnapshotCoverPreparation = @MainActor ([Gallery], String) async -> Bool
     private let prepareSnapshotCovers: SnapshotCoverPreparation?
     init(loadHTML: ((URL, Bool, Data?) async throws -> String)? = nil, cache: FeedSnapshotCache? = nil,
-         prepareSnapshotCovers: SnapshotCoverPreparation? = nil) {
+         prepareSnapshotCovers: SnapshotCoverPreparation? = nil,
+         onTiming: ((TimingPhase, Double) -> Void)? = nil) {
+        self.onTiming = onTiming
         if let prepareSnapshotCovers {
             self.prepareSnapshotCovers = prepareSnapshotCovers
         } else if loadHTML == nil && !FeedCacheQA.isEnabled {
@@ -127,7 +147,10 @@ import ExViewerCore
         next = finite ? nil : URL(string: "https://exhentai.org/?qa-page=2")
     }
 
-    func reset(url: URL, session: SiteSession, qa: Bool = false, replaceInFlight: Bool = false, preserveCachedPresentation: Bool = false) {
+    enum RootLoad { case refresh, openSearch }
+
+    func reset(url: URL, session: SiteSession, qa: Bool = false, replaceInFlight: Bool = false,
+               preserveCachedPresentation: Bool = false, rootLoad: RootLoad = .refresh) {
         let same = root == url && sourceOwner == session.owner && sourceGeneration == session.generation
         // Repeated pull-to-refresh while this root is already loading shares
         // that request instead of cancelling and adding another queue slot.
@@ -135,6 +158,7 @@ import ExViewerCore
             // An explicit refresh promotes a background validation without
             // cancelling its request or consuming another search queue slot.
             if !preserveCachedPresentation { preservesCachedPresentation = false }
+            if rootLoad == .refresh { self.rootLoad = .refresh }
             return
         }
         let retained = same ? items : []
@@ -144,6 +168,7 @@ import ExViewerCore
         items = retained; if retained.isEmpty { categories = [:]; cachedAt = nil }
         sourceOwner = session.owner; sourceGeneration = session.generation; interrupted = false
         preservesCachedPresentation = preserveCachedPresentation
+        self.rootLoad = rootLoad
         if preserveCachedPresentation, !retained.isEmpty, cachedAt != nil { next = retainedNext }
         if self.qa { applyQASnapshot(url); return }
         let current = context, account = session.generation, owner = session.owner
@@ -151,13 +176,21 @@ import ExViewerCore
         task = Task {
             if let cache {
                 let epoch = await cache.epoch(owner: owner)
-                let snapshot = retained.isEmpty ? await cache.read(owner: owner, url: url) : nil
+                let mayReusePreparedSearch = self.rootLoad == .openSearch && cachedAt != nil
+                let snapshot = retained.isEmpty || mayReusePreparedSearch ? await cache.read(owner: owner, url: url) : nil
                 guard isCurrent(current, account: account, owner: owner, session: session), !Task.isCancelled else { return }
                 cacheEpoch = epoch
                 if let snapshot {
                     items = filterFavorites(snapshot.items, since: snapshot.savedAt, session: session)
                     next = snapshot.next.flatMap { SiteFavoriteOrder.continuation($0, from: url) }
                     categories = snapshot.categories; cachedAt = snapshot.savedAt
+                    // Keep the ordered rows and their cursor from the same
+                    // response. A recent reopen can spend its next slot on
+                    // continuation. A pull-to-refresh always requests the root.
+                    if self.rootLoad == .openSearch, SearchFeedFreshness.canReuse(snapshot) {
+                        loaded.insert(url); activeURL = nil; retryURL = nil; loading = false; task = nil
+                        return
+                    }
                 }
             }
             let priority: SearchRequestPriority = items.isEmpty ? .foreground : .prefetch
@@ -242,6 +275,8 @@ import ExViewerCore
     }
 
     private func loadMetadata(_ batch: [Gallery], session: SiteSession, priority: SearchRequestPriority) async throws -> [Gallery] {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { onTiming?(.metadataBatch, (ProcessInfo.processInfo.systemUptime - started) * 1_000) }
         if let loadHTML {
             let json = try await loadHTML(SiteSession.metadataURL, false, GalleryMetadata.request(batch))
             return try GalleryMetadata.merge(Data(json.utf8), into: batch)
@@ -254,10 +289,17 @@ import ExViewerCore
             if current == context { loading = false; activeURL = nil; task = nil }
         }
         let requestedAt = Date()
+        var continuationOnIncompletePage: URL?
         do {
+            let fetchStarted = ProcessInfo.processInfo.systemUptime
             let html: String
             if let loadHTML { html = try await loadHTML(url, true, nil) }
-            else { html = try await session.html(url, search: true, searchPriority: priority) }
+            else {
+                html = try await session.html(url, search: true, searchPriority: priority, onTiming: onTiming.map { timing in
+                    { phase, ms in timing(phase == .queue ? .listQueue : .listRequest, ms) }
+                })
+            }
+            onTiming?(.listResponse, (ProcessInfo.processInfo.systemUptime - fetchStarted) * 1_000)
             let parse = Task.detached(priority: .userInitiated) { try EHParser.list(html, base: url) }
             let list = try await withTaskCancellationHandler(operation: { try await parse.value }, onCancel: { parse.cancel() })
             guard isCurrent(current, account: account, owner: owner, session: session), !Task.isCancelled else { return }
@@ -266,11 +308,23 @@ import ExViewerCore
                                                     scopeOwner: owner, generation: account, observedAfter: requestedAt)
             let replacingRoot = url == root
             let validatingCachedRoot = replacingRoot && preservesCachedPresentation && cachedAt != nil && !items.isEmpty
+            let continuation = root.flatMap { root in
+                list.next.flatMap { SiteFavoriteOrder.continuation($0, from: root) }
+            }.flatMap { $0 == url || loaded.contains($0) ? nil : $0 }
+            if root?.path != "/favorites.php", !validatingCachedRoot {
+                continuationOnIncompletePage = continuation
+            }
             // Continuation URLs may omit filters; keep the original query's threshold.
             let minimum = minimumRating
             let publishFavoriteRoot = replacingRoot && root?.path == "/favorites.php" && minimum == nil
             let retainedRoot = replacingRoot && !items.isEmpty && !publishFavoriteRoot
             if !validatingCachedRoot { categories = list.favoriteCategories }
+            if canPresentSearchHTML, !retainedRoot {
+                // Search HTML already has the ordered cards and their covers.
+                // Tag-aware consumers still withhold incomplete rows when
+                // local blocking is enabled. Only enriched pages are cached.
+                appendPageItems(pageBase)
+            }
             if publishFavoriteRoot {
                 let previous = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 // Rebase on the server's fresh order before waiting for metadata.
@@ -356,14 +410,7 @@ import ExViewerCore
                     guard isCurrent(current, account: account, owner: owner, session: session), !Task.isCancelled else { return }
                 }
                 if !retainedRoot {
-                    var updated = items
-                    var positions = Dictionary(uniqueKeysWithValues: updated.enumerated().map { ($0.element.id, $0.offset) })
-                    for gallery in accepted {
-                        if let index = positions[gallery.id] {
-                            if !updated[index].tagsComplete && gallery.tagsComplete { updated[index] = gallery }
-                        } else { positions[gallery.id] = updated.count; updated.append(gallery) }
-                    }
-                    items = updated
+                    appendPageItems(accepted)
                 }
             }
             try Task.checkCancellation()
@@ -394,9 +441,7 @@ import ExViewerCore
                 items = pageItems; cachedAt = nil
             }
             loaded.insert(url); retryURL = nil
-            next = root.flatMap { root in
-                list.next.flatMap { SiteFavoriteOrder.continuation($0, from: root) }
-            }.flatMap { loaded.contains($0) ? nil : $0 }
+            next = continuation
             categories = list.favoriteCategories; interrupted = false
             if replacingRoot, let cache {
                 await cache.save(.init(owner: owner, root: url, items: pageItems, next: next, categories: categories), expectedEpoch: cacheEpoch)
@@ -404,7 +449,24 @@ import ExViewerCore
         } catch is CancellationError { }
         catch {
             guard isCurrent(current, account: account, owner: owner, session: session) else { return }
+            // A metadata failure leaves this page retryable. The list's confirmed
+            // cursor still lets the user move on without accepting unverified rows.
+            if let continuationOnIncompletePage { next = continuationOnIncompletePage }
             interrupted = false; failure = ErrorMessages.message(error, fallback: ViewerError.network.localizedDescription)
         }
+    }
+
+    private func appendPageItems(_ page: [Gallery]) {
+        var updated = items
+        var positions = Dictionary(uniqueKeysWithValues: updated.enumerated().map { ($0.element.id, $0.offset) })
+        for gallery in page {
+            if let index = positions[gallery.id] {
+                if !updated[index].tagsComplete && gallery.tagsComplete { updated[index] = gallery }
+            } else {
+                positions[gallery.id] = updated.count
+                updated.append(gallery)
+            }
+        }
+        if updated != items { items = updated }
     }
 }

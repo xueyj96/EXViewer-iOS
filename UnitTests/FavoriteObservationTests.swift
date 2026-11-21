@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import ExViewerCore
 @testable import ExViewer
 
@@ -8,6 +9,59 @@ import ExViewerCore
         try GalleryFavoriteForm.read(NativeFavoritesQA.html(reference: ref, group: group, note: ""), reference: ref)
     }
     private final class Identity { var current = true }
+    func testBackgroundFavoriteFailureReachesDetailFeedbackAndClearsForRetry() async throws {
+        let observation = GalleryFavoriteObservation(), cache = SiteFavoriteCache()
+        let scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
+        var reads = 0
+        var feedback: [String] = []
+        let subscription = observation.failures.sink { feedback.append($0) }
+        defer { subscription.cancel() }
+        let revisions = cache.$revision.sink { _ in observation.syncFromCache() }
+        defer { revisions.cancel() }
+        let client = GalleryFavoriteClient(isCurrent: { true }, read: {
+            reads += 1
+            throw ViewerError.layoutChanged
+        }, submit: { _ in XCTFail("An unreadable form must not be submitted") })
+        observation.bind(client, reference: ref, cache: cache, scope: scope)
+        try await cache.enqueueToggle(scope: scope, client: client, group: 0, groupName: "Group", title: "Fixture")
+        for _ in 0..<100 where cache.entry(scope)?.phase != .failed { await Task.yield() }
+        observation.syncFromCache()
+        XCTAssertEqual(observation.phase, .failed)
+        XCTAssertEqual(observation.failureMessage, "同步未完成 本次更改已保留")
+        for _ in 0..<10 { observation.syncFromCache() }
+        XCTAssertEqual(reads, 1, "Showing feedback must not retry the mutation")
+        XCTAssertEqual(feedback, ["同步未完成 本次更改已保留"])
+        cache.retry(ref.id)
+        observation.syncFromCache()
+        XCTAssertNil(observation.failureMessage)
+        for _ in 0..<100 where cache.entry(scope)?.phase != .failed { await Task.yield() }
+        XCTAssertEqual(feedback, Array(repeating: "同步未完成 本次更改已保留", count: 2),
+                       "A fast retry with identical copy must produce another feedback event")
+        let otherScope = GalleryFavoriteScope(reference: ref, owner: "bb", generation: UUID())
+        cache.activate(owner: otherScope.owner, generation: otherScope.generation)
+        observation.bind(client, reference: ref, cache: cache, scope: otherScope)
+        XCTAssertNil(observation.failureMessage, "Another account must not inherit a failure toast")
+    }
+
+    func testUnconfirmedFavoriteSubmissionPublishesFeedbackWithoutReposting() async throws {
+        let observation = GalleryFavoriteObservation(), cache = SiteFavoriteCache()
+        let scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID())
+        var reads = 0, posts = 0
+        let client = GalleryFavoriteClient(isCurrent: { true }, read: {
+            reads += 1
+            if reads > 1 { throw URLError(.timedOut) }
+            return try self.form(nil)
+        }, submit: { _ in posts += 1 })
+        observation.bind(client, reference: ref, cache: cache, scope: scope)
+        try await cache.enqueueToggle(scope: scope, client: client, group: 0, groupName: "Group", title: "Fixture")
+        for _ in 0..<100 where cache.entry(scope)?.phase != .uncertain { await Task.yield() }
+        observation.syncFromCache()
+        XCTAssertEqual(observation.phase, .uncertain)
+        XCTAssertEqual(observation.failureMessage, "收藏结果待确认 请检查结果")
+        for _ in 0..<10 { observation.syncFromCache() }
+        XCTAssertEqual(posts, 1)
+        XCTAssertEqual(reads, 2)
+    }
     func testBindingRepeatedlyAndReceivingLocalChangesNeverReadsTheNetwork() throws {
         let o = GalleryFavoriteObservation(), cache = SiteFavoriteCache()
         let scope = GalleryFavoriteScope(reference: ref, owner: "aa", generation: UUID()); var reads = 0

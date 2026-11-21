@@ -197,10 +197,17 @@ struct LibraryBatchToolbar: View {
             guard session.owner == library.owner else { show(ErrorMessages.message(ViewerError.stale)); return }
             let selected = galleries()
             guard !selected.isEmpty else { return }
-            do {
-                let count = try session.addToDefaultFavorites(selected)
-                show(resultText("已加入收藏同步队列", count, of: selected.count, skipped: "已有待处理操作"))
-            } catch { show(ErrorMessages.message(error)) }
+            let owner = session.owner, generation = session.generation
+            Task {
+                do {
+                    let count = try await session.addToDefaultFavorites(selected)
+                    guard owner == session.owner, generation == session.generation else { return }
+                    show(resultText("已加入收藏同步队列", count, of: selected.count, skipped: "已有待处理操作"))
+                } catch {
+                    guard owner == session.owner, generation == session.generation else { return }
+                    show(ErrorMessages.message(error))
+                }
+            }
         }
     }
 

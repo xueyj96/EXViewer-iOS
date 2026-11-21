@@ -31,6 +31,7 @@ struct ReaderMediaScope: Hashable, Sendable {
     @Published private(set) var prefetchPaused = false
     @Published private(set) var currentPage: Int?
     private var requestedNeighbor: Int?
+    private var retainedNeighbor: Int?
 
     private enum PrefetchPauseReason: Equatable {
         case network
@@ -41,6 +42,8 @@ struct ReaderMediaScope: Hashable, Sendable {
         var token: UUID
         var demand: MediaRequestDemand
         var progressObserver: UUID
+        var progressThrottle: ReaderProgressThrottle
+        var lastProgressDelivery: UInt64 = 0
         var priority: MediaRequestPriority { demand.priority }
         var url: URL
         var task: Task<Void, Never>
@@ -94,11 +97,14 @@ struct ReaderMediaScope: Hashable, Sendable {
                 demandLoader newLoader: @escaping DemandLoader,
                 isCurrent validity: @escaping Validity) {
         let count = min(128, max(0, requestedCount))
+        let concurrency = min(16, max(2, requestedConcurrency))
         let mapped = Dictionary(newPages.map { ($0.index, $0) }, uniquingKeysWith: { _, latest in latest })
         loader = newLoader
         isCurrent = validity
         let scopeChanged = scope != newScope
+        let settingsChanged = prefetchCount != count || downloadConcurrency != concurrency
         let oldPages = pages
+        let previousNeighbor = requestedNeighbor
 
         if scopeChanged {
             invalidateRequests()
@@ -113,17 +119,24 @@ struct ReaderMediaScope: Hashable, Sendable {
         pages = mapped
         currentPage = newCurrent
         prefetchCount = count
-        downloadConcurrency = min(16, max(2, requestedConcurrency))
+        downloadConcurrency = concurrency
         requestedNeighbor = requestedPreview.flatMap { abs($0 - newCurrent) == 1 && mapped[$0] != nil ? $0 : nil }
 
+        if scopeChanged || settingsChanged || prefetchPaused { retainedNeighbor = nil }
         if !scopeChanged {
-            let desired = desiredRequests(current: newCurrent, count: count, in: mapped)
+            var desired = desiredRequests(current: newCurrent, count: count, in: mapped)
+            if !settingsChanged, !prefetchPaused {
+                retainedNeighbor = retainableNeighbor(previous: previousNeighbor, current: newCurrent, desired: desired)
+                if let retainedNeighbor { desired[retainedNeighbor] = .prefetch }
+            }
             let obsolete = requests.compactMap { index, request -> Int? in
                 guard let page = mapped[index], page.url == request.url,
-                      desired[index] != nil else { return index }
-                // Upgrade the same waiting/active transport without restarting bytes.
-                request.demand.setPriority(desired[index]!)
-                inflight[index] = desired[index]
+                      let priority = desired[index] else { return index }
+                // Change the demand on the same transport without restarting bytes.
+                if request.priority != priority {
+                    request.demand.setPriority(priority)
+                    inflight[index] = priority
+                }
                 return nil
             }
             for index in obsolete {
@@ -183,6 +196,12 @@ struct ReaderMediaScope: Hashable, Sendable {
         schedule()
     }
 
+    func retryInvalidFile(page index: Int, file: URL) {
+        guard files[index] == file else { return }
+        files.removeValue(forKey: index)
+        retry(page: index)
+    }
+
     func reset() {
         invalidateRequests()
         scope = nil; pages = [:]; loader = nil; isCurrent = nil
@@ -192,15 +211,18 @@ struct ReaderMediaScope: Hashable, Sendable {
         downloadConcurrency = 2
         clearPrefetchPause(advanceEpoch: true)
         requestedNeighbor = nil
+        retainedNeighbor = nil
     }
 
     private func invalidateRequests() {
         revision = UUID()
         for request in requests.values {
             request.demand.removeProgressObserver(request.progressObserver)
+            request.progressThrottle.cancel()
             request.task.cancel()
         }
         requests.removeAll()
+        retainedNeighbor = nil
         inflight.removeAll()
         progress.removeAll()
         backgroundWork?.finish(.paused)
@@ -208,7 +230,9 @@ struct ReaderMediaScope: Hashable, Sendable {
 
     private func cancelRequest(at index: Int) {
         guard let request = requests.removeValue(forKey: index) else { return }
+        if retainedNeighbor == index { retainedNeighbor = nil }
         request.demand.removeProgressObserver(request.progressObserver)
+        request.progressThrottle.cancel()
         request.task.cancel()
         inflight.removeValue(forKey: index)
         progress.removeValue(forKey: index)
@@ -225,6 +249,21 @@ struct ReaderMediaScope: Hashable, Sendable {
         return desired
     }
 
+    /// Hold a request the user already started through gesture release. It can
+    /// occupy only unused background capacity and cannot start a new request.
+    private func retainableNeighbor(previous: Int?, current: Int, desired: [Int: MediaRequestPriority]) -> Int? {
+        guard let candidate = [previous, retainedNeighbor].compactMap({ $0 }).first(where: { index in
+            abs(index - current) == 1 && desired[index] == nil &&
+                requests[index].map { pages[index]?.url == $0.url } == true
+        }) else { return nil }
+        let active = requests.filter { index, request in
+            pages[index]?.url == request.url && desired[index] != nil
+        }
+        let background = active.keys.filter { desired[$0] == .prefetch }.count
+        let foreground = active.count - background
+        return background < downloadConcurrency - max(1, foreground) ? candidate : nil
+    }
+
     private func prefetchWindow(after page: Int, count: Int, in pages: [Int: GalleryPage]) -> ArraySlice<Int> {
         pages.keys.filter { $0 > page }.sorted().prefix(count)
     }
@@ -236,23 +275,12 @@ struct ReaderMediaScope: Hashable, Sendable {
     private func schedule() {
         guard isForeground, scope != nil, isCurrent?() == true, let loader else { return }
         let current = currentPage
-        // Make room for new explicit demand when every reader slot is occupied
-        // by speculative work. Same-page promotion never restarts its transfer.
-        for index in [current, requestedNeighbor].compactMap({ $0 }) where needsRequest(index) {
-            if requests.count >= downloadConcurrency,
-               let farthest = requests.filter({ $0.value.priority == .prefetch }).keys.max() {
-                cancelRequest(at: farthest)
-            }
-        }
-        if let current, pages[current] != nil, needsRequest(current), requests.count < downloadConcurrency {
-            start(page: current, priority: .foreground, loader: loader)
-        }
+        if let current { admitForeground(current, loader: loader) }
 
         // A live preview or a waiting turn has foreground priority even with
         // prefetch disabled. The current page still gets the first slot.
-        if let requestedNeighbor, needsRequest(requestedNeighbor), requests.count < downloadConcurrency,
-           !requests.values.contains(where: { $0.priority == .foreground }) {
-            start(page: requestedNeighbor, priority: .foreground, loader: loader)
+        if let requestedNeighbor, !requests.values.contains(where: { $0.priority == .foreground }) {
+            admitForeground(requestedNeighbor, loader: loader)
         }
 
         guard prefetchCount > 0, !prefetchPaused, let current else { return }
@@ -267,6 +295,17 @@ struct ReaderMediaScope: Hashable, Sendable {
         }
     }
 
+    private func admitForeground(_ index: Int, loader: @escaping DemandLoader) {
+        guard pages[index] != nil, needsRequest(index) else { return }
+        if requests.count == downloadConcurrency {
+            // Evict only when this foreground request is eligible to start.
+            let candidate = retainedNeighbor ?? requests.filter { $0.value.priority == .prefetch }.keys.max()
+            if let candidate { cancelRequest(at: candidate) }
+        }
+        guard requests.count < downloadConcurrency else { return }
+        start(page: index, priority: .foreground, loader: loader)
+    }
+
     private func start(page index: Int, priority: MediaRequestPriority, loader: @escaping DemandLoader) {
         guard let page = pages[index], let scope, isCurrent?() == true else { return }
         let expectedRevision = revision
@@ -274,16 +313,32 @@ struct ReaderMediaScope: Hashable, Sendable {
         let startedAsCurrentForeground = priority == .foreground && index == currentPage
         let token = UUID()
         let demand = MediaRequestDemand(priority: priority)
-        let progressObserver = demand.observeProgress { [weak self, weak demand] _ in
+        let progressThrottle = ReaderProgressThrottle { [weak self, weak demand] delivery in
             Task { @MainActor [weak self, weak demand] in
                 guard let self, let demand,
                       self.revision == expectedRevision,
                       self.scope == scope,
-                      self.requests[index]?.token == token,
+                      var request = self.requests[index], request.token == token,
+                      delivery.sequence > request.lastProgressDelivery,
                       self.isCurrent?() == true,
                       self.currentPage == index || self.requestedNeighbor == index else { return }
-                self.progress[index] = demand.progress
+                // A direct phase change can end forwarding while an earlier
+                // producer delivery is waiting for MainActor. Do not replay it.
+                let latest = demand.progressSnapshot
+                guard delivery.snapshot.producerUUID == latest.producerUUID else { return }
+                request.lastProgressDelivery = delivery.sequence
+                self.requests[index] = request
+                // Promotion/update may already have displayed a newer byte
+                // value before this actor hop runs. Consume the latest demand
+                // snapshot, never rewind it to the coalescer's captured tail.
+                if self.progress[index] != latest.value {
+                    self.progress[index] = latest.value
+                }
             }
+        }
+        let progressObserver = demand.observeProgressSnapshot { [weak demand] _ in
+            guard let demand else { return }
+            progressThrottle.receiveLatest(from: demand)
         }
         if index == currentPage || index == requestedNeighbor { progress[index] = demand.progress }
         if requests.isEmpty {
@@ -293,6 +348,7 @@ struct ReaderMediaScope: Hashable, Sendable {
             }
         }
         let task = Task { [weak self] in
+            defer { progressThrottle.cancel() }
             do {
                 try Task.checkCancellation()
                 let url = try await loader(page, demand)
@@ -340,14 +396,16 @@ struct ReaderMediaScope: Hashable, Sendable {
             guard let self, self.revision == expectedRevision, self.requests[index]?.token == token else { return }
             if let finished = self.requests[index] {
                 finished.demand.removeProgressObserver(finished.progressObserver)
+                finished.progressThrottle.cancel()
             }
             self.requests.removeValue(forKey: index)
+            if self.retainedNeighbor == index { self.retainedNeighbor = nil }
             self.inflight.removeValue(forKey: index)
             self.schedule()
             if self.requests.isEmpty { self.backgroundWork?.finish(.completed) }
         }
         requests[index] = RunningRequest(token: token, demand: demand, progressObserver: progressObserver,
-                                         url: page.url, task: task)
+                                         progressThrottle: progressThrottle, url: page.url, task: task)
         inflight[index] = priority
     }
 

@@ -501,6 +501,8 @@ private struct DiscoveryFeedView: View {
     @EnvironmentObject private var library: LibraryStore
     @ObservedObject private var pager: GalleryPager
     @State private var restoring = true
+    @State private var searchPrefetchPosition = SearchPrefetchPosition()
+    @State private var lastSearchPrefetchStep: Int?
     @StateObject private var pullRefresh = FeedPullRefresh()
 
     init(entry: DiscoveryEntry, topInset: CGFloat, selectionStore: LibrarySelectionStore, isSelecting: Bool,
@@ -511,10 +513,57 @@ private struct DiscoveryFeedView: View {
         _pager = ObservedObject(wrappedValue: entry.pager)
     }
 
+    private var nearEndReady: Bool {
+        !isSelecting && !restoring && isCurrent() && !pager.loading &&
+            pager.next != nil && pager.failure == nil && !pager.interrupted
+    }
+
+    private var usesSearchPrefetch: Bool {
+        if #available(iOS 18.0, *) { return entry.query.hasSettings }
+        return false
+    }
+
+    private var visibleTailReady: Bool {
+        nearEndReady && (!usesSearchPrefetch || (lastSearchPrefetchStep == nil && searchPrefetchPosition.step == 0))
+    }
+
+    private func loadVisibleTail() {
+        guard visibleTailReady else { return }
+        if usesSearchPrefetch { lastSearchPrefetchStep = 0 }
+        pager.more(session: session, prefetch: true)
+    }
+
+    private func refreshFeed() async {
+        lastSearchPrefetchStep = nil
+        await onRefresh()
+    }
+
+    private func prefetchSearchContinuation() {
+        guard usesSearchPrefetch, nearEndReady,
+              searchPrefetchPosition.shouldPrefetch(after: lastSearchPrefetchStep) else { return }
+        lastSearchPrefetchStep = searchPrefetchPosition.step
+        pager.more(session: session, prefetch: true)
+    }
+
+    @ViewBuilder private func observeSearchScroll<Content: View>(_ content: Content) -> some View {
+        if #available(iOS 18.0, *), usesSearchPrefetch {
+            content.onScrollGeometryChange(for: SearchPrefetchPosition.self) { geometry in
+                SearchPrefetchPosition(offset: geometry.contentOffset.y + geometry.contentInsets.top,
+                                       remaining: geometry.contentSize.height - geometry.visibleRect.maxY,
+                                       viewport: geometry.containerSize.height)
+            } action: { _, position in
+                searchPrefetchPosition = position
+                prefetchSearchContinuation()
+            }
+        } else {
+            content
+        }
+    }
+
     var body: some View {
         GeometryReader { viewport in
           ScrollViewReader { proxy in
-           ScrollView {
+           observeSearchScroll(ScrollView {
             LazyVStack(spacing: 0) {
                 if pager.interrupted && pager.items.isEmpty && !isSelecting {
                     GalleryContinuationFooter(pager: pager)
@@ -523,7 +572,7 @@ private struct DiscoveryFeedView: View {
                             sourceIdentity: entry.id.uuidString, selectionStore: selectionStore, isSelecting: isSelecting,
                             isLoading: pager.loading, loadFailure: pager.failure,
                             selectionIdentifier: "discover.select", onLongPressSelect: onLongPressSelect,
-                            onNearEnd: { if !isSelecting && !restoring && isCurrent() && pager.failure == nil && !pager.interrupted { pager.more(session: session, prefetch: true) } },
+                            onNearEnd: loadVisibleTail, nearEndReady: visibleTailReady,
                             viewport: .init(space: entry.id.uuidString, height: viewport.size.height, topOcclusion: topInset),
                             onVisibleAnchor: { if !restoring && isCurrent() { entry.updateVisibleAnchor($0) } })
                     .scrollTargetLayout()
@@ -536,6 +585,9 @@ private struct DiscoveryFeedView: View {
             .padding(.bottom, FeedChrome.sectionSpacing)
             .id("discover.section-top")
             .feedRefreshProbe(pullRefresh, enabled: !isSelecting && isCurrent())
+        })
+        .onChange(of: nearEndReady) { _, ready in
+            if ready { prefetchSearchContinuation() }
         }
         .overlay {
             if !isSelecting { GalleryFeedStatus(pager: pager).padding(.top, topInset) }
@@ -543,11 +595,11 @@ private struct DiscoveryFeedView: View {
         .onHeaderReselection {
             guard isCurrent(), !isSelecting else { return }
             withAnimation(reduceMotion ? nil : ChromeMotion.control) { proxy.scrollTo("discover.section-top", anchor: .top) }
-            await pullRefresh.refresh(enabled: isCurrent()) { await onRefresh() }
+            await pullRefresh.refresh(enabled: isCurrent()) { await refreshFeed() }
         }
         .coordinateSpace(name: entry.id.uuidString)
         .accessibilityIdentifier("discover.feed")
-        .feedPullRefresh(pullRefresh, topInset: topInset, enabled: !isSelecting && isCurrent(), action: onRefresh)
+        .feedPullRefresh(pullRefresh, topInset: topInset, enabled: !isSelecting && isCurrent(), action: refreshFeed)
         .contentMargins(.top, topInset, for: .scrollIndicators)
         .task(id: topInset) {
             guard restoring, topInset > 0 else { return }
@@ -577,5 +629,22 @@ private struct DiscoveryFeedView: View {
         .overlay(alignment: .topLeading) {
             if FeedCacheQA.isEnabled { FeedCacheQAStatus(pager: pager, lane: "discover") }
         }
+    }
+}
+
+struct SearchPrefetchPosition: Equatable {
+    private(set) var step = 0
+    private var inRange = false
+
+    init() {}
+    init(offset: CGFloat, remaining: CGFloat, viewport: CGFloat) {
+        guard viewport.isFinite, viewport > 0, offset.isFinite, remaining.isFinite else { return }
+        step = Int(min(100_000, max(0, offset) / max(1, viewport / 4)))
+        inRange = remaining <= viewport * 2
+    }
+
+    func shouldPrefetch(after previousStep: Int?) -> Bool {
+        guard inRange, step > 0 else { return false }
+        return previousStep.map { step - $0 >= 2 } ?? true
     }
 }

@@ -78,8 +78,14 @@ import ExViewerCore
         guard !current.didStart else { return }
         let url = try Self.requestURL(query: current.query, site: current.site, lane: current.lane)
         guard url == current.requestURL else { throw ViewerError.invalidQuery("搜索未能开始 请重试") }
-        current.markStarted()
-        current.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !current.query.hasSettings)
+        start(current, session: session, qa: qa)
+    }
+
+    private func start(_ entry: DiscoveryEntry, session: SiteSession, qa: Bool) {
+        entry.markStarted()
+        let isSearch = entry.query.hasSettings
+        entry.pager.reset(url: entry.requestURL, session: session, qa: qa,
+                          preserveCachedPresentation: !isSearch, rootLoad: isSearch ? .openSearch : .refresh)
     }
 
     /// Prepare a presentation owner without starting a request or changing the trail.
@@ -108,7 +114,7 @@ import ExViewerCore
         }
         if current.requestURL == url {
             if current.query == query, current.site == site, current.lane == lane, current.savedID == savedID {
-                if !current.didStart { current.markStarted(); current.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !current.query.hasSettings) }
+                if !current.didStart { start(current, session: session, qa: qa) }
                 return false
             }
             let old = current
@@ -117,10 +123,7 @@ import ExViewerCore
                                              pager: old.pager)
             if old.didStart { replacement.markStarted() }
             current = replacement
-            if !replacement.didStart {
-                replacement.markStarted()
-                replacement.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !replacement.query.hasSettings)
-            }
+            if !replacement.didStart { start(replacement, session: session, qa: qa) }
             return false
         }
 
@@ -152,9 +155,8 @@ import ExViewerCore
             removed.forEach { $0.pager.cancel() }
         }
         let entry = prepared ?? DiscoveryEntry(query: query, site: site, lane: lane, savedID: savedID, requestURL: url)
-        entry.markStarted()
         current = entry
-        entry.pager.reset(url: url, session: session, qa: qa, preserveCachedPresentation: !entry.query.hasSettings)
+        start(entry, session: session, qa: qa)
         return true
     }
 

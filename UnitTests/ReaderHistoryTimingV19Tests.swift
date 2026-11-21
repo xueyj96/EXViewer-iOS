@@ -4,7 +4,7 @@ import ExViewerCore
 
 final class ReaderHistoryTimingV19Tests: XCTestCase {
     @MainActor
-    func testMeasureActualHistoryCommitAndVerifyReopenedFinalPage() throws {
+    func testMeasureActualHistoryCommitAndVerifyReopenedFinalPage() async throws {
         for (name, historyCount, bookmarkCount, tagCount) in [("small", 12, 12, 8), ("large", 500, 250, 24)] {
             let store = LibraryStore(qa: true)
             defer { try? FileManager.default.removeItem(at: store.directory.deletingLastPathComponent()) }
@@ -29,6 +29,8 @@ final class ReaderHistoryTimingV19Tests: XCTestCase {
                 milliseconds.append((ProcessInfo.processInfo.systemUptime - start) * 1_000)
             }
             XCTAssertNil(store.error)
+            let firstSaved = await store.flushReadingHistory()
+            XCTAssertTrue(firstSaved)
             store.load(owner: "guest")
             XCTAssertNil(store.error)
             XCTAssertEqual(store.snapshot.history.count, historyCount)
@@ -37,7 +39,7 @@ final class ReaderHistoryTimingV19Tests: XCTestCase {
             XCTAssertEqual(store.snapshot.bookmarks.map(\.id), snapshot.bookmarks.map(\.id))
             let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             let sorted = milliseconds.sorted()
-            print("READER19_HISTORY_COMMIT workload=\(name) bytes=\(bytes) samples=25 medianMs=\(sorted[12]) maxMs=\(sorted.last ?? 0) rawMs=\(milliseconds)")
+            print("READER171_HISTORY_STAGE workload=\(name) bytes=\(bytes) samples=25 medianMs=\(sorted[12]) maxMs=\(sorted.last ?? 0) rawMs=\(milliseconds)")
 
             try seed.write(to: file, options: .atomic)
             store.load(owner: "guest")
@@ -52,13 +54,17 @@ final class ReaderHistoryTimingV19Tests: XCTestCase {
             let flushStart = ProcessInfo.processInfo.systemUptime
             checkpoint.flush()
             let flushMs = (ProcessInfo.processInfo.systemUptime - flushStart) * 1_000
+            let durableStart = ProcessInfo.processInfo.systemUptime
+            let finalSaved = await store.flushReadingHistory()
+            let durableMs = (ProcessInfo.processInfo.systemUptime - durableStart) * 1_000
+            XCTAssertTrue(finalSaved)
             store.load(owner: "guest")
             XCTAssertNil(store.error)
             XCTAssertEqual(store.snapshot.history.first?.page, 25)
             XCTAssertEqual(store.snapshot.history.count, historyCount)
             XCTAssertEqual(store.snapshot.bookmarks.map(\.id), snapshot.bookmarks.map(\.id))
             let stagedSorted = stagedMilliseconds.sorted()
-            print("READER19_HISTORY_STAGED workload=\(name) bytes=\(bytes) samples=25 medianMs=\(stagedSorted[12]) maxMs=\(stagedSorted.last ?? 0) settledFlushMs=\(flushMs)")
+            print("READER19_HISTORY_STAGED workload=\(name) bytes=\(bytes) samples=25 medianMs=\(stagedSorted[12]) maxMs=\(stagedSorted.last ?? 0) settledStageMs=\(flushMs) awaitedDurableMs=\(durableMs)")
         }
     }
 

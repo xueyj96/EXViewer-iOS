@@ -25,6 +25,63 @@ final class HeaderSectionPagingUITests: XCTestCase {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
+
+    func test171FavoritesRetainCategoryAndViewportAcrossUnmountAndMainTab() {
+        let app = launch(["--qa-library-large-selection"])
+        app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap()
+        waitSelected(app, "library.scope.1")
+        let groups = app.buttons["favorites.group-filter"]
+        XCTAssertTrue(groups.waitForExistence(timeout: 5)); groups.tap()
+        let category = app.buttons["稍后阅读"].firstMatch
+        XCTAssertTrue(category.waitForExistence(timeout: 5)); category.tap()
+        XCTAssertEqual(groups.value as? String, "稍后阅读")
+        app.swipeUp(); app.swipeUp(); app.swipeUp()
+        let candidates = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "favorites.gallery."))
+            .allElementsBoundByIndex.filter {
+                $0.isHittable && $0.frame.minY > 210 && $0.frame.midY < app.frame.height - 110
+            }.sorted { $0.frame.minY < $1.frame.minY }
+        guard let anchor = candidates.first else { XCTFail("Expected a gallery inside the scrolled viewport"); return }
+        let anchorID = anchor.identifier
+        XCTAssertNotEqual(anchorID, "favorites.gallery.10000")
+        app.buttons["library.scope.3"].tap(); waitSelected(app, "library.scope.3")
+        app.buttons["library.scope.1"].tap(); waitSelected(app, "library.scope.1")
+        XCTAssertEqual(app.buttons["favorites.group-filter"].value as? String, "稍后阅读")
+        let restored = app.buttons[anchorID]
+        expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: restored)
+        waitForExpectations(timeout: 5)
+        app.buttons["main.tab.discover"].tap()
+        app.buttons["main.tab.library"].tap()
+        waitSelected(app, "library.scope.1")
+        XCTAssertEqual(app.buttons["favorites.group-filter"].value as? String, "稍后阅读")
+        expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: app.buttons[anchorID])
+        waitForExpectations(timeout: 5)
+        capture("favorites171.retained-session")
+    }
+
+    func test171DenseFavoritesDetailEdgesPreserveOriginAndViewport() {
+        let app = launch(["--qa-library-large-selection", "--reader-network-metrics"])
+        app.buttons["main.tab.library"].tap()
+        app.buttons["library.scope.1"].tap(); waitSelected(app, "library.scope.1")
+        app.swipeUp(); app.swipeUp(); app.swipeUp()
+        let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "favorites.gallery."))
+            .allElementsBoundByIndex.filter {
+                $0.isHittable && $0.frame.minY > 210 && $0.frame.midY < app.frame.height - 110
+            }.sorted { $0.frame.minY < $1.frame.minY }
+        guard let card = cards.first else { XCTFail("Expected a loaded gallery in the dense viewport"); return }
+        let identifier = card.identifier
+        for leading in [true, false] {
+            let source = app.buttons[identifier]
+            XCTAssertTrue(source.isHittable); source.tap()
+            XCTAssertTrue(app.buttons["BackButton"].waitForExistence(timeout: 5))
+            edge(app, leading: leading, distance: 0.72)
+            waitSelected(app, "library.scope.1")
+            XCTAssertTrue(app.buttons["main.tab.library"].isSelected)
+            expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: app.buttons[identifier])
+            waitForExpectations(timeout: 5)
+        }
+        capture("favorites171.dense-edge-return")
+    }
     func test160ClickAndEdgeSwitchExitLibrarySelection() {
         let app = launch(); app.buttons["main.tab.library"].tap()
         let saved = app.buttons["favorites.gallery.7201"]

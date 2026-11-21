@@ -26,7 +26,7 @@ import ExViewerCore
                 serverGroup = Int(fields.first { $0.name == "favcat" }!.value!)
             })
             for tap in 1...taps {
-                try cache.enqueueToggle(scope: scope, client: client, group: 2, groupName: NativeFavoritesQA.groups[2], title: "Fixture")
+                try await cache.enqueueToggle(scope: scope, client: client, group: 2, groupName: NativeFavoritesQA.groups[2], title: "Fixture")
                 XCTAssertEqual(cache.entry(scope)?.state, tap.isMultiple(of: 2) ? .notFavorited : .favorited(NativeFavoritesQA.groups[2]))
                 if tap == 1 { try await wait { held != nil } }
             }
@@ -42,7 +42,7 @@ import ExViewerCore
         cache.activate(owner: scope.owner, generation: scope.generation)
         var posts = 0, notifications = 0
         let client = GalleryFavoriteClient(isCurrent: { true }, read: { try self.form(2) }, submit: { _ in posts += 1 }, didSubmit: { notifications += 1 })
-        _ = try cache.enqueueAdditions([.init(scope: scope, client: client, title: "Fixture", groupName: "Group", group: 2)], group: 2)
+        _ = try await cache.enqueueAdditions([.init(scope: scope, client: client, title: "Fixture", groupName: "Group", group: 2)], group: 2)
         try await wait { cache.entry(scope)?.phase == nil }
         XCTAssertEqual(posts, 0); XCTAssertEqual(notifications, 1)
         XCTAssertEqual(cache.entry(scope)?.state, .favorited(NativeFavoritesQA.groups[2]))
@@ -56,7 +56,7 @@ import ExViewerCore
             if reads == 2 { throw URLError(.timedOut) }
             return try self.form(reads == 1 ? nil : 2)
         }, submit: { _ in posts += 1 }, didSubmit: { notifications += 1 })
-        _ = try cache.enqueueAdditions([.init(scope: scope, client: client, title: "Fixture", groupName: "Group", group: 2)], group: 2)
+        _ = try await cache.enqueueAdditions([.init(scope: scope, client: client, title: "Fixture", groupName: "Group", group: 2)], group: 2)
         try await wait { cache.entry(scope)?.phase == .uncertain }
         XCTAssertEqual(posts, 1); XCTAssertEqual(notifications, 1)
         cache.check(reference.id)

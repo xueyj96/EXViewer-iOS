@@ -334,6 +334,23 @@ actor MediaRepository {
     }
     func directory(owner: String) -> URL { root.appendingPathComponent(owner, isDirectory: true) }
 
+    func saveReaderResume(reference: GalleryRef, owner: String, index: Int, pages: [GalleryPage],
+                          total: Int?, next: URL?, tags: [GalleryTag], file: URL, at date: Date) {
+        let directory = directory(owner: owner)
+        guard file.standardizedFileURL.deletingLastPathComponent().path == directory.standardizedFileURL.path,
+              Self.cachedImageExists(at: file) else { return }
+        ReaderResumeCache(directory: directory).save(reference: reference, index: index, pages: pages, total: total,
+                                                      next: next, tags: tags, file: file, at: date)
+    }
+
+    func readerResume(reference: GalleryRef, owner: String, index: Int, blocked: Set<String>) -> (ReaderResumeSnapshot, URL)? {
+        let cache = ReaderResumeCache(directory: directory(owner: owner))
+        guard let (snapshot, file) = cache.read(reference: reference, index: index, blocked: blocked),
+              Self.cachedImageExists(at: file) else { return nil }
+        touch(file, owner: owner)
+        return (snapshot, file)
+    }
+
     nonisolated func setPinnedFiles(_ files: Set<URL>, owner: String, context: UUID) {
         browseCachePins.setPinnedFiles(files, owner: owner, context: context, root: root)
     }

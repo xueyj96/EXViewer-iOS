@@ -331,7 +331,9 @@ final class Chrome132UITests: XCTestCase {
         for _ in 0..<6 { if categories.isHittable { break }; app.swipeUp() }
         let all = app.buttons["compose.categories.select-all"]
         let invert = app.buttons["compose.categories.invert"]
-        XCTAssertLessThanOrEqual(app.staticTexts["compose.categories.disclosure.title"].frame.maxX, all.frame.minX)
+        let categoryTitle = app.buttons["compose.categories.disclosure.heading"]
+        XCTAssertTrue(categoryTitle.exists)
+        XCTAssertLessThanOrEqual(categoryTitle.frame.maxX, all.frame.minX)
         XCTAssertEqual(categories.frame.width, categories.frame.height, accuracy: 1)
         XCTAssertGreaterThan(advanced.frame.width, advanced.frame.height)
         XCTAssertLessThanOrEqual(all.frame.maxX, invert.frame.minX)
@@ -413,6 +415,12 @@ final class Chrome132UITests: XCTestCase {
         XCTAssertEqual(save.frame.height, reset.frame.height, accuracy: 1)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "search152.actions"; shot.lifetime = .keepAlways; add(shot)
+        reset.tap()
+        let toast = app.staticTexts["compose.clear-feedback"]
+        XCTAssertTrue(toast.waitForExistence(timeout: 2))
+        XCTAssertEqual(toast.label, "条件已清空")
+        XCTAssertFalse(reset.isEnabled)
+        XCTAssertTrue(toast.waitForNonExistence(timeout: 5))
     }
 
     func test153DetailTagSearchReopensWithExecutedTags() {
@@ -609,6 +617,13 @@ final class Chrome132UITests: XCTestCase {
         let block = app.buttons["tag.library.block"]
         XCTAssertEqual(block.label, "屏蔽标签"); block.tap()
         candidate.tap(); XCTAssertTrue(rule.waitForExistence(timeout: 5))
+        let match = app.buttons["compose.rule.match.female:gaping"]
+        XCTAssertTrue(match.isHittable)
+        match.tap()
+        let exclude = app.buttons["排除"]
+        XCTAssertTrue(exclude.waitForExistence(timeout: 5))
+        exclude.tap()
+        XCTAssertEqual(match.value as? String, "排除")
         // Press the rule's category instead of the remove button or match menu.
         let categories = app.staticTexts.matching(identifier: "tag.category.female")
         XCTAssertTrue(categories.firstMatch.waitForExistence(timeout: 5))
@@ -647,6 +662,61 @@ final class Chrome132UITests: XCTestCase {
         XCTAssertTrue(app.buttons["main.tab.discover"].exists)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "feedback157.feed-error"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    func testVisibleSearchTailAutomaticallyContinuesWhenMetadataFinishes() {
+        let app = launch(["--qa-feed-cache", "--qa-feed-short-page", "--qa-feed-cache-run", UUID().uuidString])
+        app.buttons["discover.lane.3"].tap()
+        app.buttons["discover.search-entry"].tap()
+        let input = app.textFields["compose.text"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap(); input.typeText("neutral")
+        app.buttons["compose.apply"].tap()
+
+        XCTAssertTrue(app.buttons["gallery.open.900001"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["gallery.open.900025"].waitForExistence(timeout: 8),
+                      "The visible tail must start the next page when the pager becomes ready")
+    }
+
+    func testReopeningSearchShowsActiveAdvancedFilters() {
+        let app = launch()
+        app.buttons["discover.lane.3"].tap()
+        let search = app.buttons["discover.search-entry"]
+        search.tap()
+        let filters = app.buttons["compose.filters"]
+        XCTAssertTrue(filters.waitForExistence(timeout: 5))
+        filters.tap()
+        let minimum = app.textFields["compose.min-pages"]
+        XCTAssertTrue(minimum.waitForExistence(timeout: 5))
+        minimum.tap(); minimum.typeText("150")
+        app.buttons["compose.apply"].tap()
+        XCTAssertTrue(search.waitForExistence(timeout: 8))
+        XCTAssertTrue((search.value as? String)?.contains("150") == true)
+        search.tap()
+        XCTAssertTrue(minimum.waitForExistence(timeout: 5))
+        XCTAssertEqual(filters.value as? String, "已展开")
+        XCTAssertEqual(minimum.value as? String, "150")
+    }
+
+    func testPartialSearchResultsCanContinueWithoutRetryingTheSamePage() {
+        let app = launch(["--qa-feed-cache", "--qa-feed-partial-first-page", "--qa-feed-cache-run", UUID().uuidString])
+        app.buttons["discover.lane.3"].tap()
+        app.buttons["discover.search-entry"].tap()
+        let input = app.textFields["compose.text"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap(); input.typeText("neutral")
+        app.buttons["compose.apply"].tap()
+
+        let retry = app.buttons["gallery.continue"]
+        let next = app.buttons["gallery.continue-next"]
+        XCTAssertTrue(next.waitForExistence(timeout: 8))
+        XCTAssertTrue(retry.isHittable)
+        XCTAssertEqual(retry.label, "重试加载")
+        XCTAssertTrue(next.isHittable)
+        XCTAssertGreaterThanOrEqual(next.frame.minY, retry.frame.maxY)
+        next.tap()
+        XCTAssertTrue(app.buttons["gallery.open.900025"].waitForExistence(timeout: 8))
+        XCTAssertTrue(next.waitForNonExistence(timeout: 5))
     }
 
     func test156CategoryActionsUseTheirVisibleTargetsAndValidateOnlyOnSubmit() {
@@ -859,6 +929,52 @@ final class Chrome132UITests: XCTestCase {
             shot.lifetime = .keepAlways; self.add(shot)
         }
     }
+    func testKeywordClearPreservesFiltersAndExpandedFormClearsAboveTabBar() {
+        let app = launch()
+        app.buttons["discover.lane.3"].tap()
+        app.buttons["discover.search-entry"].tap()
+
+        let keyword = app.textFields["compose.text"]
+        let clearKeyword = app.buttons["compose.clear-keyword"]
+        XCTAssertTrue(clearKeyword.waitForExistence(timeout: 5))
+        XCTAssertFalse(clearKeyword.isEnabled)
+        app.buttons["compose.filters"].tap()
+        app.buttons["compose.tags.disclosure"].tap()
+
+        let author = app.textFields["compose.artist"]
+        XCTAssertTrue(author.waitForExistence(timeout: 5))
+        for _ in 0..<4 { if author.isHittable { break }; app.swipeUp() }
+        author.tap()
+        author.typeText("Sample Author")
+        for _ in 0..<5 { if keyword.isHittable { break }; app.swipeDown() }
+        keyword.tap()
+        keyword.typeText("sample keyword")
+        XCTAssertTrue(clearKeyword.isHittable)
+        clearKeyword.tap()
+        XCTAssertEqual(keyword.value as? String, keyword.placeholderValue)
+        XCTAssertFalse(clearKeyword.isEnabled)
+        XCTAssertEqual(author.value as? String, "Sample Author")
+        keyword.typeText("\n")
+
+        let clearAll = app.buttons["compose.clear"]
+        let tab = app.buttons["main.tab.discover"]
+        for _ in 0..<8 {
+            if clearAll.isHittable, clearAll.frame.maxY <= tab.frame.minY { break }
+            scrollComposerUp(app)
+        }
+        XCTAssertTrue(clearAll.isHittable)
+        XCTAssertLessThanOrEqual(clearAll.frame.maxY, tab.frame.minY)
+        clearAll.tap()
+        XCTAssertTrue(app.staticTexts["compose.clear-feedback"].waitForExistence(timeout: 2))
+        XCTAssertFalse(clearAll.isEnabled)
+    }
+
+    private func scrollComposerUp(_ app: XCUIApplication) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.72))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.26))
+        start.press(forDuration: 0.05, thenDragTo: end)
+    }
+
     func test145SearchPrioritizesTagAndInputConditionsAndKeepsHistoryActionsSeparate() {
         let app = launch()
         app.buttons["discover.lane.3"].tap(); selected(app, "discover.lane.3")

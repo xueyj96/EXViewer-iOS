@@ -8,7 +8,7 @@ struct GalleryContinuationFooter: View {
         return pager.interrupted || pager.failure != nil || pager.next != nil
     }
     var body: some View {
-        Group {
+        VStack(spacing: FeedChrome.panelSpacing) {
             if pager.loading {
                 if pager.loadingPresentation != .hidden {
                     GalleryLoadingIndicator(label: pager.loadingPresentation == .initial ? "正在载入" : "正在加载更多")
@@ -16,6 +16,9 @@ struct GalleryContinuationFooter: View {
                 }
             } else if pager.interrupted || pager.failure != nil {
                 continuationButton(pager.failure == nil ? "继续加载" : "重试加载") { pager.retry(session: session) }
+                if pager.canContinueAfterFailure {
+                    continuationButton("继续加载下一页", identifier: "gallery.continue-next") { pager.more(session: session) }
+                }
             } else if pager.next != nil {
                 continuationButton("继续加载") { pager.more(session: session) }
             }
@@ -24,7 +27,7 @@ struct GalleryContinuationFooter: View {
         .appToast(message: pager.failure, identifier: "gallery.load-error")
     }
 
-    private func continuationButton(_ title: String, action: @escaping () -> Void) -> some View {
+    private func continuationButton(_ title: String, identifier: String = "gallery.continue", action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(FeedChrome.labelFont)
                 .frame(maxWidth: .infinity, minHeight: FeedChrome.compactFormRowHeight)
@@ -34,7 +37,7 @@ struct GalleryContinuationFooter: View {
         .foregroundStyle(Color.accentColor)
         .appControlSurface()
         .padding(.horizontal, FeedChrome.contentInset)
-        .accessibilityIdentifier("gallery.continue")
+        .accessibilityIdentifier(identifier)
     }
 }
 
@@ -66,7 +69,7 @@ struct GalleryFeedStatus: View {
     var body: some View {
         Group {
             if pager.items.isEmpty && !pager.interrupted {
-                if pager.loading || pager.failure != nil {
+                if pager.loading || pager.failure != nil || pager.next != nil {
                     GalleryContinuationFooter(pager: pager)
                 } else {
                     GalleryEmptyState().accessibilityIdentifier("gallery.empty")

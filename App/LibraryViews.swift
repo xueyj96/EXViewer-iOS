@@ -385,6 +385,8 @@ struct LibraryView: View {
     @State private var readLaterFilter: ReadLaterFilter = .all
     @State private var sortOrders: [LibrarySortSection: LibrarySortOrder] = [:]
     @StateObject private var localSelection = LibrarySelectionStore()
+    @StateObject private var favoriteBrowsing = FavoriteBrowsingSessions()
+    @EnvironmentObject private var session: SiteSession
     @State private var selectingLocal = false
     @State private var confirmingLocalRemoval = false
     @State private var removingDownloads = false
@@ -410,7 +412,11 @@ struct LibraryView: View {
 
     var body: some View {
         HeaderSectionPages(selection: scope, topInset: FeedChrome.headerClearance(twoRows: true)) { paneScope, active in
-            if paneScope == 1 { CloudFavoritesView(site: $site, scope: $scope, isActive: isActive && active) }
+            if paneScope == 1 {
+                let browsing = favoriteBrowsing.entry(owner: session.owner, generation: session.generation, site: site)
+                CloudFavoritesView(site: $site, scope: $scope, isActive: isActive && active, browsing: browsing)
+                    .id(browsing.id)
+            }
             else if paneScope == 2 { ReadingHistoryView(placement: .library($scope)) }
             else { localLibrary(paneScope) }
         }
@@ -420,7 +426,16 @@ struct LibraryView: View {
         .headerSectionPaging(selection: $scope, count: 4, identifier: "library.scope", enabled: isActive,
                              identity: site.rawValue)
         .toolbar(.hidden, for: .navigationBar)
-        .onAppear { sortOrders = sortPreferences.load() }
+        .onAppear {
+            sortOrders = sortPreferences.load()
+            favoriteBrowsing.retainScope(owner: session.owner, generation: session.generation)
+        }
+        .onChange(of: session.generation) { _, _ in
+            favoriteBrowsing.retainScope(owner: session.owner, generation: session.generation)
+        }
+        .onChange(of: session.owner) { _, _ in
+            favoriteBrowsing.retainScope(owner: session.owner, generation: session.generation)
+        }
         .onChange(of: library.owner) { _, _ in sortOrders = sortPreferences.load() }
         .onChange(of: scope) { _, _ in endLocalSelection() }
         .onChange(of: library.owner) { _, _ in
@@ -736,17 +751,32 @@ struct CloudFavoritesView: View {
     @EnvironmentObject private var session: SiteSession
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dynamicTypeSize) private var typeSize
-    @StateObject private var pager = GalleryPager()
+    @ObservedObject private var pager: GalleryPager
+    @ObservedObject private var browsing: FavoriteBrowsingSession
     @StateObject private var pullRefresh = FeedPullRefresh()
     @StateObject private var selectionStore = LibrarySelectionStore()
     @StateObject private var submission = FavoriteBatchSubmission()
     @State private var web: WebDestination?
-    @State private var category = "all"
+    private var category: String {
+        get { browsing.category }
+        nonmutating set { browsing.category = newValue }
+    }
     @State private var selecting = false
     @State private var initialLayoutReady = false
-    @State private var seenRemovals: [String: UUID] = [:]
-    @State private var visibleGalleryID: String?
-    @State private var anchorAfterRemoval: String?
+    @State private var restoring = true
+    @State private var nativeScrollAnchor: String?
+    private var seenRemovals: [String: UUID] {
+        get { browsing.seenRemovals }
+        nonmutating set { browsing.seenRemovals = newValue }
+    }
+    private var visibleGalleryID: String? {
+        get { browsing.visibleGalleryID }
+        nonmutating set { browsing.visibleGalleryID = newValue }
+    }
+    private var anchorAfterRemoval: String? {
+        get { browsing.anchorAfterRemoval }
+        nonmutating set { browsing.anchorAfterRemoval = newValue }
+    }
     @State private var confirmingRemoval = false
     @State private var moveSelection: MoveSelection?
     @State private var qaFavoriteAttemptCount = 0
@@ -756,13 +786,19 @@ struct CloudFavoritesView: View {
         let owner: String
         let generation: UUID
     }
-    private struct RequestedSource: Equatable {
-        let url: URL
-        let generation: UUID
-        let owner: String
-        let favoritesRevision: UUID
+    private typealias RequestedSource = FavoriteBrowsingRequest
+    private var requestedSource: RequestedSource? {
+        get { browsing.requestedSource }
+        nonmutating set { browsing.requestedSource = newValue }
     }
-    @State private var requestedSource: RequestedSource?
+
+    init(site: Binding<GallerySite>, scope: Binding<Int>, isActive: Bool = true,
+         browsing: FavoriteBrowsingSession) {
+        _site = site; _scope = scope; self.isActive = isActive
+        _browsing = ObservedObject(wrappedValue: browsing)
+        _pager = ObservedObject(wrappedValue: browsing.pager)
+        _nativeScrollAnchor = State(initialValue: browsing.visibleGalleryID)
+    }
     private var displayedItems: [Gallery] {
         AppMode.qa && ProcessInfo.processInfo.arguments.contains("--qa-library-large-selection")
             ? LibrarySelectionQA.galleries : pager.items
@@ -845,7 +881,6 @@ struct CloudFavoritesView: View {
         }
         .onChange(of: library.blockedIDs) { _, _ in selectionStore.clear(); selecting = false; prepareVisible() }
         .onChange(of: category) { _, _ in selectionStore.clear(); selecting = false; reload(force: false) }
-        .onChange(of: site) { _, _ in submission.cancel(); submission.dismissNotice(); selectionStore.clear(); selecting = false; category = "all"; reload(force: false) }
         .onChange(of: session.hasCredentials) { _, _ in reload(force: false) }
         .onChange(of: session.favoritesRevision) { _, _ in reload(force: false) }
         .onReceive(session.favoriteStateCache.$confirmedRemovals, perform: applyConfirmedRemovals)
@@ -853,11 +888,11 @@ struct CloudFavoritesView: View {
         .onChange(of: session.owner) { _, _ in accountChanged() }
         .onChange(of: isActive) { _, active in
             if active { reload(force: false) }
-            else { initialLayoutReady = false; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false }
+            else { initialLayoutReady = false; restoring = true; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false }
         }
         .onDisappear {
             guard moveSelection == nil else { return }
-            initialLayoutReady = false; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false
+            initialLayoutReady = false; restoring = true; submission.cancel(); pager.cancel(); selectionStore.clear(); selecting = false
         }
     }
 
@@ -869,15 +904,16 @@ struct CloudFavoritesView: View {
                     LazyVStack(spacing: 0) {
                         GalleryRows(galleries: displayedItems,
                                     sourceIdentity: "\(site.rawValue):\(category):\(sortOrder.rawValue)",
+                                    placementMemory: browsing.gridMemory,
                                     selectionStore: selectionStore, isSelecting: selecting, isLoading: pager.loading, loadFailure: pager.failure,
                                     openIdentifier: "favorites.gallery",
                                     onLongPressSelect: beginSelection(at:),
                                     onNearEnd: {
-                                        if isActive && initialLayoutReady && !selecting && anchorAfterRemoval == nil && pager.failure == nil {
+                                        if isActive && initialLayoutReady && !restoring && !selecting && anchorAfterRemoval == nil && pager.failure == nil {
                                             pager.more(session: session, prefetch: true)
                                         }
-                                    }, viewport: viewport, onVisibleAnchor: {
-                                        if anchorAfterRemoval == nil { visibleGalleryID = $0 }
+                                    }, viewport: viewport, onVisibleAnchor: { _ in
+                                        // Keep removal markers; native scrollPosition owns viewport identity.
                                     })
                         if !selecting && !pager.items.isEmpty { GalleryContinuationFooter(pager: pager) }
                     }
@@ -890,6 +926,10 @@ struct CloudFavoritesView: View {
                     if !selecting { GalleryFeedStatus(pager: pager).padding(.top, headerHeight) }
                 }
                 .coordinateSpace(name: viewport.space)
+                .scrollPosition(id: $nativeScrollAnchor, anchor: viewport.restorationAlignment)
+                .onChange(of: nativeScrollAnchor) { _, anchor in
+                    if isActive && !restoring, let anchor { visibleGalleryID = anchor }
+                }
                 .feedPullRefresh(pullRefresh, topInset: headerHeight, enabled: !working && isActive) {
                     if !working {
                         selectionStore.clear()
@@ -907,13 +947,17 @@ struct CloudFavoritesView: View {
                     }
                 }
                 .contentMargins(.top, headerHeight, for: .scrollIndicators)
-                .task(id: isActive ? headerHeight : -1) {
+                .task(id: isActive ? headerHeight : -headerHeight) {
                     initialLayoutReady = false
-                    guard isActive, headerHeight > 0 else { return }
+                    guard headerHeight > 0 else { return }
+                    // The native ID binding is seeded in init before this pane
+                    // lays out. Do not issue a second scroll after it appears.
                     await Task.yield()
                     try? await Task.sleep(nanoseconds: 120_000_000)
-                    guard !Task.isCancelled, isActive else { return }
-                    initialLayoutReady = true
+                    guard !Task.isCancelled else { return }
+                    restoring = false
+                    initialLayoutReady = isActive
+                    if isActive, let nativeScrollAnchor { visibleGalleryID = nativeScrollAnchor }
                 }
                 .task(id: anchorAfterRemoval) {
                     guard let anchor = anchorAfterRemoval else { return }
@@ -1148,6 +1192,7 @@ struct CloudFavoritesView: View {
         if requestedSource?.url != source.url || requestedSource?.generation != source.generation {
             visibleGalleryID = nil
             anchorAfterRemoval = nil
+            nativeScrollAnchor = nil
         }
         requestedSource = source
         seenRemovals = session.favoriteStateCache.confirmedRemovals

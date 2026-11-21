@@ -300,14 +300,18 @@ final class ReaderV8UITests: XCTestCase {
     }
 
     func testReverseContinuousLoadMoreKeepsPageAndCanSeekNewLastPage() {
-        let app = launchReaderThroughDiscovery(extraArguments: ["--qa-reader-paging"])
+        continueAfterFailure = false
+        let app = launchReaderThroughDiscovery(extraArguments: [
+            "--qa-reader-transition", "--qa-reader-paging", "--qa-prefetch=0"
+        ])
+        ReaderSettingsUIHelpers.setMode("连续模式", in: app)
         setDirection("bottomToTop", in: app)
-        app.swipeDown()
+        app.sliders["reader.progress"].adjust(toNormalizedSliderPosition: 0.5)
         waitForPage("2 / 3", in: app)
 
         let loadMore = app.buttons["reader.load-more"]
         XCTAssertTrue(loadMore.waitForExistence(timeout: 5), "Reverse continuous layout must expose load-more before the reversed page sequence")
-        for _ in 0..<4 { if loadMore.isHittable { break }; app.swipeUp() }
+        for _ in 0..<4 { if loadMore.isHittable { break }; app.swipeDown() }
         XCTAssertTrue(loadMore.isHittable, "Load-more at the reverse sequence boundary must be reachable")
         loadMore.tap()
 
@@ -319,6 +323,34 @@ final class ReaderV8UITests: XCTestCase {
         XCTAssertTrue(slider.exists)
         slider.adjust(toNormalizedSliderPosition: 1)
         waitForPage("3 / 3", in: app, timeout: 8)
+    }
+
+    func testPaginationFailureRetriesAtTheListBoundaryAndKeepsCurrentPage() {
+        continueAfterFailure = false
+        let app = launchReaderThroughDiscovery(extraArguments: [
+            "--qa-reader-transition", "--qa-reader-paging", "--qa-prefetch=0",
+            "--qa-reader-metadata-failure-once", "--qa-metadata-ms=2200"
+        ])
+        ReaderSettingsUIHelpers.setMode("连续模式", in: app)
+        setDirection("topToBottom", in: app)
+        app.sliders["reader.progress"].adjust(toNormalizedSliderPosition: 0.5)
+        waitForPage("2 / 3", in: app)
+        let loadMore = app.buttons["reader.load-more"]
+        XCTAssertTrue(loadMore.waitForExistence(timeout: 5))
+        for _ in 0..<4 { if loadMore.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(loadMore.isHittable)
+        loadMore.tap()
+
+        let retry = app.buttons["reader.pagination.retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertTrue(retry.isHittable)
+        XCTAssertFalse(app.buttons["reader.metadata.retry"].exists)
+        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 3")
+        retry.tap()
+        XCTAssertTrue(retry.waitForNonExistence(timeout: 4))
+        XCTAssertFalse(app.buttons["reader.metadata.retry"].exists)
+        XCTAssertTrue(loadMore.waitForNonExistence(timeout: 8))
+        XCTAssertEqual(app.buttons["reader.page"].label, "2 / 3")
     }
 
     func testPendingPaginationKeepsTheUsersNewerPageChoice() {

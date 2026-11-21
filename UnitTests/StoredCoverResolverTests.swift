@@ -22,6 +22,8 @@ import ExViewerCore
         defer { try? FileManager.default.removeItem(at: root) }
         let library = LibraryStore(qa: true, storageRoot: root)
         let original = gallery(701); library.bookmark(original); library.remember(original, page: 3)
+        let checkpointSaved = await library.flushReadingHistory()
+        XCTAssertTrue(checkpointSaved)
         let file = library.directory.appendingPathComponent("library.json"), before = try Data(contentsOf: file)
         let reopened = LibraryStore(qa: true, storageRoot: root)
         let saved = try XCTUnwrap(reopened.snapshot.bookmarks.first)

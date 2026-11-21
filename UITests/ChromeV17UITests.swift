@@ -716,7 +716,7 @@ final class ChromeV17UITests: XCTestCase {
         XCTAssertTrue(applied?.contains("coast") == true)
         authorComposer(app, text: "coast")
         app.buttons["compose.clear"].tap()
-        XCTAssertTrue(app.staticTexts["compose.cleared-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["compose.clear-feedback"].waitForExistence(timeout: 2))
         XCTAssertEqual(app.textFields["compose.text"].value as? String, app.textFields["compose.text"].placeholderValue)
         app.buttons["compose.cancel"].tap()
         XCTAssertTrue(summary.waitForExistence(timeout: 5))

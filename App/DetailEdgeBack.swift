@@ -516,12 +516,14 @@ private struct DetailEdgeBackBridge: UIViewControllerRepresentable {
             let coverage = window.convert(window.bounds, to: view)
             let captureOrigin = CGPoint(x: sourceFrame.minX - coverage.minX,
                                         y: sourceFrame.minY - coverage.minY)
+            let rasterStarted = ProcessInfo.processInfo.systemUptime
             let image = UIGraphicsImageRenderer(size: coverage.size).image { context in
                 context.cgContext.setFillColor(UIColor.systemGroupedBackground.resolvedColor(with: previous.view.traitCollection).cgColor)
                 context.cgContext.fill(CGRect(origin: .zero, size: coverage.size))
                 context.cgContext.translateBy(x: captureOrigin.x, y: captureOrigin.y)
                 previous.view.layer.render(in: context.cgContext)
             }
+            ReaderNetworkMetrics.record(UUID(), phase: "detail-return-raster", started: rasterStarted)
             let imageView = UIImageView(image: image)
             imageView.frame = coverage
             imageView.contentMode = .topLeft
@@ -551,7 +553,9 @@ struct PageReturnPreview {
     var probe: some View { Probe(source: self).allowsHitTesting(false) }
     func capture() -> PageReturnPreview? {
         guard let window = surface?.window, window.bounds.width > 0 else { return nil }
+        let rasterStarted = ProcessInfo.processInfo.systemUptime
         let image = UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) }
+        ReaderNetworkMetrics.record(UUID(), phase: "reader-source-raster", started: rasterStarted)
         return PageReturnPreview(image: image, size: window.bounds.size)
     }
     private struct Probe: UIViewRepresentable {

@@ -1,0 +1,61 @@
+{
+  "version": "1.1.0",
+  "build": 178,
+  "previous_public_build": 168,
+  "verification": {
+    "core": {
+      "passed": 85,
+      "failed": 0,
+      "scope": "Full Core Swift package suite"
+    },
+    "app_units": {
+      "passed": 471,
+      "failed": 0,
+      "scope": "Full ExViewerTests target on iOS Simulator",
+      "fixture_recheck": "Two reader diagnostics fixtures failed on the first run. The full suite passed after their test isolation and waiting conditions were corrected."
+    },
+    "targeted_recheck": {
+      "passed": 3,
+      "failed": 0,
+      "additional_distinct_tests": 0,
+      "scope": "One search test covers disk reuse and explicit-refresh ordering. Two reader tests cover adjacent request promotion and speculative slot admission."
+    },
+    "simulator_ui": {
+      "distinct_passed": 3,
+      "failed": 0,
+      "scope": [
+        "Partial search results can continue without repeating the failed page",
+        "Visible search tail continues when metadata is ready",
+        "A cached adjacent reader page keeps its presentation identity on a round trip"
+      ]
+    },
+    "phone": {
+      "configuration": "Release",
+      "version_read_back": "1.1.0 (178)",
+      "overlay_installed": true,
+      "launched": true,
+      "records_byte_identical": [
+        "library.json",
+        "recent-searches.json",
+        "site-favorites.json",
+        "history-progress.json"
+      ],
+      "same_paths_and_sizes": {
+        "offline_files": 3186,
+        "media_cache_files": 13690,
+        "feed_cache_files": 15
+      }
+    }
+  },
+  "public_package": {
+    "configuration": "Release",
+    "personal_signing_included": false,
+    "requires_user_signing": true,
+    "identity_and_integrity": "See build-manifest.json, source-commit.txt and SHA256SUMS in the public release"
+  },
+  "limits": [
+    "The simulator interface runs cover three selected scenarios",
+    "Phone verification covers installation, launch and on-device data continuity",
+    "No new end-to-end phone timing for reader page turns or search scroll-to-tail is reported for Build 178"
+  ]
+}

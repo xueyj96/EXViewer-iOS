@@ -1,7 +1,8 @@
 import Foundation
 
 /// Coalesce checkpoints during page motion. The reader flushes at rest, before
-/// dismissal and on backgrounding; LibraryStore retains its serialized commit.
+/// dismissal and on backgrounding; LibraryStore owns the coalesced off-main
+/// history writer and a lifecycle flush with a short background grant.
 @MainActor final class ReaderHistoryCheckpoint {
     private var pendingPage: Int?
     private let isCurrent: () -> Bool

@@ -2,14 +2,14 @@ import SwiftUI
 import ExViewerCore
 
 extension SiteSession {
-    func toggleSiteFavorite(_ gallery: Gallery) throws {
+    func toggleSiteFavorite(_ gallery: Gallery) async throws {
         guard hasCredentials || AppMode.qa else { throw ViewerError.authentication }
         let group = favoriteGroups.defaultGroup(owner: owner, site: gallery.ref.site)
-        try favoriteStateCache.enqueueToggle(scope: .init(gallery, self), client: favoriteClient(for: gallery, session: self),
+        try await favoriteStateCache.enqueueToggle(scope: .init(gallery, self), client: favoriteClient(for: gallery, session: self),
                                             group: group, groupName: favoriteGroups.name(group, owner: owner, site: gallery.ref.site), title: gallery.title)
     }
 
-    @discardableResult func addToDefaultFavorites(_ galleries: [Gallery]) throws -> Int {
+    @discardableResult func addToDefaultFavorites(_ galleries: [Gallery]) async throws -> Int {
         guard hasCredentials || AppMode.qa else { throw ViewerError.authentication }
         // Persist all intents before any network work; each worker checks whether
         // the gallery is already favorited and preserves its existing category.
@@ -20,7 +20,7 @@ extension SiteSession {
                                                    title: gallery.title, groupName: favoriteGroups.name(group, owner: owner, site: site),
                                                    group: group)
         }
-        return try favoriteStateCache.enqueueAdditions(additions, group: 0)
+        return try await favoriteStateCache.enqueueAdditions(additions, group: 0)
     }
 
 }
@@ -98,7 +98,7 @@ extension SiteSession {
         let previous = session.favoriteGroups.names(owner: owner, site: site) ?? form.names
         // Persist the cache migration first: failed storage must not destroy the
         // old name mapping required by a later retry.
-        try session.favoriteStateCache.updateGroupNames(site: site, before: previous, after: form.names)
+        try await session.favoriteStateCache.updateGroupNames(site: site, before: previous, after: form.names)
         session.favoriteGroups.setNames(form.names, owner: owner, site: site)
         await FeedSnapshotCache.shared.invalidateFavorites(owner: owner)
         guard isCurrent else { throw ViewerError.stale }
